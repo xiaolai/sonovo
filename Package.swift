@@ -19,7 +19,8 @@ let package = Package(
             resources: [
                 .copy("Resources/ghostty"),
                 .copy("Resources/ghostty-themes"),
-                .copy("Resources/terminfo")
+                .copy("Resources/terminfo"),
+                .copy("Resources/version.txt")
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),

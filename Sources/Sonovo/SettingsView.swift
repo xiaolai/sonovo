@@ -123,6 +123,10 @@ struct SettingsView: View {
                     Text("Open the most recent production at launch.")
                 }
             }
+
+            Text("Sonovo \(AppVersion.current)")
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.tertiary)
         }
     }
 
