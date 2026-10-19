@@ -278,6 +278,8 @@ struct InspectorView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Add note")
+                .accessibilityLabel("Add note")
             }
             .padding(.horizontal, AppTheme.Spacing.sm)
             .frame(height: AppTheme.ControlSize.large)
@@ -623,6 +625,7 @@ struct InspectorView: View {
             .buttonStyle(.plain)
             .disabled(state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .help("Add note")
+            .accessibilityLabel("Add note")
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
         .frame(height: AppTheme.ControlSize.large)

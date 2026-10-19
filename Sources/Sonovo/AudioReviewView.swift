@@ -43,13 +43,12 @@ struct AudioReviewView: View {
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
-            Button {
+            BarIconButton(
+                systemName: "rectangle.split.2x1",
+                help: "Compare takes"
+            ) {
                 state.editorMode = .compare
-            } label: {
-                Label("Compare", systemImage: "rectangle.split.2x1")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
 
             if state.status(for: asset) == .approved {
                 Label("Approved", systemImage: "checkmark.circle.fill")
@@ -145,35 +144,23 @@ struct AudioReviewView: View {
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
-            Button {
+            BarIconButton(systemName: "play.fill", help: "Play from here") {
                 if let segment = state.selectedTranscript {
                     state.playhead = segment.start
                     state.isPlaying = true
                 }
-            } label: {
-                Label("Play from Here", systemImage: "play.fill")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
             .disabled(state.selectedTranscript == nil)
 
-            Button {
+            BarIconButton(systemName: "text.bubble", help: "Add note") {
                 state.inspectorVisible = true
                 state.inspectorTab = .notes
-            } label: {
-                Label("Add Note", systemImage: "text.bubble")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
 
             if let asset = state.selectedAsset {
-                Button {
+                BarIconButton(systemName: "arrow.uturn.backward", help: "Request change") {
                     state.requestChange(for: asset)
-                } label: {
-                    Label("Request Change…", systemImage: "arrow.uturn.backward")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         }
         .padding(.horizontal, AppTheme.Spacing.md)
@@ -254,13 +241,12 @@ struct AudioCompareView: View {
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
 
-                Button {
+                BarIconButton(
+                    systemName: state.isPlaying ? "pause.fill" : "play.fill",
+                    help: state.isPlaying ? "Pause both" : "Play both"
+                ) {
                     state.togglePlayback()
-                } label: {
-                    Label(state.isPlaying ? "Pause Both" : "Play Both", systemImage: state.isPlaying ? "pause.fill" : "play.fill")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
 
             compareCard(

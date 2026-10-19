@@ -148,13 +148,9 @@ struct TranscriptView: View {
             Spacer()
 
             if let asset = state.selectedAsset {
-                Button {
+                BarIconButton(systemName: "text.bubble", help: "Request change") {
                     state.requestChange(for: asset)
-                } label: {
-                    Label("Request Change…", systemImage: "text.bubble")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         }
         .padding(.top, AppTheme.Spacing.lg)

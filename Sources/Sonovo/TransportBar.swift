@@ -43,17 +43,16 @@ struct TransportBar: View {
                 .font(.system(size: AppTheme.TypeScale.xs, design: .monospaced))
                 .foregroundStyle(.tertiary)
 
-            Button("Restore Editor") {
+            BarIconButton(
+                systemName: "rectangle.split.2x1",
+                help: "Restore editor"
+            ) {
                 state.terminalPresentation = .split
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
 
-            Button("Hide") {
+            BarIconButton(systemName: "xmark", help: "Hide terminal") {
                 state.terminalPresentation = .hidden
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.horizontal, AppTheme.Spacing.lg)
     }

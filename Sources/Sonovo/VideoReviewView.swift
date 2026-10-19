@@ -47,13 +47,12 @@ struct VideoReviewView: View {
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
-            Button {
+            BarIconButton(
+                systemName: "rectangle.split.2x1",
+                help: "Compare takes"
+            ) {
                 state.editorMode = .compare
-            } label: {
-                Label("Compare", systemImage: "rectangle.split.2x1")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
 
             if state.status(for: asset) == .approved {
                 Label("Approved", systemImage: "checkmark.circle.fill")
@@ -156,7 +155,7 @@ struct VideoStageView: View {
                             Button {
                                 state.editorMode = .compare
                             } label: {
-                                Label("A/B", systemImage: "rectangle.split.2x1")
+                                Image(systemName: "rectangle.split.2x1")
                                     .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
                                     .padding(.horizontal, AppTheme.Spacing.sm)
                                     .padding(.vertical, AppTheme.Spacing.xs)
@@ -165,6 +164,7 @@ struct VideoStageView: View {
                             .buttonStyle(.plain)
                             .foregroundStyle(AppTheme.Palette.white)
                             .help("Compare takes")
+                            .accessibilityLabel("Compare takes")
                         }
 
                         Spacer()
@@ -266,13 +266,12 @@ struct VideoCompareView: View {
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.secondary)
 
-            Button {
+            BarIconButton(
+                systemName: state.isPlaying ? "pause.fill" : "play.fill",
+                help: state.isPlaying ? "Pause both" : "Play both"
+            ) {
                 state.togglePlayback()
-            } label: {
-                Label(state.isPlaying ? "Pause Both" : "Play Both", systemImage: state.isPlaying ? "pause.fill" : "play.fill")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
     }
 
