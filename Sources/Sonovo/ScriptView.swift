@@ -36,7 +36,7 @@ struct ScriptView: View {
     """
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        HStack(alignment: .top, spacing: AppTheme.Spacing.zero) {
             ScrollView {
                 page
                     .frame(maxWidth: AppTheme.Layout.scriptPageMaxWidth)
@@ -45,9 +45,9 @@ struct ScriptView: View {
                     .frame(maxWidth: .infinity)
             }
 
-            formattingBar
-                .padding(.top, AppTheme.Spacing.lg)
-                .padding(.trailing, AppTheme.Spacing.xl)
+            formattingRail
+                .padding(.top, AppTheme.Spacing.xl)
+                .padding(.trailing, AppTheme.Spacing.md)
         }
     }
 
@@ -215,8 +215,8 @@ struct ScriptView: View {
         .padding(.vertical, AppTheme.Spacing.sm)
     }
 
-    private var formattingBar: some View {
-        HStack(spacing: AppTheme.Spacing.hairline) {
+    private var formattingRail: some View {
+        VStack(spacing: AppTheme.Spacing.xxs) {
             formatButton("bold", help: "Bold")
             formatButton("italic", help: "Italic")
             formatButton("strikethrough", help: "Strikethrough")
@@ -225,30 +225,43 @@ struct ScriptView: View {
             formatButton("text.quote", help: "Quote")
             formatButton("chevron.left.forwardslash.chevron.right", help: "Code")
 
-            Picker("Markdown Mode", selection: $state.scriptRendered) {
-                Image(systemName: "doc.richtext")
-                    .accessibilityLabel("Rendered")
-                    .tag(true)
-                Image(systemName: "doc.plaintext")
-                    .accessibilityLabel("Source")
-                    .tag(false)
+            VStack(spacing: AppTheme.Spacing.xxs) {
+                modeButton(rendered: true)
+                modeButton(rendered: false)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: AppTheme.Size.markdownModePickerWidth)
-            .padding(.leading, AppTheme.Spacing.sm)
-            .help("Markdown mode: Rendered or Source")
-            .accessibilityLabel("Markdown mode")
+            .padding(.top, AppTheme.Spacing.sm)
         }
-        .padding(.horizontal, AppTheme.Spacing.s5)
-        .padding(.vertical, AppTheme.Spacing.s3)
-        .background(Capsule().fill(AppTheme.Surface.floating))
-        .overlay(
-            Capsule().strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
+        .padding(.horizontal, AppTheme.Spacing.xs)
+        .padding(.vertical, AppTheme.Spacing.s6)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
+                .fill(AppTheme.Surface.floating)
         )
         .appShadow(AppTheme.Shadow.floating)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Markdown formatting")
+    }
+
+    private func modeButton(rendered: Bool) -> some View {
+        let isSelected = state.scriptRendered == rendered
+
+        return Button {
+            state.scriptRendered = rendered
+        } label: {
+            Image(systemName: rendered ? "doc.richtext" : "doc.plaintext")
+                .font(.system(size: AppTheme.TypeScale.body, weight: .medium))
+                .frame(width: AppTheme.ControlSize.medium, height: AppTheme.ControlSize.medium)
+                .background(
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.micro, style: .continuous)
+                        .fill(isSelected ? Color.accentColor.opacity(AppTheme.Opacity.muted) : Color.clear)
+                )
+                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(rendered ? "Rendered" : "Source")
+        .accessibilityLabel(rendered ? "Rendered" : "Source")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func formatButton(_ symbol: String, help: String) -> some View {

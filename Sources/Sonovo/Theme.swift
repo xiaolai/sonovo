@@ -263,7 +263,6 @@ enum AppTheme {
         static let inlineIcon: CGFloat = 20
         static let navigatorPickerWidth: CGFloat = 76
         static let reviewModePickerWidth: CGFloat = 94
-        static let markdownModePickerWidth: CGFloat = 72
         static let formatButtonWidth: CGFloat = 22
         static let formatButtonHeight: CGFloat = 20
         static let deliveryCardMaxWidth: CGFloat = 440
