@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode and SwiftPM
+.build/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.dSYM/
+*.xcarchive/
+*.app
+*.dmg
+*.pkg
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.mobileprovision
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Package managers and local tooling
+node_modules/
+.pnpm-store/
+__pycache__/
+*.py[cod]
+.venv/
+.cc-suite/
+.claude/settings.local.json
