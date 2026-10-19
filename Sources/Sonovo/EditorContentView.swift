@@ -52,15 +52,14 @@ struct EmptyEditorView: View {
     var body: some View {
         VStack(spacing: AppTheme.Spacing.md) {
             Image(systemName: "rectangle.split.3x1")
-                .font(.system(size: 30, weight: .ultraLight))
+                .font(.system(size: AppTheme.TypeScale.displayLarge, weight: .ultraLight))
                 .foregroundStyle(.tertiary)
             Text("No Editor")
-                .font(.system(size: AppTheme.FontSize.lg, weight: .medium))
+                .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
             Text("Open an asset from the production navigator.")
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.appContent)
     }
 }

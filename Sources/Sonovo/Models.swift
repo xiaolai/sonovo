@@ -17,10 +17,10 @@ enum ReviewStatus: String, CaseIterable, Hashable, Sendable {
 
     var color: Color {
         switch self {
-        case .draft: .secondary
-        case .generating: .blue
-        case .needsReview: .orange
-        case .approved: .green
+        case .draft: AppTheme.Palette.draft
+        case .generating: AppTheme.Palette.generating
+        case .needsReview: AppTheme.Palette.needsReview
+        case .approved: AppTheme.Palette.approved
         }
     }
 

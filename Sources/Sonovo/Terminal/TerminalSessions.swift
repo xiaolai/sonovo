@@ -149,9 +149,9 @@ struct TerminalTabBar: View {
     let store: TerminalSessionsStore
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: AppTheme.Spacing.xxs) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
+                HStack(spacing: AppTheme.Spacing.xxs) {
                     ForEach(store.sessions) { session in
                         TerminalTabButton(store: store, session: session)
                     }
@@ -162,8 +162,8 @@ struct TerminalTabBar: View {
                 store.addSession()
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: AppTheme.FontSize.xs, weight: .medium))
-                    .frame(width: 20, height: 20)
+                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                    .frame(width: AppTheme.Size.addIcon, height: AppTheme.Size.addIcon)
             }
             .buttonStyle(.plain)
             .focusable(false)
@@ -188,27 +188,30 @@ private struct TerminalTabButton: View {
             Button {
                 store.select(session.id)
             } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: AppTheme.Spacing.xs) {
                     Image(systemName: "terminal")
-                        .font(.system(size: AppTheme.FontSize.xxs))
+                        .font(.system(size: AppTheme.TypeScale.xxs))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
 
                     Text(session.title)
-                        .font(.system(size: AppTheme.FontSize.xs, weight: isSelected ? .medium : .regular))
+                        .font(.system(size: AppTheme.TypeScale.xs, weight: isSelected ? .medium : .regular))
                         .lineLimit(1)
-                        .frame(maxWidth: 150, alignment: .leading)
+                        .frame(maxWidth: AppTheme.Size.terminalTabMaxWidth, alignment: .leading)
                 }
-                .padding(.leading, 7)
-                .padding(.trailing, (isHovering || isSelected) ? 20 : 7)
-                .frame(height: 22)
+                .padding(.leading, AppTheme.Spacing.s7)
+                .padding(
+                    .trailing,
+                    (isHovering || isSelected) ? AppTheme.ControlSize.small : AppTheme.Spacing.s7
+                )
+                .frame(height: AppTheme.ControlSize.regular)
                 .background(
-                    RoundedRectangle(cornerRadius: AppTheme.Radius.xs, style: .continuous)
-                        .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.clear)
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.micro, style: .continuous)
+                        .fill(isSelected ? Color.accentColor.opacity(AppTheme.Opacity.soft) : Color.clear)
                 )
                 .overlay {
                     if isSelected {
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.xs, style: .continuous)
-                            .strokeBorder(Color.accentColor.opacity(0.22), lineWidth: AppTheme.BorderWidth.hairline)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.micro, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(AppTheme.Opacity.borderStrong), lineWidth: AppTheme.BorderWidth.hairline)
                     }
                 }
                 .contentShape(Rectangle())
@@ -222,13 +225,13 @@ private struct TerminalTabButton: View {
                     store.closeSession(session.id)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 7, weight: .semibold))
+                        .font(.system(size: AppTheme.TypeScale.tiny, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
+                        .frame(width: AppTheme.Size.terminalTabClose, height: AppTheme.Size.terminalTabClose)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 3)
+                .padding(.trailing, AppTheme.Spacing.s3)
                 .accessibilityLabel("Close \(session.title)")
                 .help("Close Terminal Tab")
             }

@@ -8,7 +8,7 @@ struct EditorBreadcrumb: View {
             if let tab = state.selectedTab,
                let asset = state.production.asset(id: tab.assetID) {
                 Image(systemName: tab.kind.icon)
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
 
                 Text(state.production.title)
@@ -35,20 +35,15 @@ struct EditorBreadcrumb: View {
                 Spacer()
             }
         }
-        .font(.system(size: AppTheme.FontSize.xs))
+        .font(.system(size: AppTheme.TypeScale.xs))
         .padding(.horizontal, AppTheme.Spacing.md)
-        .frame(height: AppTheme.breadcrumbHeight)
+        .frame(height: AppTheme.Layout.breadcrumbHeight)
         .background(Color.appWindow)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.appSeparator)
-                .frame(height: AppTheme.BorderWidth.hairline)
-        }
     }
 
     private var chevron: some View {
         Image(systemName: "chevron.right")
-            .font(.system(size: 7, weight: .semibold))
+            .font(.system(size: AppTheme.TypeScale.tiny, weight: .semibold))
             .foregroundStyle(.tertiary)
     }
 }

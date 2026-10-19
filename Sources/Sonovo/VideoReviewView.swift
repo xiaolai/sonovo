@@ -21,7 +21,7 @@ struct VideoReviewView: View {
                 takeLabel: "TAKE 03",
                 status: state.status(for: asset)
             )
-            .frame(maxWidth: 900)
+            .frame(maxWidth: AppTheme.Layout.mediaMaxWidth)
 
             shotsCard
         }
@@ -31,17 +31,17 @@ struct VideoReviewView: View {
 
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 HStack(spacing: AppTheme.Spacing.sm) {
                     Text(asset.name)
-                        .font(.system(size: AppTheme.FontSize.lg, weight: .semibold))
+                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
                         .lineLimit(1)
 
                     StatusBadge(status: state.status(for: asset))
                 }
 
                 Text("\(asset.shortDetail) · 24 fps · Rec. 709")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
 
@@ -57,8 +57,8 @@ struct VideoReviewView: View {
 
             if state.status(for: asset) == .approved {
                 Label("Approved", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: AppTheme.FontSize.xs, weight: .medium))
-                    .foregroundStyle(.green)
+                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                    .foregroundStyle(AppTheme.Palette.approved)
             } else {
                 Button {
                     state.approve(asset)
@@ -75,13 +75,13 @@ struct VideoReviewView: View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
             HStack(spacing: AppTheme.Spacing.sm) {
                 Text("Shots")
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
                 Text("8 shots · 4 approved")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text("Select a frame to review")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.tertiary)
             }
 
@@ -96,19 +96,19 @@ struct VideoReviewView: View {
                                     palette: CoastalPalette.stills[index % CoastalPalette.stills.count],
                                     showsBoat: index % 2 == 0
                                 )
-                                .frame(width: 116, height: 65)
+                                .frame(width: AppTheme.Size.thumbnailWidth, height: AppTheme.Size.thumbnailHeight)
 
                                 Text(String(format: "00:%02d", index * 2))
-                                    .font(.system(size: AppTheme.FontSize.xxs, design: .monospaced))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(.black.opacity(0.45)))
-                                    .padding(4)
+                                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
+                                    .foregroundStyle(AppTheme.Palette.white)
+                                    .padding(.horizontal, AppTheme.Spacing.xs)
+                                    .padding(.vertical, AppTheme.Spacing.xxs)
+                                    .background(Capsule().fill(AppTheme.Palette.black.opacity(AppTheme.Opacity.wash)))
+                                    .padding(AppTheme.Spacing.xs)
                             }
-                            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous))
                             .overlay(
-                                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+                                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                                     .strokeBorder(
                                         state.selectedShotIndex == index ? Color.accentColor : Color.clear,
                                         lineWidth: AppTheme.BorderWidth.thick
@@ -134,22 +134,22 @@ struct VideoStageView: View {
 
     var body: some View {
         Color.clear
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .aspectRatio(AppTheme.Size.stageAspectWidth / AppTheme.Size.stageAspectHeight, contentMode: .fit)
             .overlay {
                 ZStack {
                     CoastalSceneView(palette: palette)
 
                     LinearGradient(
                         colors: [
-                            Color.black.opacity(0.38),
+                            AppTheme.Palette.black.opacity(AppTheme.Opacity.veilStrong),
                             Color.clear,
-                            Color.black.opacity(0.52)
+                            AppTheme.Palette.black.opacity(AppTheme.Opacity.halfStrong)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
                     )
 
-                    VStack(spacing: 0) {
+                    VStack(spacing: AppTheme.Spacing.zero) {
                         HStack(alignment: .top) {
                             takeBadge
                             Spacer()
@@ -157,13 +157,13 @@ struct VideoStageView: View {
                                 state.editorMode = .compare
                             } label: {
                                 Label("A/B", systemImage: "rectangle.split.2x1")
-                                    .font(.system(size: AppTheme.FontSize.xxs, weight: .medium))
+                                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
                                     .padding(.horizontal, AppTheme.Spacing.sm)
                                     .padding(.vertical, AppTheme.Spacing.xs)
-                                    .background(Capsule().fill(.ultraThinMaterial))
+                                    .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
                             }
                             .buttonStyle(.plain)
-                            .foregroundStyle(.white)
+                            .foregroundStyle(AppTheme.Palette.white)
                             .help("Compare takes")
                         }
 
@@ -173,65 +173,66 @@ struct VideoStageView: View {
                             state.togglePlayback()
                         } label: {
                             Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 21, weight: .medium))
-                                .foregroundStyle(.white)
-                                .frame(width: 52, height: 52)
-                                .background(Circle().fill(.ultraThinMaterial))
-                                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+                                .font(.system(size: AppTheme.TypeScale.hero, weight: .medium))
+                                .foregroundStyle(AppTheme.Palette.white)
+                                .frame(width: AppTheme.IconSize.play, height: AppTheme.IconSize.play)
+                                .background(Circle().fill(AppTheme.Surface.mediaOverlay))
+                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.border), lineWidth: 0.5))
                         }
                         .buttonStyle(.plain)
                         .help(state.isPlaying ? "Pause" : "Play")
+                        .accessibilityLabel(state.isPlaying ? "Pause" : "Play")
 
                         Spacer()
 
                         VStack(spacing: AppTheme.Spacing.sm) {
                             if state.showCaptions, let segment = state.selectedTranscript {
                                 Text(segment.text)
-                                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
-                                    .foregroundStyle(.white)
+                                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
+                                    .foregroundStyle(AppTheme.Palette.white)
                                     .padding(.horizontal, AppTheme.Spacing.sm)
-                                    .padding(.vertical, 4)
+                                    .padding(.vertical, AppTheme.Spacing.xs)
                                     .background(
-                                        RoundedRectangle(cornerRadius: AppTheme.Radius.xs, style: .continuous)
-                                            .fill(.black.opacity(0.52))
+                                        RoundedRectangle(cornerRadius: AppTheme.Radius.micro, style: .continuous)
+                                            .fill(AppTheme.Palette.black.opacity(AppTheme.Opacity.halfStrong))
                                     )
                             }
 
                             HStack {
                                 Text("\(TranscriptSegment.timecode(for: state.playhead)) / \(TranscriptSegment.timecode(for: state.duration))")
-                                    .font(.system(size: AppTheme.FontSize.xxs, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.85))
+                                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
+                                    .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.near))
                                 Spacer()
                                 Text("16:9 · 1080p")
-                                    .font(.system(size: AppTheme.FontSize.xxs))
-                                    .foregroundStyle(.white.opacity(0.65))
+                                    .font(.system(size: AppTheme.TypeScale.xxs))
+                                    .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.heavy))
                             }
                         }
                     }
                     .padding(AppTheme.Spacing.md)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.lg, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.lg, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
                     .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
             )
-            .shadow(color: .black.opacity(0.12), radius: 12, y: 6)
+            .appShadow(AppTheme.Shadow.media)
     }
 
     private var takeBadge: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
                 .fill(status.color)
-                .frame(width: 5, height: 5)
+                .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
             Text(takeLabel)
-                .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                .tracking(1.0)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .tracking(AppTheme.Tracking.widest)
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(AppTheme.Palette.white)
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.xs)
-        .background(Capsule().fill(.ultraThinMaterial))
+        .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
     }
 }
 
@@ -242,7 +243,7 @@ struct VideoCompareView: View {
         VStack(spacing: AppTheme.Spacing.md) {
             header
             wipeStage
-                .frame(maxWidth: 900)
+                .frame(maxWidth: AppTheme.Layout.mediaMaxWidth)
             summaries
         }
         .padding(AppTheme.Spacing.lg)
@@ -251,18 +252,18 @@ struct VideoCompareView: View {
 
     private var header: some View {
         HStack(spacing: AppTheme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 Text("Compare Takes")
-                    .font(.system(size: AppTheme.FontSize.lg, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
                 Text("Take 02 (approved) against \(state.selectedAsset?.name ?? "the current take")")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
             Label("Playheads synced", systemImage: "link")
-                .font(.system(size: AppTheme.FontSize.xs))
+                .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.secondary)
 
             Button {
@@ -277,7 +278,7 @@ struct VideoCompareView: View {
 
     private var wipeStage: some View {
         Color.clear
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .aspectRatio(AppTheme.Size.stageAspectWidth / AppTheme.Size.stageAspectHeight, contentMode: .fit)
             .overlay {
                 GeometryReader { geometry in
                     let size = geometry.size
@@ -293,74 +294,77 @@ struct VideoCompareView: View {
                             }
 
                         Rectangle()
-                            .fill(.white.opacity(0.9))
-                            .frame(width: 1.5)
+                            .fill(AppTheme.Palette.white.opacity(AppTheme.Opacity.dark))
+                            .frame(width: AppTheme.BorderWidth.medium)
                             .position(x: splitX, y: size.height / 2)
 
                         ZStack {
                             Circle()
-                                .fill(.ultraThinMaterial)
-                                .frame(width: 30, height: 30)
-                                .overlay(Circle().strokeBorder(.white.opacity(0.35), lineWidth: 0.5))
-                            HStack(spacing: 2) {
+                                .fill(AppTheme.Surface.mediaOverlay)
+                                .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
+                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.secondary), lineWidth: 0.5))
+                            HStack(spacing: AppTheme.Spacing.xxs) {
                                 Image(systemName: "chevron.left")
                                 Image(systemName: "chevron.right")
                             }
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(.white)
+                            .font(.system(size: AppTheme.TypeScale.micro, weight: .bold))
+                            .foregroundStyle(AppTheme.Palette.white)
                         }
                         .position(x: splitX, y: size.height / 2)
 
                         VStack {
                             HStack {
-                                compareLabel("A · TAKE 02", color: .green)
+                                compareLabel("A · TAKE 02", color: AppTheme.Palette.approved)
                                 Spacer()
-                                compareLabel("B · TAKE 03", color: .orange)
+                                compareLabel("B · TAKE 03", color: AppTheme.Palette.needsReview)
                             }
                             Spacer()
                             HStack {
                                 Text("\(TranscriptSegment.timecode(for: state.playhead)) / \(TranscriptSegment.timecode(for: state.duration))")
-                                    .font(.system(size: AppTheme.FontSize.xxs, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.85))
+                                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
+                                    .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.near))
                                 Spacer()
                                 Text("Drag to wipe")
-                                    .font(.system(size: AppTheme.FontSize.xxs))
-                                    .foregroundStyle(.white.opacity(0.65))
+                                    .font(.system(size: AppTheme.TypeScale.xxs))
+                                    .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.heavy))
                             }
                         }
                         .padding(AppTheme.Spacing.md)
                     }
                     .contentShape(Rectangle())
                     .gesture(
-                        DragGesture(minimumDistance: 0)
+                        DragGesture(minimumDistance: AppTheme.Spacing.zero)
                             .onChanged { value in
-                                let fraction = value.location.x / max(size.width, 1)
-                                state.compareSplit = min(max(fraction, 0.08), 0.92)
+                                let fraction = value.location.x / max(size.width, AppTheme.Spacing.hairline)
+                                state.compareSplit = min(
+                                    max(fraction, AppTheme.Layout.compareMinSplit),
+                                    AppTheme.Layout.compareMaxSplit
+                                )
                             }
                     )
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.lg, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.lg, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
                     .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
             )
-            .shadow(color: .black.opacity(0.12), radius: 12, y: 6)
+            .appShadow(AppTheme.Shadow.media)
     }
 
     private func compareLabel(_ text: String, color: Color) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
                 .fill(color)
-                .frame(width: 5, height: 5)
+                .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
             Text(text)
-                .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                .tracking(0.8)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .tracking(AppTheme.Tracking.wide)
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(AppTheme.Palette.white)
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.xs)
-        .background(Capsule().fill(.ultraThinMaterial))
+        .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
     }
 
     private var summaries: some View {
@@ -370,7 +374,7 @@ struct VideoCompareView: View {
                 name: "take-02.mp4",
                 detail: "00:12.8 · Warmer read",
                 status: .approved,
-                tint: .green
+                tint: AppTheme.Palette.approved
             )
 
             summaryCard(
@@ -378,20 +382,20 @@ struct VideoCompareView: View {
                 name: state.selectedAsset?.name ?? "take-03.mp4",
                 detail: "00:12.4 · Tighter pauses",
                 status: state.selectedAsset.map { state.status(for: $0) } ?? .needsReview,
-                tint: .orange
+                tint: AppTheme.Palette.needsReview
             )
 
-            VStack(spacing: 4) {
+            VStack(spacing: AppTheme.Spacing.xs) {
                 Text("Δ")
-                    .font(.system(size: AppTheme.FontSize.md, weight: .semibold, design: .rounded))
+                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                 Text("0.4s shorter")
                 Text("2 open notes")
                 Text("−1.2 LUFS")
             }
-            .font(.system(size: AppTheme.FontSize.xxs))
+            .font(.system(size: AppTheme.TypeScale.xxs))
             .foregroundStyle(.secondary)
-            .frame(width: 104)
+            .frame(width: AppTheme.Size.compareSummaryWidth)
             .padding(.vertical, AppTheme.Spacing.sm)
         }
     }
@@ -403,21 +407,21 @@ struct VideoCompareView: View {
         status: ReviewStatus,
         tint: Color
     ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
             HStack(spacing: AppTheme.Spacing.xs) {
                 Text(letter)
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .bold))
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .bold))
                     .foregroundStyle(tint)
-                    .frame(width: 17, height: 17)
-                    .background(Circle().fill(tint.opacity(0.12)))
+                    .frame(width: AppTheme.Size.letterBadge, height: AppTheme.Size.letterBadge)
+                    .background(Circle().fill(tint.opacity(AppTheme.Opacity.tint)))
                 Text(name)
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                 Spacer()
                 StatusBadge(status: status, compact: true)
             }
 
             Text(detail)
-                .font(.system(size: AppTheme.FontSize.xs))
+                .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.secondary)
         }
         .padding(AppTheme.Spacing.sm)

@@ -5,15 +5,15 @@ struct SidebarView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             switch state.navigatorMode {
             case .production:
                 ProductionListView(state: state)
             case .files:
                 FileTreeView(state: state)
             }
-            SidebarFooter(state: state)
         }
+        .background(Color.appText)
     }
 }
 
@@ -21,17 +21,17 @@ private struct ProductionListView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
+        VStack(spacing: AppTheme.Spacing.zero) {
+            HStack(spacing: AppTheme.Spacing.s6) {
                 Text("PRODUCTION")
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                    .tracking(0.8)
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                    .tracking(AppTheme.Tracking.wide)
                     .foregroundStyle(.tertiary)
                 Spacer()
                 if state.needsReviewCount > 0 {
                     Text("\(state.needsReviewCount) need review")
-                        .font(.system(size: AppTheme.FontSize.xs, weight: .medium))
-                        .foregroundStyle(.orange)
+                        .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                        .foregroundStyle(AppTheme.Palette.needsReview)
                 }
             }
             .padding(.horizontal, AppTheme.Spacing.md)
@@ -59,12 +59,12 @@ private struct ProductionListView: View {
                         } header: {
                             HStack(spacing: AppTheme.Spacing.xs) {
                                 Text(stage.title.uppercased())
-                                    .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                                    .tracking(0.7)
+                                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                                    .tracking(AppTheme.Tracking.normal)
                                     .foregroundStyle(.tertiary)
                                 Spacer()
                                 Text("\(stage.assets.count)")
-                                    .font(.system(size: AppTheme.FontSize.xxs, design: .monospaced))
+                                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
                                     .foregroundStyle(.quaternary)
                             }
                         }
@@ -72,6 +72,7 @@ private struct ProductionListView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+                .searchable(text: $state.filterText, placement: .sidebar, prompt: "Filter assets")
             }
         }
     }
@@ -85,19 +86,19 @@ private struct AssetRow: View {
         let status = state.status(for: asset)
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: asset.kind.icon)
-                .font(.system(size: AppTheme.FontSize.body))
+                .font(.system(size: AppTheme.TypeScale.body))
                 .foregroundStyle(.secondary)
-                .frame(width: 16)
+                .frame(width: AppTheme.IconSize.row)
 
             Text(asset.name)
-                .font(.system(size: AppTheme.FontSize.body))
+                .font(.system(size: AppTheme.TypeScale.body))
                 .lineLimit(1)
 
             Spacer(minLength: AppTheme.Spacing.xs)
 
-            Circle()
-                .fill(status.color)
-                .frame(width: 6, height: 6)
+            Image(systemName: status.symbol)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .foregroundStyle(status.color)
                 .help(status.label)
                 .accessibilityLabel(status.label)
         }
@@ -133,22 +134,23 @@ private struct FileTreeView: View {
         List(SampleContent.fileTree, children: \.children) { node in
             HStack(spacing: AppTheme.Spacing.sm) {
                 Image(systemName: node.icon)
-                    .font(.system(size: AppTheme.FontSize.body))
+                    .font(.system(size: AppTheme.TypeScale.body))
                     .foregroundStyle(.secondary)
-                    .frame(width: 16)
+                    .frame(width: AppTheme.IconSize.row)
 
                 Text(node.name)
-                    .font(.system(size: AppTheme.FontSize.body))
+                    .font(.system(size: AppTheme.TypeScale.body))
                     .lineLimit(1)
 
                 Spacer(minLength: AppTheme.Spacing.xs)
 
                 if let assetID = node.assetID,
                    let asset = state.production.asset(id: assetID) {
-                    Circle()
-                        .fill(state.status(for: asset).color)
-                        .frame(width: 5, height: 5)
+                    Image(systemName: state.status(for: asset).symbol)
+                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                        .foregroundStyle(state.status(for: asset).color)
                         .help(state.status(for: asset).label)
+                        .accessibilityLabel(state.status(for: asset).label)
                 }
             }
             .contentShape(Rectangle())
@@ -161,73 +163,5 @@ private struct FileTreeView: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-    }
-}
-
-private struct SidebarFooter: View {
-    @Bindable var state: AppState
-
-    var body: some View {
-        HStack(spacing: AppTheme.Spacing.xs) {
-            Menu {
-                Button("Request New Take") {
-                    state.newTake()
-                }
-                Button("New Note") {
-                    state.inspectorVisible = true
-                    state.inspectorTab = .notes
-                }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
-                    .frame(width: 18, height: 18)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("New")
-
-            HStack(spacing: AppTheme.Spacing.xs) {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(.system(size: AppTheme.FontSize.xs))
-                    .foregroundStyle(.secondary)
-
-                TextField("Filter", text: $state.filterText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: AppTheme.FontSize.sm))
-
-                if !state.filterText.isEmpty {
-                    Button {
-                        state.filterText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: AppTheme.FontSize.xs))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear filter")
-                }
-            }
-            .padding(.horizontal, AppTheme.Spacing.sm)
-            .frame(height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
-                    .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
-            )
-            .disabled(state.navigatorMode == .files)
-            .opacity(state.navigatorMode == .files ? 0.55 : 1)
-            .help(state.navigatorMode == .files ? "Filter is available in Production" : "Filter assets")
-        }
-        .padding(.horizontal, AppTheme.Spacing.md)
-        .padding(.vertical, AppTheme.Spacing.sm)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.appSeparator)
-                .frame(height: AppTheme.BorderWidth.hairline)
-        }
     }
 }

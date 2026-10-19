@@ -53,7 +53,7 @@ final class AppState {
 
     var terminalPresentation: TerminalPresentation = .hidden
     var terminalDock: TerminalDock = .automatic
-    var terminalFraction: CGFloat = 0.5
+    var terminalFraction: CGFloat = AppTheme.Layout.terminalDefaultFraction
     var terminalWorkingDirectory = "~"
     let terminalSessions = TerminalSessionsStore()
 
@@ -67,7 +67,7 @@ final class AppState {
     var selectedTranscriptID: String? = "seg-2"
     var notes = SampleContent.notes
     var noteDraft = ""
-    var compareSplit: CGFloat = 0.52
+    var compareSplit: CGFloat = AppTheme.Layout.compareDefaultSplit
     var selectedStillIndex = 3
     var selectedShotIndex = 2
     var previewQuality = "1080p"
@@ -185,7 +185,7 @@ final class AppState {
     func selectTranscript(_ id: String) {
         selectedTranscriptID = id
         if let segment = transcript.first(where: { $0.id == id }) {
-            playhead = segment.start + 0.6
+            playhead = segment.start + AppTheme.Layout.transcriptPlayheadOffset
         }
     }
 

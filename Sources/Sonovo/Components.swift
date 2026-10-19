@@ -5,20 +5,20 @@ struct StatusBadge: View {
     var compact = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(status.color)
-                .frame(width: 5, height: 5)
+        HStack(spacing: AppTheme.Spacing.xs) {
+            Image(systemName: status.symbol)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .foregroundStyle(status.color)
 
             if !compact {
                 Text(status.label)
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .medium))
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, compact ? 4 : 6)
-        .padding(.vertical, compact ? 2 : 3)
-        .background(Capsule().fill(status.color.opacity(0.12)))
+        .padding(.horizontal, compact ? AppTheme.Spacing.xs : AppTheme.Spacing.s6)
+        .padding(.vertical, compact ? AppTheme.Spacing.xxs : AppTheme.Spacing.s3)
+        .background(Capsule().fill(status.color.opacity(AppTheme.Opacity.tint)))
         .foregroundStyle(status.color)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(status.label)
@@ -37,10 +37,10 @@ struct BarIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
-                .frame(width: 24, height: 22)
+                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
+                .frame(width: AppTheme.ControlSize.medium, height: AppTheme.ControlSize.regular)
                 .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                         .fill(backgroundColor)
                 )
                 .foregroundStyle(isSelected ? Color.accentColor : (tint ?? Color.primary))
@@ -56,9 +56,9 @@ struct BarIconButton: View {
 
     private var backgroundColor: Color {
         if isSelected {
-            return Color.accentColor.opacity(0.16)
+            return Color.accentColor.opacity(AppTheme.Opacity.muted)
         }
-        return isHovering ? Color.primary.opacity(0.06) : Color.clear
+        return isHovering ? Color.primary.opacity(AppTheme.Opacity.ghostSoft) : Color.clear
     }
 }
 
@@ -76,13 +76,13 @@ struct MetadataRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.sm) {
             Text(label)
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(.secondary)
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
             Text(value)
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
@@ -99,13 +99,13 @@ struct InspectorSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s7) {
             Text(title.uppercased())
-                .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                .tracking(0.7)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .tracking(AppTheme.Tracking.normal)
                 .foregroundStyle(.tertiary)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.s6) {
                 content
             }
         }

@@ -12,16 +12,20 @@ struct SonovoApp: App {
             MainWindow(state: state)
                 .environment(state)
                 .preferredColorScheme(preferredColorScheme)
-                .frame(minWidth: 1180, minHeight: 720)
+                .frame(minWidth: AppTheme.Layout.windowMinWidth, minHeight: AppTheme.Layout.windowMinHeight)
+                .background(WindowChromeConfigurator())
         }
-        .defaultSize(width: 1440, height: 900)
-        .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unified(showsTitle: false))
+        .defaultSize(
+            width: AppTheme.Layout.windowDefaultWidth,
+            height: AppTheme.Layout.windowDefaultHeight
+        )
+        .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("New Take") { state.newTake() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
             }
+            SidebarCommands()
             CommandGroup(after: .sidebar) {
                 Button("Toggle Inspector") { state.inspectorVisible.toggle() }
                     .keyboardShortcut("i", modifiers: [.command, .option])
@@ -72,6 +76,7 @@ struct SonovoApp: App {
         Settings {
             SettingsView()
                 .environment(state)
+                .background(WindowChromeConfigurator())
         }
     }
 
@@ -103,9 +108,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         NSApp.activate(ignoringOtherApps: true)
+
+        DispatchQueue.main.async {
+            for window in NSApp.windows {
+                configureWindowChrome(window)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+
+
+private func configureWindowChrome(_ window: NSWindow) {
+    window.titlebarSeparatorStyle = .none
+    window.toolbar?.showsBaselineSeparator = false
+}
+
+private struct WindowChromeConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            if let window = view.window {
+                configureWindowChrome(window)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let window = view.window {
+                configureWindowChrome(window)
+            }
+        }
     }
 }

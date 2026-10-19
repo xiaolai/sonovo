@@ -27,15 +27,15 @@ struct StillsView: View {
 
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 HStack(spacing: AppTheme.Spacing.sm) {
                     Text(asset.name)
-                        .font(.system(size: AppTheme.FontSize.lg, weight: .semibold))
+                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
                     StatusBadge(status: state.status(for: asset))
                 }
 
                 Text("\(asset.shortDetail) · Display P3")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
 
@@ -43,8 +43,8 @@ struct StillsView: View {
 
             if state.status(for: asset) == .approved {
                 Label("Approved", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: AppTheme.FontSize.xs, weight: .medium))
-                    .foregroundStyle(.green)
+                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                    .foregroundStyle(AppTheme.Palette.approved)
             } else {
                 Button {
                     state.approve(asset)
@@ -62,14 +62,14 @@ struct StillsView: View {
         let palette = palettes[index]
 
         return Color.clear
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .aspectRatio(AppTheme.Size.stageAspectWidth / AppTheme.Size.stageAspectHeight, contentMode: .fit)
             .overlay {
                 ZStack {
-                    Color.black
+                    AppTheme.Palette.black
                     CoastalSceneView(palette: palette, showsBoat: index % 2 == 0)
 
                     LinearGradient(
-                        colors: [Color.black.opacity(0.30), Color.clear, Color.black.opacity(0.35)],
+                        colors: [AppTheme.Palette.black.opacity(AppTheme.Opacity.dim), Color.clear, AppTheme.Palette.black.opacity(AppTheme.Opacity.secondary)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
@@ -79,31 +79,31 @@ struct StillsView: View {
                             stillLabel(index: index)
                             Spacer()
                             Text("2048 × 1152")
-                                .font(.system(size: AppTheme.FontSize.xxs))
-                                .foregroundStyle(.white.opacity(0.8))
+                                .font(.system(size: AppTheme.TypeScale.xxs))
+                                .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.bright))
                                 .padding(.horizontal, AppTheme.Spacing.sm)
                                 .padding(.vertical, AppTheme.Spacing.xs)
-                                .background(Capsule().fill(.ultraThinMaterial))
+                                .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
                         }
 
                         Spacer()
 
                         HStack {
                             Text("35mm · f/2.8 · 1/125")
-                                .font(.system(size: AppTheme.FontSize.xxs))
-                                .foregroundStyle(.white.opacity(0.8))
+                                .font(.system(size: AppTheme.TypeScale.xxs))
+                                .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.bright))
                                 .padding(.horizontal, AppTheme.Spacing.sm)
                                 .padding(.vertical, AppTheme.Spacing.xs)
-                                .background(Capsule().fill(.ultraThinMaterial))
+                                .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
 
                             Spacer()
 
                             Text("Fit")
-                                .font(.system(size: AppTheme.FontSize.xxs, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.85))
+                                .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
+                                .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.near))
                                 .padding(.horizontal, AppTheme.Spacing.sm)
                                 .padding(.vertical, AppTheme.Spacing.xs)
-                                .background(Capsule().fill(.ultraThinMaterial))
+                                .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
                         }
                     }
                     .padding(AppTheme.Spacing.md)
@@ -116,30 +116,30 @@ struct StillsView: View {
                     .padding(.horizontal, AppTheme.Spacing.md)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.lg, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.lg, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
                     .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
             )
-            .shadow(color: .black.opacity(0.12), radius: 12, y: 6)
+            .appShadow(AppTheme.Shadow.media)
     }
 
     private func stillLabel(index: Int) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
-                .fill(state.selectedAsset.map { state.status(for: $0).color } ?? Color.orange)
-                .frame(width: 5, height: 5)
+                .fill(state.selectedAsset.map { state.status(for: $0).color } ?? AppTheme.Palette.needsReview)
+                .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
             Text(String(format: "STILL %02d", index + 1))
-                .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                .tracking(0.8)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .tracking(AppTheme.Tracking.wide)
             Text("· Harbor at dawn")
-                .font(.system(size: AppTheme.FontSize.xxs))
-                .foregroundStyle(.white.opacity(0.7))
+                .font(.system(size: AppTheme.TypeScale.xxs))
+                .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.heavySoft))
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(AppTheme.Palette.white)
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.xs)
-        .background(Capsule().fill(.ultraThinMaterial))
+        .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
     }
 
     private var previousButton: some View {
@@ -147,13 +147,14 @@ struct StillsView: View {
             state.selectedStillIndex = (state.selectedStillIndex - 1 + palettes.count) % palettes.count
         } label: {
             Image(systemName: "chevron.left")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(.ultraThinMaterial))
+                .font(.system(size: AppTheme.TypeScale.body, weight: .semibold))
+                .foregroundStyle(AppTheme.Palette.white)
+                .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
+                .background(Circle().fill(AppTheme.Surface.mediaOverlay))
         }
         .buttonStyle(.plain)
         .help("Previous frame")
+        .accessibilityLabel("Previous frame")
     }
 
     private var nextButton: some View {
@@ -161,26 +162,27 @@ struct StillsView: View {
             state.selectedStillIndex = (state.selectedStillIndex + 1) % palettes.count
         } label: {
             Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(.ultraThinMaterial))
+                .font(.system(size: AppTheme.TypeScale.body, weight: .semibold))
+                .foregroundStyle(AppTheme.Palette.white)
+                .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
+                .background(Circle().fill(AppTheme.Surface.mediaOverlay))
         }
         .buttonStyle(.plain)
         .help("Next frame")
+        .accessibilityLabel("Next frame")
     }
 
     private var contactSheet: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
             HStack {
                 Text("Contact Sheet")
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
                 Text("8 frames")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text("Select a frame to review")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.tertiary)
             }
 
@@ -195,19 +197,19 @@ struct StillsView: View {
                                     palette: palettes[index],
                                     showsBoat: index % 2 == 0
                                 )
-                                .frame(width: 96, height: 54)
+                                .frame(width: AppTheme.Size.stillThumbnailWidth, height: AppTheme.Size.stillThumbnailHeight)
 
                                 Text(String(format: "%02d", index + 1))
-                                    .font(.system(size: AppTheme.FontSize.xxs, design: .monospaced))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(.black.opacity(0.45)))
-                                    .padding(4)
+                                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
+                                    .foregroundStyle(AppTheme.Palette.white)
+                                    .padding(.horizontal, AppTheme.Spacing.xs)
+                                    .padding(.vertical, AppTheme.Spacing.xxs)
+                                    .background(Capsule().fill(AppTheme.Palette.black.opacity(AppTheme.Opacity.wash)))
+                                    .padding(AppTheme.Spacing.xs)
                             }
-                            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous))
                             .overlay(
-                                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+                                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                                     .strokeBorder(
                                         state.selectedStillIndex == index ? Color.accentColor : Color.clear,
                                         lineWidth: AppTheme.BorderWidth.thick

@@ -18,26 +18,21 @@ struct TransportBar: View {
                 contextBar
             }
         }
-        .frame(height: AppTheme.transportHeight)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.appSeparator)
-                .frame(height: AppTheme.BorderWidth.hairline)
-        }
+        .frame(height: AppTheme.Layout.transportHeight)
+        .background(Color.appText)
     }
 
     private var terminalBar: some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: "terminal")
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(.secondary)
 
             Text("Terminal")
-                .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
 
             Text((state.terminalWorkingDirectory as NSString).abbreviatingWithTildeInPath)
-                .font(.system(size: AppTheme.FontSize.xs))
+                .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -45,7 +40,7 @@ struct TransportBar: View {
             Spacer(minLength: AppTheme.Spacing.sm)
 
             Text("⌃`")
-                .font(.system(size: AppTheme.FontSize.xs, design: .monospaced))
+                .font(.system(size: AppTheme.TypeScale.xs, design: .monospaced))
                 .foregroundStyle(.tertiary)
 
             Button("Restore Editor") {
@@ -82,16 +77,16 @@ struct TransportBar: View {
                 }
             }
 
-            HStack(spacing: 3) {
+            HStack(spacing: AppTheme.Spacing.s3) {
                 Text(TranscriptSegment.timecode(for: state.playhead))
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium, design: .monospaced))
-                    .frame(width: 62, alignment: .leading)
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium, design: .monospaced))
+                    .frame(width: AppTheme.Size.transportTimeWidth, alignment: .leading)
                 Text("/")
                     .foregroundStyle(.tertiary)
                 Text(TranscriptSegment.timecode(for: state.duration))
-                    .font(.system(size: AppTheme.FontSize.sm, design: .monospaced))
+                    .font(.system(size: AppTheme.TypeScale.sm, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .frame(width: 62, alignment: .leading)
+                    .frame(width: AppTheme.Size.transportTimeWidth, alignment: .leading)
             }
             .monospacedDigit()
 
@@ -100,28 +95,30 @@ struct TransportBar: View {
 
             HStack(spacing: AppTheme.Spacing.sm) {
                 Image(systemName: "speaker.wave.2.fill")
-                    .font(.system(size: AppTheme.FontSize.sm))
+                    .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
 
-                Slider(value: $state.volume, in: 0...1)
+                Slider(value: $state.volume, in: AppTheme.Preferences.unitRange)
                     .controlSize(.mini)
-                    .frame(width: 66)
+                    .frame(width: AppTheme.Size.volumeWidth)
                     .help("Volume")
+                    .accessibilityLabel("Volume")
 
                 Button {
                     state.showCaptions.toggle()
                 } label: {
                     Text("CC")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 24, height: 20)
+                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .bold))
+                        .frame(width: AppTheme.Size.ccWidth, height: AppTheme.Size.ccHeight)
                         .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(state.showCaptions ? Color.accentColor.opacity(0.16) : Color.clear)
+                            RoundedRectangle(cornerRadius: AppTheme.Radius.control)
+                                .fill(state.showCaptions ? Color.accentColor.opacity(AppTheme.Opacity.muted) : Color.clear)
                         )
                         .foregroundStyle(state.showCaptions ? Color.accentColor : Color.secondary)
                 }
                 .buttonStyle(.plain)
                 .help(state.showCaptions ? "Hide captions" : "Show captions")
+                .accessibilityLabel(state.showCaptions ? "Hide captions" : "Show captions")
 
                 BarIconButton(
                     systemName: "repeat",
@@ -140,25 +137,25 @@ struct TransportBar: View {
             if let tab = state.selectedTab,
                let asset = state.production.asset(id: tab.assetID) {
                 Image(systemName: tab.kind.icon)
-                    .font(.system(size: AppTheme.FontSize.sm))
+                    .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
 
                 Text(asset.name)
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                     .lineLimit(1)
 
                 Text(contextDetail(for: tab.kind))
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
 
                 Spacer(minLength: AppTheme.Spacing.sm)
 
                 Text(contextRight(for: tab.kind))
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.tertiary)
             } else {
                 Text("No editor open")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -194,35 +191,52 @@ private struct Scrubber: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let width = max(geometry.size.width, 1)
-            let fraction = min(max(state.playhead / state.duration, 0), 1)
+            let width = max(geometry.size.width, AppTheme.Spacing.hairline)
+            let fraction = min(
+                max(
+                    state.playhead / state.duration,
+                    AppTheme.Preferences.unitRange.lowerBound
+                ),
+                AppTheme.Preferences.unitRange.upperBound
+            )
 
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.appSeparator.opacity(0.55))
-                    .frame(height: 4)
+                    .fill(Color.appSeparator.opacity(AppTheme.Opacity.strongSoft))
+                    .frame(height: AppTheme.Size.scrubberHeight)
 
                 Capsule()
                     .fill(Color.accentColor)
-                    .frame(width: max(4, width * fraction), height: 4)
+                    .frame(width: max(AppTheme.Size.scrubberHeight, width * fraction), height: AppTheme.Size.scrubberHeight)
 
                 Circle()
                     .fill(Color.accentColor)
-                    .frame(width: 10, height: 10)
-                    .shadow(color: .black.opacity(0.16), radius: 1, y: 0.5)
-                    .offset(x: min(max(width * fraction - 5, 0), width - 10))
+                    .frame(width: AppTheme.Size.scrubberThumb, height: AppTheme.Size.scrubberThumb)
+                    .appShadow(AppTheme.Shadow.playhead)
+                    .offset(
+                        x: min(
+                            max(width * fraction - AppTheme.Size.scrubberThumbRadius, AppTheme.Spacing.zero),
+                            width - AppTheme.Size.scrubberThumb
+                        )
+                    )
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: AppTheme.Spacing.zero)
                     .onChanged { value in
-                        let newFraction = min(max(value.location.x / width, 0), 1)
+                        let newFraction = min(
+                            max(
+                                value.location.x / width,
+                                AppTheme.Preferences.unitRange.lowerBound
+                            ),
+                            AppTheme.Preferences.unitRange.upperBound
+                        )
                         state.playhead = newFraction * state.duration
                     }
             )
         }
-        .frame(height: 14)
+        .frame(height: AppTheme.Size.scrubberHitHeight)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Playhead")
         .accessibilityValue("\(Int((state.playhead / state.duration) * 100)) percent")

@@ -4,80 +4,36 @@ struct LeadingToolbarView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        HStack(spacing: 6) {
-            BarIconButton(systemName: "sidebar.leading", help: "Toggle Sidebar") {
-                state.columnVisibility = state.columnVisibility == .detailOnly ? .all : .detailOnly
+        Picker("Navigator", selection: $state.navigatorMode) {
+            ForEach(NavigatorMode.allCases) { mode in
+                Image(systemName: mode.icon)
+                    .accessibilityLabel(mode.label)
+                    .tag(mode)
             }
-
-            Picker("Navigator", selection: $state.navigatorMode) {
-                ForEach(NavigatorMode.allCases) { mode in
-                    Image(systemName: mode.icon)
-                        .accessibilityLabel(mode.label)
-                        .tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 76)
-            .help("Navigator")
-
-            Rectangle()
-                .fill(Color.appSeparator)
-                .frame(width: 1, height: 16)
-
-            BarIconButton(
-                systemName: state.isPlaying ? "pause.fill" : "play.fill",
-                help: state.isPlaying ? "Pause preview" : "Preview",
-                tint: .green
-            ) {
-                state.togglePlayback()
-            }
-
-            BarIconButton(systemName: "stop.fill", help: "Stop") {
-                state.isPlaying = false
-            }
-
-            BarIconButton(systemName: "chevron.left", help: "Back") { }
-                .disabled(true)
-
-            BarIconButton(systemName: "chevron.right", help: "Forward") { }
-                .disabled(true)
         }
-        .frame(height: 28)
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: AppTheme.Size.navigatorPickerWidth)
+        .help("Navigator")
+        .accessibilityLabel("Navigator")
     }
 }
 
-struct TitleToolbarView: View {
+struct TrailingToolbarView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(spacing: 0) {
-                Text("\(state.production.title) — \(state.production.episode)")
-                    .font(.system(size: AppTheme.FontSize.md, weight: .semibold))
-                    .lineLimit(1)
-
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(state.isPlaying ? Color.accentColor : Color.green)
-                        .frame(width: 5, height: 5)
-                    Text(state.activityText)
-                        .font(.system(size: AppTheme.FontSize.xs))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .fixedSize()
-
+        HStack(spacing: AppTheme.Spacing.s6) {
             Button {
                 state.newTake()
             } label: {
                 Image(systemName: "plus")
-                    .frame(width: 15, height: 15)
+                    .frame(width: AppTheme.Size.addIcon, height: AppTheme.Size.addIcon)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .help("Request a new take")
+            .accessibilityLabel("Request a new take")
 
             Menu {
                 previewQualityButton("1080p")
@@ -89,28 +45,8 @@ struct TitleToolbarView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Preview quality")
-        }
-        .frame(height: 30)
-    }
+            .accessibilityLabel("Preview quality")
 
-    private func previewQualityButton(_ quality: String) -> some View {
-        Button {
-            state.previewQuality = quality
-        } label: {
-            if state.previewQuality == quality {
-                Label(quality, systemImage: "checkmark")
-            } else {
-                Text(quality)
-            }
-        }
-    }
-}
-
-struct TrailingToolbarView: View {
-    @Bindable var state: AppState
-
-    var body: some View {
-        HStack(spacing: 6) {
             Menu {
                 Picker("Terminal", selection: $state.terminalPresentation) {
                     Text("Hidden").tag(TerminalPresentation.hidden)
@@ -135,22 +71,24 @@ struct TrailingToolbarView: View {
                 }
             } label: {
                 Image(systemName: "terminal")
-                    .frame(width: 18, height: 18)
+                    .frame(width: AppTheme.Size.menuIcon, height: AppTheme.Size.menuIcon)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Terminal")
+            .accessibilityLabel("Terminal")
 
             Menu {
                 Toggle("Show Tab Bar", isOn: $state.showTabBar)
                 Toggle("Show Breadcrumbs", isOn: $state.showBreadcrumbs)
             } label: {
                 Image(systemName: "slider.horizontal.3")
-                    .frame(width: 18, height: 18)
+                    .frame(width: AppTheme.Size.menuIcon, height: AppTheme.Size.menuIcon)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Editor Options")
+            .accessibilityLabel("Editor Options")
 
             Picker("Review Mode", selection: $state.editorMode) {
                 ForEach(EditorMode.allCases) { mode in
@@ -161,9 +99,10 @@ struct TrailingToolbarView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 94)
+            .frame(width: AppTheme.Size.reviewModePickerWidth)
             .disabled(!state.canUseReviewModes)
             .help("Review mode")
+            .accessibilityLabel("Review mode")
 
             BarIconButton(
                 systemName: "sidebar.right",
@@ -173,6 +112,17 @@ struct TrailingToolbarView: View {
                 state.inspectorVisible.toggle()
             }
         }
-        .frame(height: 28)
+    }
+
+    private func previewQualityButton(_ quality: String) -> some View {
+        Button {
+            state.previewQuality = quality
+        } label: {
+            if state.previewQuality == quality {
+                Label(quality, systemImage: "checkmark")
+            } else {
+                Text(quality)
+            }
+        }
     }
 }

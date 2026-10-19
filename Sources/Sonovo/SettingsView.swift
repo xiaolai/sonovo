@@ -32,6 +32,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @AppStorage("sonovo.appearance") private var appearance = "system"
+    @AppStorage("sonovo.canvasInset") private var canvasInset = AppTheme.Canvas.comfortableInset
+    @AppStorage("sonovo.canvasRadius") private var canvasRadius = AppTheme.Canvas.roundedRadius
 
     @State private var selectedSection: SettingsSection = .appearance
     @State private var foregroundIntensity = 0.48
@@ -54,26 +56,24 @@ struct SettingsView: View {
     @AppStorage("sonovo.loginShell") private var loginShell = true
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: AppTheme.Spacing.zero) {
             List(SettingsSection.allCases, selection: $selectedSection) { section in
                 Label(section.label, systemImage: section.icon)
                     .tag(section)
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
-            .background(.bar)
-            .frame(width: 184)
-
-            Divider()
+            .background(SidebarMaterialBackground())
+            .frame(width: AppTheme.Layout.settingsSidebarWidth)
 
             ScrollView {
                 detailPane
                     .padding(AppTheme.Spacing.xl)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color.appWindow)
         }
-        .frame(width: 720, height: 500)
+        .frame(width: AppTheme.Layout.settingsWidth, height: AppTheme.Layout.settingsHeight)
         .navigationTitle("Settings")
         .preferredColorScheme(preferredColorScheme)
     }
@@ -114,12 +114,10 @@ struct SettingsView: View {
                     Toggle("Restore open tabs", isOn: $restoreTabs)
                     Text("Reopen the tabs and splits from your last session.")
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Confirm before closing", isOn: $confirmClose)
                     Text("Ask before closing a production with unsaved changes.")
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Reopen last production", isOn: $reopenLast)
                     Text("Open the most recent production at launch.")
@@ -157,10 +155,10 @@ struct SettingsView: View {
                             Button("Slate") { theme = "Slate" }
                             Button("Ember") { theme = "Ember" }
                         } label: {
-                            HStack(spacing: 4) {
+                            HStack(spacing: AppTheme.Spacing.xs) {
                                 Text(theme)
                                 Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 8, weight: .semibold))
+                                    .font(.system(size: AppTheme.TypeScale.micro, weight: .semibold))
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -168,32 +166,77 @@ struct SettingsView: View {
                         .fixedSize()
                     }
                 }
-                Hairline()
                 SettingsRow {
                     HStack(spacing: AppTheme.Spacing.md) {
                         Text("Foreground")
-                            .frame(width: 150, alignment: .leading)
-                        Slider(value: $foregroundIntensity, in: 0...1)
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.accentColor.opacity(0.35 + foregroundIntensity * 0.55))
-                            .frame(width: 26, height: 16)
+                            .frame(width: AppTheme.Layout.settingsRowLabelWidth, alignment: .leading)
+                        Slider(value: $foregroundIntensity, in: AppTheme.Preferences.unitRange)
+                            .accessibilityLabel("Foreground intensity")
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.micro)
+                            .fill(
+                                Color.accentColor.opacity(
+                                    AppTheme.Opacity.settingsForegroundBase
+                                        + foregroundIntensity * AppTheme.Opacity.settingsForegroundRange
+                                )
+                            )
+                            .frame(width: AppTheme.Size.settingsSwatchWidth, height: AppTheme.Size.settingsSwatchHeight)
                     }
                 }
-                Hairline()
                 SettingsRow {
                     HStack(spacing: AppTheme.Spacing.md) {
                         Text("Background")
-                            .frame(width: 150, alignment: .leading)
-                        Slider(value: $backgroundIntensity, in: 0...1)
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.accentColor.opacity(0.15 + backgroundIntensity * 0.5))
-                            .frame(width: 26, height: 16)
+                            .frame(width: AppTheme.Layout.settingsRowLabelWidth, alignment: .leading)
+                        Slider(value: $backgroundIntensity, in: AppTheme.Preferences.unitRange)
+                            .accessibilityLabel("Background intensity")
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.micro)
+                            .fill(
+                                Color.accentColor.opacity(
+                                    AppTheme.Opacity.settingsBackgroundBase
+                                        + backgroundIntensity * AppTheme.Opacity.settingsBackgroundRange
+                                )
+                            )
+                            .frame(width: AppTheme.Size.settingsSwatchWidth, height: AppTheme.Size.settingsSwatchHeight)
                     }
                 }
             }
 
+            SettingsGroup {
+                SettingsRow {
+                    HStack {
+                        Text("Canvas breathing room")
+                        Spacer()
+                        Picker("Canvas breathing room", selection: $canvasInset) {
+                            Text("Compact").tag(AppTheme.Canvas.compactInset)
+                            Text("Comfortable").tag(AppTheme.Canvas.comfortableInset)
+                            Text("Spacious").tag(AppTheme.Canvas.spaciousInset)
+                        }
+                        .labelsHidden()
+                        .frame(width: AppTheme.Layout.settingsPickerWidth)
+                        .accessibilityLabel("Canvas breathing room")
+                    }
+                }
+                SettingsRow {
+                    HStack {
+                        Text("Canvas corners")
+                        Spacer()
+                        Picker("Canvas corners", selection: $canvasRadius) {
+                            Text("Square").tag(AppTheme.Canvas.squareRadius)
+                            Text("Rounded").tag(AppTheme.Canvas.roundedRadius)
+                            Text("Extra rounded").tag(AppTheme.Canvas.extraRadius)
+                        }
+                        .labelsHidden()
+                        .frame(width: AppTheme.Layout.settingsPickerWidth)
+                        .accessibilityLabel("Canvas corners")
+                    }
+                }
+            }
+
+            Text("Spacing adds breathing room between the editor canvas and its surrounding chrome. Corners use the same radius as the cards. In dark appearance the workspace shares one surface, so the canvas edge is intentionally quiet.")
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.tertiary)
+
             Text("Themes are derived from a base palette. Individual colors stay editable per workspace.")
-                .font(.system(size: AppTheme.FontSize.xs))
+                .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.tertiary)
         }
     }
@@ -210,24 +253,25 @@ struct SettingsView: View {
                     HStack {
                         Text("Font size")
                         Spacer()
-                        Stepper(value: $editorFontSize, in: 11...18, step: 1) {
+                        Stepper(
+                            value: $editorFontSize,
+                            in: AppTheme.Preferences.editorFontSizeRange,
+                            step: AppTheme.Preferences.editorFontSizeStep
+                        ) {
                             Text("\(Int(editorFontSize)) pt")
                                 .monospacedDigit()
                         }
                         .fixedSize()
                     }
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Show breadcrumbs", isOn: $showBreadcrumbs)
                     Text("Show the path to the current asset above the editor.")
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Open Markdown rendered", isOn: $markdownRendered)
                     Text("Start in the rendered document view instead of source.")
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Wrap long lines", isOn: $wrapLines)
                     Text("Wrap source lines to the width of the editor.")
@@ -254,10 +298,10 @@ struct SettingsView: View {
                             Text("AirPods").tag("AirPods")
                         }
                         .labelsHidden()
-                        .frame(width: 190)
+                        .accessibilityLabel("Output device")
+                        .frame(width: AppTheme.Layout.settingsPickerWidth)
                     }
                 }
-                Hairline()
                 SettingsRow {
                     HStack {
                         Text("Sample rate")
@@ -267,15 +311,14 @@ struct SettingsView: View {
                             Text("44.1 kHz").tag("44.1 kHz")
                         }
                         .labelsHidden()
-                        .frame(width: 120)
+                        .accessibilityLabel("Sample rate")
+                        .frame(width: AppTheme.Layout.settingsPickerCompactWidth)
                     }
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Follow playhead", isOn: $followPlayhead)
                     Text("Keep the selected transcript line aligned with playback.")
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Show captions by default", isOn: $captionsDefault)
                     Text("Display the current transcript line over the video stage.")
@@ -302,10 +345,10 @@ struct SettingsView: View {
                             Text("fish").tag("/opt/homebrew/bin/fish")
                         }
                         .labelsHidden()
-                        .frame(width: 170)
+                        .accessibilityLabel("Shell")
+                        .frame(width: AppTheme.Layout.settingsPickerNarrowWidth)
                     }
                 }
-                Hairline()
                 SettingsRow {
                     HStack {
                         Text("Font")
@@ -315,10 +358,10 @@ struct SettingsView: View {
                             Text("Menlo 12").tag("Menlo 12")
                         }
                         .labelsHidden()
-                        .frame(width: 130)
+                        .accessibilityLabel("Terminal font")
+                        .frame(width: AppTheme.Layout.settingsPickerTinyWidth)
                     }
                 }
-                Hairline()
                 SettingsRow {
                     Toggle("Use login shell", isOn: $loginShell)
                     Text("Start the terminal as a login shell so your profile is loaded.")
@@ -328,11 +371,11 @@ struct SettingsView: View {
     }
 
     private func paneHeader(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
             Text(title)
-                .font(.system(size: AppTheme.FontSize.xl, weight: .semibold))
+                .font(.system(size: AppTheme.TypeScale.xl, weight: .semibold))
             Text(detail)
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(.secondary)
         }
     }
@@ -346,16 +389,16 @@ private struct SettingsGroup<Content: View>: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             content
         }
         .padding(.horizontal, AppTheme.Spacing.md)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                .fill(Color.appCard)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                 .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
         )
     }
@@ -369,10 +412,10 @@ private struct SettingsRow<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
             content
         }
-        .font(.system(size: AppTheme.FontSize.sm))
+        .font(.system(size: AppTheme.TypeScale.sm))
         .padding(.vertical, AppTheme.Spacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -401,25 +444,25 @@ private struct AppearanceCard: View {
         Button(action: action) {
             VStack(spacing: AppTheme.Spacing.xs) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
-                        .fill(Color(nsColor: .windowBackgroundColor))
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                        .fill(Color.appWindow)
 
                     preview
-                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous))
-                        .padding(5)
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous))
+                        .padding(AppTheme.Spacing.s5)
 
                     if isSelected {
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                             .strokeBorder(Color.accentColor, lineWidth: 2)
                     } else {
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                             .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
                     }
                 }
-                .frame(height: 92)
+                .frame(height: AppTheme.Size.settingsPreviewHeight)
 
                 Text(mode.title)
-                    .font(.system(size: AppTheme.FontSize.xs, weight: isSelected ? .semibold : .regular))
+                    .font(.system(size: AppTheme.TypeScale.xs, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? Color.primary : Color.secondary)
             }
         }
@@ -432,11 +475,11 @@ private struct AppearanceCard: View {
     private var preview: some View {
         switch mode {
         case .system:
-            HStack(spacing: 0) {
+            HStack(spacing: AppTheme.Spacing.zero) {
                 MiniWindow(isDark: false)
                 Rectangle()
-                    .fill(Color.black.opacity(0.18))
-                    .frame(width: 1)
+                    .fill(AppTheme.Palette.black.opacity(AppTheme.Opacity.border))
+                    .frame(width: AppTheme.BorderWidth.thin)
                 MiniWindow(isDark: true)
             }
         case .light:
@@ -451,48 +494,60 @@ private struct MiniWindow: View {
     let isDark: Bool
 
     var body: some View {
-        let background = isDark ? Color(red: 0.11, green: 0.11, blue: 0.12) : Color(red: 0.96, green: 0.96, blue: 0.97)
-        let sidebar = isDark ? Color(red: 0.15, green: 0.15, blue: 0.16) : Color(red: 0.91, green: 0.91, blue: 0.92)
-        let content = isDark ? Color(red: 0.08, green: 0.08, blue: 0.09) : Color.white
-        let line = isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
+        let background = isDark
+            ? AppTheme.Palette.MiniWindow.darkBackground
+            : AppTheme.Palette.MiniWindow.lightBackground
+        let sidebar = isDark
+            ? AppTheme.Palette.MiniWindow.darkSidebar
+            : AppTheme.Palette.MiniWindow.lightSidebar
+        let content = isDark
+            ? AppTheme.Palette.MiniWindow.darkContent
+            : AppTheme.Palette.MiniWindow.lightContent
+        let line = isDark ? AppTheme.Palette.white.opacity(AppTheme.Opacity.soft) : AppTheme.Palette.black.opacity(AppTheme.Opacity.faint)
 
         return ZStack {
             background
 
-            HStack(spacing: 0) {
+            HStack(spacing: AppTheme.Spacing.zero) {
                 sidebar
-                    .frame(width: 26)
+                    .frame(width: AppTheme.Size.miniWindowSidebar)
                 content
             }
 
-            VStack(spacing: 0) {
-                HStack(spacing: 2) {
-                    Circle().fill(Color(red: 0.93, green: 0.42, blue: 0.38)).frame(width: 3, height: 3)
-                    Circle().fill(Color(red: 0.96, green: 0.73, blue: 0.30)).frame(width: 3, height: 3)
-                    Circle().fill(Color(red: 0.36, green: 0.78, blue: 0.39)).frame(width: 3, height: 3)
+            VStack(spacing: AppTheme.Spacing.zero) {
+                HStack(spacing: AppTheme.Spacing.xxs) {
+                    Circle()
+                        .fill(AppTheme.Palette.MiniWindow.trafficRed)
+                        .frame(width: AppTheme.Size.miniWindowTrafficDot, height: AppTheme.Size.miniWindowTrafficDot)
+                    Circle()
+                        .fill(AppTheme.Palette.MiniWindow.trafficYellow)
+                        .frame(width: AppTheme.Size.miniWindowTrafficDot, height: AppTheme.Size.miniWindowTrafficDot)
+                    Circle()
+                        .fill(AppTheme.Palette.MiniWindow.trafficGreen)
+                        .frame(width: AppTheme.Size.miniWindowTrafficDot, height: AppTheme.Size.miniWindowTrafficDot)
                     Spacer()
                 }
-                .padding(.horizontal, 4)
-                .frame(height: 8)
+                .padding(.horizontal, AppTheme.Spacing.xs)
+                .frame(height: AppTheme.Size.miniWindowTitlebarHeight)
                 .background(background)
 
                 Spacer()
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                RoundedRectangle(cornerRadius: 1)
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
+                RoundedRectangle(cornerRadius: AppTheme.Radius.line)
                     .fill(line)
-                    .frame(width: 26, height: 2)
-                RoundedRectangle(cornerRadius: 1)
+                    .frame(width: AppTheme.Size.miniWindowLineLong, height: AppTheme.Size.miniWindowLineHeight)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.line)
                     .fill(line)
-                    .frame(width: 18, height: 2)
-                RoundedRectangle(cornerRadius: 1)
+                    .frame(width: AppTheme.Size.miniWindowLineShort, height: AppTheme.Size.miniWindowLineHeight)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.line)
                     .fill(line)
-                    .frame(width: 22, height: 2)
+                    .frame(width: AppTheme.Size.miniWindowLineMedium, height: AppTheme.Size.miniWindowLineHeight)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .padding(.leading, 32)
-            .padding(.top, 14)
+            .padding(.leading, AppTheme.Spacing.xxl)
+            .padding(.top, AppTheme.Spacing.s14)
         }
     }
 }

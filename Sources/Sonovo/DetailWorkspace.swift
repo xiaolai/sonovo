@@ -2,13 +2,15 @@ import SwiftUI
 
 struct DetailWorkspace: View {
     @Bindable var state: AppState
+    @AppStorage("sonovo.canvasInset") private var canvasInset = AppTheme.Canvas.comfortableInset
+    @AppStorage("sonovo.canvasRadius") private var canvasRadius = AppTheme.Canvas.roundedRadius
 
     var body: some View {
         GeometryReader { geometry in
             let layout = WorkspaceLayout(state: state, size: geometry.size)
 
             ZStack(alignment: .topLeading) {
-                VStack(spacing: 0) {
+                VStack(spacing: AppTheme.Spacing.zero) {
                     if state.showTabBar {
                         EditorTabBar(state: state)
                     }
@@ -16,6 +18,10 @@ struct DetailWorkspace: View {
                         EditorBreadcrumb(state: state)
                     }
                     EditorContentView(state: state)
+                        .appCanvasStyle(
+                            inset: CGFloat(canvasInset),
+                            radius: CGFloat(canvasRadius)
+                        )
                 }
                 .frame(
                     width: layout.editorFrame.width,
@@ -27,7 +33,7 @@ struct DetailWorkspace: View {
                 TerminalPane(
                     state: state,
                     dock: layout.terminalDock,
-                    availableHeight: layout.availableHeight
+                    availableHeight: layout.terminalResizeHeight
                 )
                 .frame(width: layout.terminalFrame.width, height: layout.terminalFrame.height)
                 .clipped()
@@ -40,26 +46,12 @@ struct DetailWorkspace: View {
                     .offset(x: layout.inspectorFrame.minX, y: layout.inspectorFrame.minY)
                     .zIndex(1)
 
-                if layout.showVerticalDivider {
-                    Rectangle()
-                        .fill(Color.appSeparator)
-                        .frame(width: AppTheme.BorderWidth.hairline, height: layout.availableHeight)
-                        .offset(x: layout.editorFrame.maxX, y: 0)
-                }
-
-                if layout.showHorizontalDivider {
-                    Rectangle()
-                        .fill(Color.appSeparator)
-                        .frame(width: layout.editorFrame.width, height: AppTheme.BorderWidth.hairline)
-                        .offset(x: 0, y: layout.editorFrame.maxY)
-                }
-
                 TransportBar(state: state)
-                    .frame(width: geometry.size.width, height: AppTheme.transportHeight)
-                    .offset(y: geometry.size.height - AppTheme.transportHeight)
+                    .frame(width: layout.transportFrame.width, height: layout.transportFrame.height)
+                    .offset(x: layout.transportFrame.minX, y: layout.transportFrame.minY)
                     .zIndex(3)
             }
-            .background(Color.appContent)
+            .background(Color.appText)
         }
     }
 }
@@ -68,33 +60,41 @@ struct DetailWorkspace: View {
 struct WorkspaceLayout {
     let size: CGSize
     let availableHeight: CGFloat
+    let terminalResizeHeight: CGFloat
     let editorFrame: CGRect
     let terminalFrame: CGRect
     let inspectorFrame: CGRect
+    let transportFrame: CGRect
     let terminalDock: TerminalDockPosition
     let inspectorPlacement: InspectorPlacement
-    let showVerticalDivider: Bool
-    let showHorizontalDivider: Bool
-
-    private static let inspectorRightWidth: CGFloat = 304
-    private static let terminalMinWidth: CGFloat = 340
-    private static let terminalMaxWidth: CGFloat = 520
-    private static let bottomInspectorHeight: CGFloat = 240
 
     init(state: AppState, size: CGSize) {
         self.size = size
 
-        let availableHeight = max(size.height - AppTheme.transportHeight, 0)
-        self.availableHeight = availableHeight
+        let contentHeight = size.height
+        self.availableHeight = contentHeight
+
+        let transportHeight = AppTheme.Layout.transportHeight
+        let contentAboveTransport = max(contentHeight - transportHeight, 0)
+        self.terminalResizeHeight = contentAboveTransport
 
         if state.terminalPresentation == .full {
             editorFrame = .zero
-            terminalFrame = CGRect(x: 0, y: 0, width: size.width, height: availableHeight)
+            terminalFrame = CGRect(
+                x: 0,
+                y: 0,
+                width: size.width,
+                height: contentAboveTransport
+            )
             inspectorFrame = .zero
+            transportFrame = CGRect(
+                x: 0,
+                y: contentAboveTransport,
+                width: size.width,
+                height: transportHeight
+            )
             terminalDock = .full
             inspectorPlacement = .hidden
-            showVerticalDivider = false
-            showHorizontalDivider = false
             return
         }
 
@@ -104,7 +104,7 @@ struct WorkspaceLayout {
         if terminalSplit {
             switch state.terminalDock {
             case .automatic:
-                effectiveDock = size.width >= 1000 ? .right : .bottom
+                effectiveDock = size.width >= AppTheme.Layout.autoDockThreshold ? .right : .bottom
             case .right:
                 effectiveDock = .right
             case .bottom:
@@ -117,47 +117,44 @@ struct WorkspaceLayout {
         let terminalAtRight = terminalSplit && effectiveDock == .right
         let terminalAtBottom = terminalSplit && effectiveDock == .bottom
 
-        let terminalRightWidth = min(max(size.width * 0.32, Self.terminalMinWidth), Self.terminalMaxWidth)
         let rightWidth: CGFloat
         if terminalAtRight {
-            rightWidth = terminalRightWidth
+            rightWidth = min(
+                max(size.width * AppTheme.Layout.terminalRightFraction, AppTheme.Layout.terminalMinWidth),
+                AppTheme.Layout.terminalMaxWidth
+            )
         } else if inspectorVisible {
-            rightWidth = Self.inspectorRightWidth
+            rightWidth = AppTheme.Layout.inspectorWidth
         } else {
             rightWidth = 0
         }
 
-        let terminalBottomHeight = min(
-            max(availableHeight * state.terminalFraction, 180),
-            max(0, availableHeight - 160)
-        )
-        let bottomInspectorHeight = min(
-            Self.bottomInspectorHeight,
-            max(160, availableHeight * 0.30)
-        )
-
+        let mainWidth = max(size.width - rightWidth, 0)
         let bottomHeight: CGFloat
         if terminalAtBottom {
-            bottomHeight = terminalBottomHeight
+            bottomHeight = min(
+                max(contentAboveTransport * state.terminalFraction, AppTheme.Layout.terminalMinHeight),
+                max(0, contentAboveTransport - AppTheme.Layout.terminalMinEditorHeight)
+            )
         } else if terminalAtRight && inspectorVisible {
-            bottomHeight = bottomInspectorHeight
+            bottomHeight = min(
+                AppTheme.Layout.bottomInspectorHeight,
+                max(
+                    AppTheme.Layout.bottomInspectorMinHeight,
+                    contentAboveTransport * AppTheme.Layout.bottomInspectorFraction
+                )
+            )
         } else {
             bottomHeight = 0
         }
 
-        let editorWidth = max(size.width - rightWidth, 0)
-        let editorHeight = max(availableHeight - bottomHeight, 0)
-        editorFrame = CGRect(x: 0, y: 0, width: editorWidth, height: editorHeight)
+        let editorHeight = max(contentAboveTransport - bottomHeight, 0)
+        editorFrame = CGRect(x: 0, y: 0, width: mainWidth, height: editorHeight)
 
         if terminalAtRight {
-            terminalFrame = CGRect(x: editorWidth, y: 0, width: rightWidth, height: availableHeight)
+            terminalFrame = CGRect(x: mainWidth, y: 0, width: rightWidth, height: contentHeight)
         } else if terminalAtBottom {
-            terminalFrame = CGRect(
-                x: 0,
-                y: availableHeight - bottomHeight,
-                width: editorWidth,
-                height: bottomHeight
-            )
+            terminalFrame = CGRect(x: 0, y: editorHeight, width: mainWidth, height: bottomHeight)
         } else {
             terminalFrame = .zero
         }
@@ -166,17 +163,17 @@ struct WorkspaceLayout {
             if terminalAtRight {
                 inspectorFrame = CGRect(
                     x: 0,
-                    y: availableHeight - bottomHeight,
-                    width: editorWidth,
+                    y: contentHeight - bottomHeight,
+                    width: mainWidth,
                     height: bottomHeight
                 )
                 inspectorPlacement = .bottom
             } else {
                 inspectorFrame = CGRect(
-                    x: editorWidth,
+                    x: mainWidth,
                     y: 0,
                     width: rightWidth,
-                    height: availableHeight
+                    height: contentHeight
                 )
                 inspectorPlacement = .right
             }
@@ -185,9 +182,19 @@ struct WorkspaceLayout {
             inspectorPlacement = .hidden
         }
 
-        terminalDock = terminalAtRight ? .right : .bottom
+        let transportY: CGFloat
+        if inspectorPlacement == .bottom {
+            transportY = max(contentHeight - bottomHeight - transportHeight, 0)
+        } else {
+            transportY = contentAboveTransport
+        }
+        transportFrame = CGRect(
+            x: 0,
+            y: transportY,
+            width: mainWidth,
+            height: transportHeight
+        )
 
-        showVerticalDivider = rightWidth > 0
-        showHorizontalDivider = bottomHeight > 0 && editorWidth > 0
+        terminalDock = terminalAtRight ? .right : .bottom
     }
 }

@@ -50,15 +50,15 @@ struct WaveformView: View {
             height: waveHeight
         )
         context.fill(
-            Path(roundedRect: rect, cornerRadius: AppTheme.Radius.sm),
-            with: .color(Color.accentColor.opacity(0.10))
+            Path(roundedRect: rect, cornerRadius: AppTheme.Radius.control),
+            with: .color(Color.accentColor.opacity(AppTheme.Opacity.soft))
         )
 
         let bracket = Path { path in
             path.move(to: CGPoint(x: startX, y: topPadding))
             path.addLine(to: CGPoint(x: endX, y: topPadding))
         }
-        context.stroke(bracket, with: .color(Color.accentColor.opacity(0.55)), lineWidth: 1.5)
+        context.stroke(bracket, with: .color(Color.accentColor.opacity(AppTheme.Opacity.strongSoft)), lineWidth: 1.5)
     }
 
     private func drawGrid(
@@ -68,7 +68,7 @@ struct WaveformView: View {
         waveHeight: CGFloat,
         midY: CGFloat
     ) {
-        let gridColor = Color(nsColor: .separatorColor).opacity(0.28)
+        let gridColor = Color.appSeparator.opacity(AppTheme.Opacity.medium)
 
         var centerLine = Path()
         centerLine.move(to: CGPoint(x: 0, y: midY))
@@ -83,7 +83,7 @@ struct WaveformView: View {
             line.addLine(to: CGPoint(x: lineX, y: topPadding + waveHeight))
             context.stroke(
                 line,
-                with: .color(Color(nsColor: .separatorColor).opacity(seconds == 0 ? 0.45 : 0.18)),
+                with: .color(Color.appSeparator.opacity(seconds == AppTheme.Time.zero ? AppTheme.Opacity.wash : AppTheme.Opacity.border)),
                 lineWidth: 0.5
             )
             seconds += 2
@@ -121,8 +121,8 @@ struct WaveformView: View {
             bars,
             with: .linearGradient(
                 Gradient(colors: [
-                    Color.accentColor.opacity(0.92),
-                    Color.accentColor.opacity(0.55)
+                    Color.accentColor.opacity(AppTheme.Opacity.opaqueSoft),
+                    Color.accentColor.opacity(AppTheme.Opacity.strongSoft)
                 ]),
                 startPoint: CGPoint(x: 0, y: midY),
                 endPoint: CGPoint(x: size.width, y: midY)
@@ -155,7 +155,7 @@ struct WaveformView: View {
         while seconds <= duration {
             let labelX = x(for: seconds, width: size.width)
             let label = Text(TranscriptSegment.timecode(for: seconds).prefix(5))
-                .font(.system(size: AppTheme.FontSize.xxs, design: .monospaced))
+                .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
                 .foregroundStyle(Color.secondary)
             context.draw(
                 label,

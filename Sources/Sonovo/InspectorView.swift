@@ -21,7 +21,7 @@ struct InspectorView: View {
     }
 
     private var rightBody: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             inspectorTabs
 
             switch state.inspectorTab {
@@ -33,16 +33,16 @@ struct InspectorView: View {
                 notesContent
             }
         }
-        .background(.regularMaterial)
+        .background(Color.appText)
     }
 
     private var bottomBody: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             bottomHeader
-            Hairline()
             bottomContent
+                .padding(.top, AppTheme.Spacing.sm)
         }
-        .background(.regularMaterial)
+        .background(Color.appText)
     }
 
     private var bottomHeader: some View {
@@ -56,11 +56,11 @@ struct InspectorView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 96)
+            .frame(width: AppTheme.Size.inspectorTabsWidth)
 
             if let asset = state.selectedAsset {
                 Text(asset.name)
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
                     .lineLimit(1)
                 StatusBadge(status: state.status(for: asset))
                 Spacer(minLength: AppTheme.Spacing.sm)
@@ -70,16 +70,15 @@ struct InspectorView: View {
             }
         }
         .padding(.horizontal, AppTheme.Spacing.md)
-        .frame(height: 34)
-        .background(.bar)
+        .frame(height: AppTheme.Size.bottomHeaderHeight)
     }
 
     @ViewBuilder
     private func bottomActions(for asset: ProductionAsset) -> some View {
         if state.status(for: asset) == .approved {
             Label("Approved", systemImage: "checkmark.circle.fill")
-                .font(.system(size: AppTheme.FontSize.xs, weight: .medium))
-                .foregroundStyle(.green)
+                .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                .foregroundStyle(AppTheme.Palette.approved)
             Button("Reopen Review") { state.reopen(asset) }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -140,52 +139,52 @@ struct InspectorView: View {
     }
 
     private func bottomInfoColumn(_ title: String, rows: [MetadataItem]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s6) {
             Text(title.uppercased())
-                .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                .tracking(0.7)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .tracking(AppTheme.Tracking.normal)
                 .foregroundStyle(.tertiary)
 
             ForEach(rows) { item in
                 MetadataRow(label: item.label, value: item.value)
             }
         }
-        .frame(minWidth: 170, alignment: .leading)
+        .frame(minWidth: AppTheme.Size.bottomInfoColumnMinWidth, alignment: .leading)
     }
 
     @ViewBuilder
     private var bottomLatestNote: some View {
         if let note = state.notes.first(where: { !$0.isResolved }) {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
                 Text("LATEST NOTE")
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                    .tracking(0.7)
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                    .tracking(AppTheme.Tracking.normal)
                     .foregroundStyle(.tertiary)
 
-                HStack(spacing: 5) {
+                HStack(spacing: AppTheme.Spacing.s5) {
                     Text(note.timecode)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.accentColor)
                     Spacer()
                     Text(note.createdAt)
-                        .font(.system(size: 9))
+                        .font(.system(size: AppTheme.TypeScale.xxs))
                         .foregroundStyle(.tertiary)
                 }
 
                 Text(note.text)
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .lineLimit(4)
 
                 Button("Open Notes") {
                     state.inspectorTab = .notes
                 }
                 .buttonStyle(.link)
-                .font(.system(size: AppTheme.FontSize.xs))
+                .font(.system(size: AppTheme.TypeScale.xs))
             }
-            .frame(width: 260, alignment: .leading)
+            .frame(width: AppTheme.Size.bottomNoteWidth, alignment: .leading)
             .padding(AppTheme.Spacing.sm)
             .background(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                     .fill(Color.appCard)
             )
         }
@@ -195,16 +194,16 @@ struct InspectorView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: AppTheme.Spacing.sm) {
                 ForEach(SampleContent.takes) { take in
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
                         HStack(spacing: AppTheme.Spacing.xs) {
                             Text(take.name)
-                                .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                             if take.id == "take-03" {
                                 Text("Current")
-                                    .font(.system(size: 8, weight: .medium))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                    .font(.system(size: AppTheme.TypeScale.micro, weight: .medium))
+                                    .padding(.horizontal, AppTheme.Spacing.s5)
+                                    .padding(.vertical, AppTheme.Spacing.hairline)
+                                    .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.tint)))
                                     .foregroundStyle(Color.accentColor)
                             }
                             Spacer()
@@ -212,10 +211,10 @@ struct InspectorView: View {
                         }
 
                         Text(take.detail)
-                            .font(.system(size: AppTheme.FontSize.xs))
+                            .font(.system(size: AppTheme.TypeScale.xs))
                             .foregroundStyle(.secondary)
                         Text(take.createdAt)
-                            .font(.system(size: AppTheme.FontSize.xxs))
+                            .font(.system(size: AppTheme.TypeScale.xxs))
                             .foregroundStyle(.tertiary)
 
                         if take.status == .approved {
@@ -225,17 +224,17 @@ struct InspectorView: View {
                                 }
                             }
                             .buttonStyle(.link)
-                            .font(.system(size: AppTheme.FontSize.xs))
+                            .font(.system(size: AppTheme.TypeScale.xs))
                         }
                     }
                     .padding(AppTheme.Spacing.sm)
-                    .frame(width: 210, alignment: .leading)
+                    .frame(width: AppTheme.Size.takeCardWidth, alignment: .leading)
                     .background(
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                             .fill(Color.appCard)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                             .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
                     )
                 }
@@ -245,7 +244,7 @@ struct InspectorView: View {
     }
 
     private var bottomNotes: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: AppTheme.Spacing.sm) {
                     ForEach(state.notes) { note in
@@ -255,15 +254,13 @@ struct InspectorView: View {
                 .padding(AppTheme.Spacing.md)
             }
 
-            Hairline()
-
             HStack(spacing: AppTheme.Spacing.xs) {
                 TextField(
                     "Add a note at \(TranscriptSegment.timecode(for: state.playhead))…",
                     text: $state.noteDraft
                 )
                 .textFieldStyle(.plain)
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .onSubmit {
                     state.addNote()
                 }
@@ -272,7 +269,7 @@ struct InspectorView: View {
                     state.addNote()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 16))
+                        .font(.system(size: AppTheme.TypeScale.title))
                         .foregroundStyle(
                             state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 ? Color.secondary
@@ -283,13 +280,13 @@ struct InspectorView: View {
                 .disabled(state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(.horizontal, AppTheme.Spacing.sm)
-            .frame(height: 28)
+            .frame(height: AppTheme.ControlSize.large)
             .background(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                     .fill(Color.appCard)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                     .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
             )
             .padding(AppTheme.Spacing.sm)
@@ -297,79 +294,66 @@ struct InspectorView: View {
     }
 
     private func bottomNoteCard(_ note: ReviewNote) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
             HStack {
                 Text(note.timecode)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.10)))
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, AppTheme.Spacing.s5)
+                    .padding(.vertical, AppTheme.Spacing.xxs)
+                    .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.soft)))
                     .foregroundStyle(Color.accentColor)
                 Spacer()
                 Button {
                     state.toggleNoteResolved(note.id)
                 } label: {
                     Image(systemName: note.isResolved ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: AppTheme.FontSize.md))
-                        .foregroundStyle(note.isResolved ? Color.green : Color.secondary)
+                        .font(.system(size: AppTheme.TypeScale.md))
+                        .foregroundStyle(note.isResolved ? AppTheme.Palette.approved : Color.secondary)
                 }
                 .buttonStyle(.plain)
                 .help(note.isResolved ? "Reopen note" : "Resolve note")
+                .accessibilityLabel(note.isResolved ? "Reopen note" : "Resolve note")
             }
 
             Text(note.text)
-                .font(.system(size: AppTheme.FontSize.xs))
+                .font(.system(size: AppTheme.TypeScale.xs))
                 .lineLimit(3)
 
             Text("\(note.author) · \(note.createdAt)")
-                .font(.system(size: AppTheme.FontSize.xxs))
+                .font(.system(size: AppTheme.TypeScale.xxs))
                 .foregroundStyle(.tertiary)
         }
         .padding(AppTheme.Spacing.sm)
-        .frame(width: 260, alignment: .leading)
+        .frame(width: AppTheme.Size.bottomNoteWidth, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
-                .fill(Color.appCard.opacity(note.isResolved ? 0.5 : 1))
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                .fill(Color.appCard.opacity(note.isResolved ? AppTheme.Opacity.half : AppTheme.Opacity.full))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                 .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
         )
-        .opacity(note.isResolved ? 0.65 : 1)
+        .opacity(note.isResolved ? AppTheme.Opacity.heavy : AppTheme.Opacity.full)
     }
 
     private var inspectorTabs: some View {
-        HStack(spacing: 1) {
+        Picker("Inspector", selection: $state.inspectorTab) {
             ForEach(InspectorTab.allCases) { tab in
-                Button {
-                    state.inspectorTab = tab
-                } label: {
-                    Image(systemName: tab.icon)
-                        .font(.system(size: AppTheme.FontSize.body))
-                        .frame(maxWidth: .infinity, minHeight: 24)
-                        .background(
-                            RoundedRectangle(cornerRadius: AppTheme.Radius.xs, style: .continuous)
-                                .fill(state.inspectorTab == tab ? Color.accentColor.opacity(0.11) : Color.clear)
-                        )
-                        .foregroundStyle(state.inspectorTab == tab ? Color.accentColor : Color.secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(tab.label)
-                .accessibilityLabel("\(tab.label) inspector")
+                Image(systemName: tab.icon)
+                    .accessibilityLabel(tab.label)
+                    .tag(tab)
             }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
         .padding(.horizontal, AppTheme.Spacing.sm)
-        .padding(.vertical, 5)
-        .background(.bar)
-        .overlay(alignment: .bottom) {
-            Hairline()
-        }
+        .padding(.vertical, AppTheme.Spacing.xs)
+        .accessibilityLabel("Inspector")
     }
 
     private var infoContent: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.s18) {
                 if let asset = state.selectedAsset {
                     assetHeader(asset)
 
@@ -400,7 +384,7 @@ struct InspectorView: View {
                         systemImage: "sidebar.right",
                         description: Text("Select an asset to inspect it.")
                     )
-                    .padding(.top, 40)
+                    .padding(.top, AppTheme.Spacing.s40)
                 }
             }
             .padding(AppTheme.Spacing.lg)
@@ -410,29 +394,29 @@ struct InspectorView: View {
     private func assetHeader(_ asset: ProductionAsset) -> some View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
             ZStack {
-                RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.12))
+                RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                    .fill(Color.accentColor.opacity(AppTheme.Opacity.tint))
                 Image(systemName: asset.kind.icon)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: AppTheme.TypeScale.title, weight: .medium))
                     .foregroundStyle(Color.accentColor)
             }
-            .frame(width: 36, height: 36)
+            .frame(width: AppTheme.Size.avatar, height: AppTheme.Size.avatar)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
                 Text(asset.name)
-                    .font(.system(size: AppTheme.FontSize.md, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
                     .lineLimit(2)
 
                 HStack(spacing: AppTheme.Spacing.xs) {
                     StatusBadge(status: state.status(for: asset))
                     Text(asset.shortDetail)
-                        .font(.system(size: AppTheme.FontSize.xxs))
+                        .font(.system(size: AppTheme.TypeScale.xxs))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
 
-            Spacer(minLength: 0)
+            Spacer(minLength: AppTheme.Spacing.zero)
         }
     }
 
@@ -440,19 +424,19 @@ struct InspectorView: View {
         Group {
             if let note = state.notes.first(where: { !$0.isResolved }) {
                 InspectorSection("Latest Note") {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 5) {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
+                        HStack(spacing: AppTheme.Spacing.s5) {
                             Text(note.timecode)
-                                .font(.system(size: AppTheme.FontSize.xxs, weight: .medium, design: .monospaced))
+                                .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
                                 .foregroundStyle(Color.accentColor)
                             Spacer()
                             Text(note.createdAt)
-                                .font(.system(size: AppTheme.FontSize.xxs))
+                                .font(.system(size: AppTheme.TypeScale.xxs))
                                 .foregroundStyle(.tertiary)
                         }
 
                         Text(note.text)
-                            .font(.system(size: AppTheme.FontSize.sm))
+                            .font(.system(size: AppTheme.TypeScale.sm))
                             .foregroundStyle(.primary)
                             .fixedSize(horizontal: false, vertical: true)
 
@@ -460,11 +444,11 @@ struct InspectorView: View {
                             state.inspectorTab = .notes
                         }
                         .buttonStyle(.link)
-                        .font(.system(size: AppTheme.FontSize.xs))
+                        .font(.system(size: AppTheme.TypeScale.xs))
                     }
                     .padding(AppTheme.Spacing.sm)
                     .background(
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+                        RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                             .fill(Color.appCard)
                     )
                 }
@@ -475,14 +459,13 @@ struct InspectorView: View {
     @ViewBuilder
     private func reviewActions(for asset: ProductionAsset) -> some View {
         VStack(spacing: AppTheme.Spacing.sm) {
-            Hairline()
 
             if state.status(for: asset) == .approved {
-                HStack(spacing: 6) {
+                HStack(spacing: AppTheme.Spacing.s6) {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                        .foregroundStyle(AppTheme.Palette.approved)
                     Text("Approved")
-                        .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                        .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                     Spacer()
                 }
 
@@ -518,43 +501,43 @@ struct InspectorView: View {
 
     private var historyContent: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.zero) {
                 HStack {
                     Text("Takes")
-                        .font(.system(size: AppTheme.FontSize.md, weight: .semibold))
+                        .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
                     Spacer()
                     Text("\(SampleContent.takes.count) versions")
-                        .font(.system(size: AppTheme.FontSize.xs))
+                        .font(.system(size: AppTheme.TypeScale.xs))
                         .foregroundStyle(.secondary)
                 }
                 .padding(.bottom, AppTheme.Spacing.lg)
 
                 ForEach(Array(SampleContent.takes.enumerated()), id: \.element.id) { index, take in
                     HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
-                        VStack(spacing: 0) {
+                        VStack(spacing: AppTheme.Spacing.zero) {
                             Circle()
                                 .fill(take.status.color)
-                                .frame(width: 7, height: 7)
-                                .padding(.top, 5)
+                                .frame(width: AppTheme.IconSize.dotLarge, height: AppTheme.IconSize.dotLarge)
+                                .padding(.top, AppTheme.Spacing.s5)
 
                             if index < SampleContent.takes.count - 1 {
                                 Rectangle()
                                     .fill(Color.appSeparator)
-                                    .frame(width: 1, height: 42)
+                                    .frame(width: AppTheme.BorderWidth.thin, height: AppTheme.Size.timelineLineHeight)
                             }
                         }
-                        .frame(width: 8)
+                        .frame(width: AppTheme.Size.timelineDotColumnWidth)
 
-                        VStack(alignment: .leading, spacing: 3) {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
                             HStack(spacing: AppTheme.Spacing.xs) {
                                 Text(take.name)
-                                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                                 if take.id == "take-03" {
                                     Text("Current")
-                                        .font(.system(size: AppTheme.FontSize.xxs, weight: .medium))
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
+                                        .padding(.horizontal, AppTheme.Spacing.s5)
+                                        .padding(.vertical, AppTheme.Spacing.hairline)
+                                        .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.tint)))
                                         .foregroundStyle(Color.accentColor)
                                 }
                                 Spacer()
@@ -562,11 +545,11 @@ struct InspectorView: View {
                             }
 
                             Text(take.detail)
-                                .font(.system(size: AppTheme.FontSize.xs))
+                                .font(.system(size: AppTheme.TypeScale.xs))
                                 .foregroundStyle(.secondary)
 
                             Text(take.createdAt)
-                                .font(.system(size: AppTheme.FontSize.xxs))
+                                .font(.system(size: AppTheme.TypeScale.xxs))
                                 .foregroundStyle(.tertiary)
 
                             if take.status == .approved {
@@ -576,8 +559,8 @@ struct InspectorView: View {
                                     }
                                 }
                                 .buttonStyle(.link)
-                                .font(.system(size: AppTheme.FontSize.xs))
-                                .padding(.top, 2)
+                                .font(.system(size: AppTheme.TypeScale.xs))
+                                .padding(.top, AppTheme.Spacing.xxs)
                             }
                         }
                         .padding(.bottom, AppTheme.Spacing.lg)
@@ -589,19 +572,17 @@ struct InspectorView: View {
     }
 
     private var notesContent: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             HStack {
                 Text("Review Notes")
-                    .font(.system(size: AppTheme.FontSize.md, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
                 Spacer()
                 Text("\(state.notes.filter { !$0.isResolved }.count) open")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, AppTheme.Spacing.lg)
             .padding(.vertical, AppTheme.Spacing.md)
-
-            Hairline()
 
             ScrollView {
                 LazyVStack(spacing: AppTheme.Spacing.sm) {
@@ -612,11 +593,8 @@ struct InspectorView: View {
                 .padding(AppTheme.Spacing.md)
             }
 
-            Hairline()
-
             noteComposer
                 .padding(AppTheme.Spacing.sm)
-                .background(.bar)
         }
     }
 
@@ -626,7 +604,7 @@ struct InspectorView: View {
         return HStack(spacing: AppTheme.Spacing.xs) {
             TextField("Add a note at \(timecode)…", text: $state.noteDraft)
                 .textFieldStyle(.plain)
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .onSubmit {
                     state.addNote()
                 }
@@ -635,7 +613,7 @@ struct InspectorView: View {
                 state.addNote()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 16))
+                    .font(.system(size: AppTheme.TypeScale.title))
                     .foregroundStyle(
                         state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             ? Color.secondary
@@ -647,13 +625,13 @@ struct InspectorView: View {
             .help("Add note")
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
-        .frame(height: 28)
+        .frame(height: AppTheme.ControlSize.large)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                 .fill(Color.appCard)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                 .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
         )
     }
@@ -764,13 +742,13 @@ private struct NoteCard: View {
     let note: ReviewNote
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s6) {
             HStack(spacing: AppTheme.Spacing.xs) {
                 Text(note.timecode)
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.10)))
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, AppTheme.Spacing.s5)
+                    .padding(.vertical, AppTheme.Spacing.xxs)
+                    .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.soft)))
                     .foregroundStyle(Color.accentColor)
 
                 Spacer()
@@ -779,31 +757,31 @@ private struct NoteCard: View {
                     state.toggleNoteResolved(note.id)
                 } label: {
                     Image(systemName: note.isResolved ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: AppTheme.FontSize.md))
-                        .foregroundStyle(note.isResolved ? Color.green : Color.secondary)
+                        .font(.system(size: AppTheme.TypeScale.md))
+                        .foregroundStyle(note.isResolved ? AppTheme.Palette.approved : Color.secondary)
                 }
                 .buttonStyle(.plain)
                 .help(note.isResolved ? "Reopen note" : "Resolve note")
             }
 
             Text(note.text)
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(note.isResolved ? Color.secondary : Color.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("\(note.author) · \(note.createdAt)")
-                .font(.system(size: AppTheme.FontSize.xxs))
+                .font(.system(size: AppTheme.TypeScale.xxs))
                 .foregroundStyle(.tertiary)
         }
         .padding(AppTheme.Spacing.sm)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
-                .fill(Color.appCard.opacity(note.isResolved ? 0.5 : 1))
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                .fill(Color.appCard.opacity(note.isResolved ? AppTheme.Opacity.half : AppTheme.Opacity.full))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.md, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                 .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
         )
-        .opacity(note.isResolved ? 0.65 : 1)
+        .opacity(note.isResolved ? AppTheme.Opacity.heavy : AppTheme.Opacity.full)
     }
 }

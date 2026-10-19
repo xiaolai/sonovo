@@ -27,17 +27,17 @@ struct AudioReviewView: View {
 
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 HStack(spacing: AppTheme.Spacing.sm) {
                     Text(asset.name)
-                        .font(.system(size: AppTheme.FontSize.lg, weight: .semibold))
+                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
                         .lineLimit(1)
 
                     StatusBadge(status: state.status(for: asset))
                 }
 
                 Text("Narrator · \(asset.shortDetail) · 24-bit")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
 
@@ -53,8 +53,8 @@ struct AudioReviewView: View {
 
             if state.status(for: asset) == .approved {
                 Label("Approved", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: AppTheme.FontSize.xs, weight: .medium))
-                    .foregroundStyle(.green)
+                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                    .foregroundStyle(AppTheme.Palette.approved)
             } else {
                 Button {
                     state.approve(asset)
@@ -68,21 +68,21 @@ struct AudioReviewView: View {
     }
 
     private var waveformCard: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             HStack(spacing: AppTheme.Spacing.sm) {
                 Text("Waveform")
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
 
                 Spacer()
 
                 if let segment = state.selectedTranscript {
                     Text("\(segment.timecode) – \(TranscriptSegment.timecode(for: segment.end))")
-                        .font(.system(size: AppTheme.FontSize.xs, design: .monospaced))
+                        .font(.system(size: AppTheme.TypeScale.xs, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
 
                 Text("48 kHz")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, AppTheme.Spacing.md)
@@ -94,7 +94,7 @@ struct AudioReviewView: View {
                 selectedID: state.selectedTranscriptID,
                 playhead: state.playhead
             )
-            .frame(height: 208)
+            .frame(height: AppTheme.Size.waveformHeight)
             .padding(.horizontal, AppTheme.Spacing.md)
             .padding(.vertical, AppTheme.Spacing.sm)
         }
@@ -102,36 +102,32 @@ struct AudioReviewView: View {
     }
 
     private var transcriptCard: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             HStack(spacing: AppTheme.Spacing.sm) {
                 Text("Transcript")
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .semibold))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
 
                 Text("Auto-aligned · \(state.transcript.count) segments")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
                 Label("Edit words to cut audio", systemImage: "text.cursor")
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, AppTheme.Spacing.md)
             .padding(.vertical, AppTheme.Spacing.sm)
 
-            Hairline()
-
             ScrollView {
-                LazyVStack(spacing: 2) {
+                LazyVStack(spacing: AppTheme.Spacing.xxs) {
                     ForEach(state.transcript) { segment in
                         TranscriptRow(state: state, segment: segment)
                     }
                 }
                 .padding(AppTheme.Spacing.sm)
             }
-
-            Hairline()
 
             transcriptFooter
         }
@@ -143,7 +139,7 @@ struct AudioReviewView: View {
         HStack(spacing: AppTheme.Spacing.sm) {
             if let segment = state.selectedTranscript {
                 Text("Selected · \(segment.timecode)")
-                    .font(.system(size: AppTheme.FontSize.xs, design: .monospaced))
+                    .font(.system(size: AppTheme.TypeScale.xs, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
 
@@ -196,36 +192,36 @@ private struct TranscriptRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.sm) {
             Text(segment.timecode)
-                .font(.system(size: AppTheme.FontSize.xs, weight: .medium, design: .monospaced))
+                .font(.system(size: AppTheme.TypeScale.xs, weight: .medium, design: .monospaced))
                 .foregroundStyle(isSelected ? Color.accentColor : Color.appTertiaryLabel)
-                .frame(width: 54, alignment: .leading)
-                .padding(.top, 2)
+                .frame(width: AppTheme.Size.timecodeWidth, alignment: .leading)
+                .padding(.top, AppTheme.Spacing.xxs)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
                 Text(segment.speaker.uppercased())
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .semibold))
-                    .tracking(0.6)
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                    .tracking(AppTheme.Tracking.tight)
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
 
                 Text(segment.text)
-                    .font(.system(size: AppTheme.FontSize.md))
+                    .font(.system(size: AppTheme.TypeScale.md))
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer(minLength: 0)
+            Spacer(minLength: AppTheme.Spacing.zero)
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.sm)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.sm, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.clear)
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(AppTheme.Opacity.faint) : Color.clear)
         )
         .overlay(alignment: .leading) {
             if isSelected {
-                RoundedRectangle(cornerRadius: 1)
+                RoundedRectangle(cornerRadius: AppTheme.Radius.line)
                     .fill(Color.accentColor)
-                    .frame(width: 2)
-                    .padding(.vertical, 6)
+                    .frame(width: AppTheme.BorderWidth.thick)
+                    .padding(.vertical, AppTheme.Spacing.s6)
             }
         }
         .contentShape(Rectangle())
@@ -244,18 +240,18 @@ struct AudioCompareView: View {
     var body: some View {
         VStack(spacing: AppTheme.Spacing.md) {
             HStack(spacing: AppTheme.Spacing.sm) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                     Text("Compare Takes")
-                        .font(.system(size: AppTheme.FontSize.lg, weight: .semibold))
+                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
                     Text("Take 02 (approved) against \(state.selectedAsset?.name ?? "the current take")")
-                        .font(.system(size: AppTheme.FontSize.xs))
+                        .font(.system(size: AppTheme.TypeScale.xs))
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
                 Label("Playheads synced", systemImage: "link")
-                    .font(.system(size: AppTheme.FontSize.xs))
+                    .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
 
                 Button {
@@ -274,7 +270,7 @@ struct AudioCompareView: View {
                 status: .approved,
                 duration: 12.8,
                 selectedID: nil,
-                tint: .green
+                tint: AppTheme.Palette.approved
             )
 
             compareCard(
@@ -284,16 +280,13 @@ struct AudioCompareView: View {
                 status: state.selectedAsset.map { state.status(for: $0) } ?? .needsReview,
                 duration: state.duration,
                 selectedID: state.selectedTranscriptID,
-                tint: .orange
+                tint: AppTheme.Palette.needsReview
             )
 
-            HStack(spacing: 0) {
+            HStack(spacing: AppTheme.Spacing.lg) {
                 differenceItem(value: "0.4s", label: "shorter")
-                differenceDivider
                 differenceItem(value: "2", label: "open notes")
-                differenceDivider
                 differenceItem(value: "−1.2", label: "LUFS")
-                differenceDivider
                 differenceItem(value: "1", label: "line re-read")
             }
             .padding(.vertical, AppTheme.Spacing.sm)
@@ -313,21 +306,21 @@ struct AudioCompareView: View {
         selectedID: String?,
         tint: Color
     ) -> some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             HStack(spacing: AppTheme.Spacing.sm) {
                 Text(letter)
-                    .font(.system(size: AppTheme.FontSize.xxs, weight: .bold))
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .bold))
                     .foregroundStyle(tint)
-                    .frame(width: 17, height: 17)
-                    .background(Circle().fill(tint.opacity(0.12)))
+                    .frame(width: AppTheme.Size.letterBadge, height: AppTheme.Size.letterBadge)
+                    .background(Circle().fill(tint.opacity(AppTheme.Opacity.tint)))
 
                 Text(name)
-                    .font(.system(size: AppTheme.FontSize.sm, weight: .medium))
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
 
                 StatusBadge(status: status, compact: true)
 
                 Text(detail)
-                    .font(.system(size: AppTheme.FontSize.xxs))
+                    .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
 
                 Spacer()
@@ -341,25 +334,19 @@ struct AudioCompareView: View {
                 selectedID: selectedID,
                 playhead: min(state.playhead, duration)
             )
-            .frame(height: 108)
+            .frame(height: AppTheme.Size.compareWaveformHeight)
             .padding(.horizontal, AppTheme.Spacing.md)
             .padding(.vertical, AppTheme.Spacing.sm)
         }
         .appCardStyle()
     }
 
-    private var differenceDivider: some View {
-        Rectangle()
-            .fill(Color.appSeparator)
-            .frame(width: 1, height: 24)
-    }
-
     private func differenceItem(value: String, label: String) -> some View {
-        VStack(spacing: 1) {
+        VStack(spacing: AppTheme.Spacing.hairline) {
             Text(value)
-                .font(.system(size: AppTheme.FontSize.md, weight: .semibold, design: .rounded))
+                .font(.system(size: AppTheme.TypeScale.md, weight: .semibold, design: .rounded))
             Text(label)
-                .font(.system(size: AppTheme.FontSize.xxs))
+                .font(.system(size: AppTheme.TypeScale.xxs))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)

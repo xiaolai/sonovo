@@ -18,12 +18,12 @@ struct TerminalPane: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: AppTheme.Spacing.zero) {
             TerminalResizeHandle(
                 fraction: $state.terminalFraction,
                 totalHeight: availableHeight
             )
-            .frame(height: dock == .bottom ? 5 : 0)
+            .frame(height: dock == .bottom ? AppTheme.Spacing.s5 : AppTheme.Spacing.zero)
             .clipped()
 
             header
@@ -43,9 +43,6 @@ struct TerminalPane: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(terminalBackground)
-        .overlay(alignment: .top) {
-            Hairline()
-        }
         .onChange(of: state.terminalPresentation) { _, newValue in
             if newValue != .hidden {
                 focusToken += 1
@@ -64,7 +61,7 @@ struct TerminalPane: View {
     private var header: some View {
         HStack(spacing: AppTheme.Spacing.xs) {
             Image(systemName: "terminal")
-                .font(.system(size: AppTheme.FontSize.sm))
+                .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(.secondary)
 
             TerminalTabBar(store: store)
@@ -78,12 +75,13 @@ struct TerminalPane: View {
                 }
             } label: {
                 Image(systemName: "rectangle.split.2x1")
-                    .frame(width: 18, height: 18)
+                    .frame(width: AppTheme.Size.menuIcon, height: AppTheme.Size.menuIcon)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
             .focusable(false)
             .help("Terminal Dock")
+            .accessibilityLabel("Terminal Dock")
 
             BarIconButton(systemName: "arrow.clockwise", help: "Restart shell") {
                 store.selectedSession?.view.restart()
@@ -107,20 +105,17 @@ struct TerminalPane: View {
             .focusable(false)
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
-        .frame(height: 30)
-        .background(.bar)
-        .overlay(alignment: .bottom) {
-            Hairline()
-        }
+        .frame(height: AppTheme.Layout.toolbarControlHeight)
+        .background(terminalBackground)
     }
 
     private var emptyState: some View {
         VStack(spacing: AppTheme.Spacing.md) {
             Image(systemName: "terminal")
-                .font(.system(size: 28, weight: .ultraLight))
+                .font(.system(size: AppTheme.TypeScale.display, weight: .ultraLight))
                 .foregroundStyle(.tertiary)
             Text("No Terminal")
-                .font(.system(size: AppTheme.FontSize.lg, weight: .medium))
+                .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
             Button("New Terminal") {
                 store.addSession()
             }
@@ -132,10 +127,7 @@ struct TerminalPane: View {
     }
 
     private var terminalBackground: Color {
-        if colorScheme == .dark {
-            return Color(red: 22.0 / 255.0, green: 22.0 / 255.0, blue: 23.0 / 255.0)
-        }
-        return Color(red: 244.0 / 255.0, green: 243.0 / 255.0, blue: 239.0 / 255.0)
+        colorScheme == .dark ? AppTheme.Palette.terminalDark : AppTheme.Palette.terminalLight
     }
 }
 
@@ -147,11 +139,9 @@ private struct TerminalResizeHandle: View {
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(Color.appSeparator)
             Capsule()
-                .fill(Color.secondary.opacity(0.35))
-                .frame(width: 28, height: 2)
+                .fill(Color.secondary.opacity(AppTheme.Opacity.secondary))
+                .frame(width: AppTheme.Size.resizeHandleWidth, height: AppTheme.Size.resizeHandleHeight)
         }
         .contentShape(Rectangle())
         .onHover { hovering in
@@ -168,8 +158,11 @@ private struct TerminalResizeHandle: View {
                         startFraction = fraction
                     }
                     guard let startFraction else { return }
-                    let delta = value.translation.height / max(totalHeight, 1)
-                    fraction = min(max(startFraction - delta, 0.18), 0.85)
+                    let delta = value.translation.height / max(totalHeight, AppTheme.Spacing.hairline)
+                    fraction = min(
+                        max(startFraction - delta, AppTheme.Layout.terminalMinFraction),
+                        AppTheme.Layout.terminalMaxFraction
+                    )
                 }
                 .onEnded { _ in
                     startFraction = nil
