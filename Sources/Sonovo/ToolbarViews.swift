@@ -104,13 +104,6 @@ struct TrailingToolbarView: View {
             .help("Review mode")
             .accessibilityLabel("Review mode")
 
-            BarIconButton(
-                systemName: "sidebar.right",
-                help: state.inspectorVisible ? "Hide Inspector" : "Show Inspector",
-                isSelected: state.inspectorVisible
-            ) {
-                state.inspectorVisible.toggle()
-            }
         }
     }
 

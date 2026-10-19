@@ -18,8 +18,17 @@ struct MainWindow: View {
             ToolbarItem(placement: .navigation) {
                 LeadingToolbarView(state: state)
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
                 TrailingToolbarView(state: state)
+
+                Button {
+                    state.inspectorVisible.toggle()
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.right")
+                        .labelStyle(.iconOnly)
+                }
+                .help(state.inspectorVisible ? "Hide Inspector" : "Show Inspector")
+                .accessibilityLabel(state.inspectorVisible ? "Hide Inspector" : "Show Inspector")
             }
         }
         .navigationTitle("\(state.production.title) — \(state.production.episode)")
