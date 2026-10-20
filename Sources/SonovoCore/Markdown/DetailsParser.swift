@@ -807,113 +807,207 @@ enum DetailsParser {
         return tags.first { $0.isOpening && $0.start == offset }
     }
 
+    /// A structural token found while scanning raw HTML.
+    private struct LexToken {
+        enum Kind {
+            case details(ParsedTag)
+            case summary(ParsedTag)
+            /// A comment, code span, or unrelated tag. It is consumed as a
+            /// unit so its contents cannot be mistaken for structure.
+            case other
+        }
+
+        let kind: Kind
+        let start: Int
+        let end: Int
+    }
+
+    /// Tokenizes raw HTML once for both details pairing and summary search.
+    ///
+    /// Fenced code, comments, inline code, escaped `<`, and unrelated tags
+    /// are consumed without producing structural tokens. Both callers used
+    /// to carry their own copy of this loop, so a lexical fix in one was
+    /// invisible to the other.
+    private struct Lexer {
+        private let ns: NSString
+        private var index = 0
+        private var fence: (character: unichar, length: Int)?
+
+        init(_ ns: NSString) {
+            self.ns = ns
+        }
+
+        mutating func next() -> LexToken? {
+            while index < ns.length {
+                let lineEnd = ns.range(
+                    of: "\n",
+                    options: [],
+                    range: NSRange(
+                        location: index,
+                        length: ns.length - index
+                    )
+                )
+                let lineLimit = lineEnd.location == NSNotFound
+                    ? ns.length
+                    : lineEnd.location
+                let line = ns.substring(
+                    with: NSRange(
+                        location: index,
+                        length: max(0, lineLimit - index)
+                    )
+                )
+                let atLineStart = index == 0
+                    || ns.character(at: index - 1) == 0x0A
+                let nextLine = lineEnd.location == NSNotFound
+                    ? ns.length
+                    : lineEnd.location + 1
+
+                if let activeFence = fence {
+                    if closesFence(
+                        line,
+                        character: activeFence.character,
+                        minimumLength: activeFence.length
+                    ) {
+                        fence = nil
+                    }
+                    index = nextLine
+                    continue
+                }
+
+                if atLineStart, let opened = openingFence(line) {
+                    fence = opened
+                    index = nextLine
+                    continue
+                }
+
+                var position = index
+                while position < lineLimit {
+                    let character = ns.character(at: position)
+
+                    if character == 0x3C { // <
+                        var backslashes = 0
+                        var probe = position - 1
+                        while probe >= 0,
+                              ns.character(at: probe) == 0x5C {
+                            backslashes += 1
+                            probe -= 1
+                        }
+                        if backslashes % 2 == 1 {
+                            // An escaped `<` is text, not a tag.
+                            position += 1
+                            continue
+                        }
+                        if let commentEnd = skipComment(
+                            ns,
+                            at: position,
+                            limit: lineLimit
+                        ) {
+                            index = commentEnd
+                            return LexToken(
+                                kind: .other,
+                                start: position,
+                                end: commentEnd
+                            )
+                        }
+                        if let tag = parseTag(
+                            ns,
+                            at: position,
+                            limit: ns.length
+                        ) {
+                            index = tag.end
+                            return LexToken(
+                                kind: .details(tag),
+                                start: position,
+                                end: tag.end
+                            )
+                        }
+                        if let summary = parseTag(
+                            ns,
+                            at: position,
+                            limit: ns.length,
+                            expecting: "summary"
+                        ) {
+                            index = summary.end
+                            return LexToken(
+                                kind: .summary(summary),
+                                start: position,
+                                end: summary.end
+                            )
+                        }
+                        // Skip any other tag as a unit so a `<details>`
+                        // inside its quoted attribute value is not mistaken
+                        // for one.
+                        if let end = skipAnyTag(
+                            ns,
+                            at: position,
+                            limit: ns.length
+                        ) {
+                            index = end
+                            return LexToken(
+                                kind: .other,
+                                start: position,
+                                end: end
+                            )
+                        }
+                    }
+
+                    if character == 0x60 { // `
+                        var backslashes = 0
+                        var probe = position - 1
+                        while probe >= 0,
+                              ns.character(at: probe) == 0x5C {
+                            backslashes += 1
+                            probe -= 1
+                        }
+                        if backslashes % 2 == 0,
+                           let after = skipInlineCode(
+                               ns,
+                               at: position,
+                               limit: lineLimit
+                           ) {
+                            index = after
+                            return LexToken(
+                                kind: .other,
+                                start: position,
+                                end: after
+                            )
+                        }
+                    }
+
+                    position += 1
+                }
+
+                // A multiline comment, code span, or tag can move the inner
+                // cursor past this line. Resume where it stopped instead of
+                // rescanning the skipped lines on the next iteration.
+                index = position > lineLimit ? position : nextLine
+            }
+            return nil
+        }
+    }
+
     /// Finds `<details>` and `</details>` tags in an HTML block, skipping
     /// comments, quoted attribute values, inline code, and fenced code.
     private static func tagsIn(
         raw: String,
         absoluteStart: Int
     ) -> [Tag] {
-        let ns = raw as NSString
+        var lexer = Lexer(raw as NSString)
         var tags: [Tag] = []
-        var index = 0
-        var fence: (character: unichar, length: Int)?
-
-        while index < ns.length {
-            let lineEnd = ns.range(
-                of: "\n",
-                options: [],
-                range: NSRange(location: index, length: ns.length - index)
-            )
-            let lineLimit = lineEnd.location == NSNotFound ? ns.length : lineEnd.location
-            let line = ns.substring(with: NSRange(location: index, length: max(0, lineLimit - index)))
-            let atLineStart = index == 0 || ns.character(at: index - 1) == 0x0A
-
-            if let activeFence = fence {
-                if closesFence(line, character: activeFence.character, minimumLength: activeFence.length) {
-                    fence = nil
-                }
-                index = lineEnd.location == NSNotFound ? ns.length : lineEnd.location + 1
-                continue
+        while let token = lexer.next() {
+            guard case let .details(tag) = token.kind else { continue }
+            if absoluteStart >= 0 {
+                tags.append(
+                    Tag(
+                        isOpening: tag.isOpening,
+                        isOpenAttribute: tag.isOpenAttribute,
+                        isSelfClosing: tag.isSelfClosing,
+                        start: absoluteStart + token.start,
+                        end: absoluteStart + token.end
+                    )
+                )
             }
-
-            if atLineStart, let opened = openingFence(line) {
-                fence = opened
-                index = lineEnd.location == NSNotFound ? ns.length : lineEnd.location + 1
-                continue
-            }
-
-            var position = index
-            while position < lineLimit {
-                let character = ns.character(at: position)
-
-                if character == 0x3C { // <
-                    var backslashes = 0
-                    var probe = position - 1
-                    while probe >= 0, ns.character(at: probe) == 0x5C {
-                        backslashes += 1
-                        probe -= 1
-                    }
-                    if backslashes % 2 == 1 {
-                        // An escaped `<` is text, not a tag.
-                        position += 1
-                        continue
-                    }
-                    if let commentEnd = skipComment(ns, at: position, limit: lineLimit) {
-                        position = commentEnd
-                        continue
-                    }
-                    if let tag = parseTag(ns, at: position, limit: ns.length) {
-                        if absoluteStart >= 0 {
-                            tags.append(
-                                Tag(
-                                    isOpening: tag.isOpening,
-                                    isOpenAttribute: tag.isOpenAttribute,
-                                    isSelfClosing: tag.isSelfClosing,
-                                    start: absoluteStart + position,
-                                    end: absoluteStart + tag.end
-                                )
-                            )
-                        }
-                        position = tag.end
-                        continue
-                    }
-                    // Skip any other tag as a unit so a `<details>` inside
-                    // its quoted attribute value is not mistaken for one.
-                    if let end = skipAnyTag(ns, at: position, limit: ns.length) {
-                        position = end
-                        continue
-                    }
-                }
-
-                if character == 0x60 { // `
-                    var backslashes = 0
-                    var probe = position - 1
-                    while probe >= 0, ns.character(at: probe) == 0x5C {
-                        backslashes += 1
-                        probe -= 1
-                    }
-                    if backslashes % 2 == 0,
-                       let after = skipInlineCode(
-                           ns,
-                           at: position,
-                           limit: lineLimit
-                       ) {
-                        position = after
-                        continue
-                    }
-                }
-
-                position += 1
-            }
-
-            // A multiline comment, code span, or tag can move the inner
-            // cursor past this line. Resume where it stopped instead of
-            // rescanning the skipped lines on the next iteration.
-            index = position > lineLimit
-                ? position
-                : (lineEnd.location == NSNotFound ? ns.length : lineEnd.location + 1)
         }
-
         return tags
     }
 
@@ -1086,133 +1180,40 @@ enum DetailsParser {
         to: Int
     ) -> SummarySpan? {
         guard from < to, to <= ns.length else { return nil }
-        let raw = ns.substring(with: NSRange(location: from, length: to - from)) as NSString
-        var index = 0
+        let raw = ns.substring(
+            with: NSRange(location: from, length: to - from)
+        ) as NSString
         var detailsDepth = 0
-        var fence: (character: unichar, length: Int)?
         var summaryOpen: (start: Int, end: Int)?
+        var lexer = Lexer(raw)
 
-        while index < raw.length {
-            let lineEnd = raw.range(
-                of: "\n",
-                options: [],
-                range: NSRange(location: index, length: raw.length - index)
-            )
-            let lineLimit = lineEnd.location == NSNotFound ? raw.length : lineEnd.location
-            let line = raw.substring(
-                with: NSRange(location: index, length: max(0, lineLimit - index))
-            )
-            let atLineStart = index == 0 || raw.character(at: index - 1) == 0x0A
-
-            if let activeFence = fence {
-                if closesFence(
-                    line,
-                    character: activeFence.character,
-                    minimumLength: activeFence.length
-                ) {
-                    fence = nil
+        while let token = lexer.next() {
+            switch token.kind {
+            case let .details(tag):
+                if tag.isOpening {
+                    if !tag.isSelfClosing { detailsDepth += 1 }
+                } else if detailsDepth > 0 {
+                    detailsDepth -= 1
                 }
-                index = lineEnd.location == NSNotFound ? raw.length : lineEnd.location + 1
+            case let .summary(tag):
+                // Only the outer block's own summary counts; a summary inside
+                // a nested details block is not it.
+                guard detailsDepth == 0 else { continue }
+                if let open = summaryOpen {
+                    if !tag.isOpening {
+                        return SummarySpan(
+                            openStart: from + open.start,
+                            contentStart: from + open.end,
+                            contentEnd: from + token.start,
+                            afterClose: from + token.end
+                        )
+                    }
+                } else if tag.isOpening {
+                    summaryOpen = (token.start, token.end)
+                }
+            case .other:
                 continue
             }
-
-            if atLineStart, let opened = openingFence(line) {
-                fence = opened
-                index = lineEnd.location == NSNotFound ? raw.length : lineEnd.location + 1
-                continue
-            }
-
-            var position = index
-            while position < lineLimit {
-                let character = raw.character(at: position)
-
-                if character == 0x3C { // <
-                    var backslashes = 0
-                    var probe = position - 1
-                    while probe >= 0, raw.character(at: probe) == 0x5C {
-                        backslashes += 1
-                        probe -= 1
-                    }
-                    if backslashes % 2 == 1 {
-                        position += 1
-                        continue
-                    }
-                    if let commentEnd = skipComment(raw, at: position, limit: raw.length) {
-                        position = commentEnd
-                        continue
-                    }
-                    if let detailsTag = parseTag(raw, at: position, limit: raw.length) {
-                        if detailsTag.isOpening {
-                            if !detailsTag.isSelfClosing { detailsDepth += 1 }
-                        } else if detailsDepth > 0 {
-                            detailsDepth -= 1
-                        }
-                        position = detailsTag.end
-                        continue
-                    }
-                    if detailsDepth == 0 {
-                        if summaryOpen == nil,
-                           let opening = parseTag(
-                               raw,
-                               at: position,
-                               limit: raw.length,
-                               expecting: "summary"
-                           ),
-                           opening.isOpening {
-                            summaryOpen = (position, opening.end)
-                            position = opening.end
-                            continue
-                        }
-                        if let open = summaryOpen,
-                           let closing = parseTag(
-                               raw,
-                               at: position,
-                               limit: raw.length,
-                               expecting: "summary"
-                           ),
-                           !closing.isOpening {
-                            return SummarySpan(
-                                openStart: from + open.start,
-                                contentStart: from + open.end,
-                                contentEnd: from + position,
-                                afterClose: from + closing.end
-                            )
-                        }
-                    }
-                    if let end = skipAnyTag(
-                        raw,
-                        at: position,
-                        limit: raw.length
-                    ) {
-                        position = end
-                        continue
-                    }
-                }
-
-                if character == 0x60 { // `
-                    var backslashes = 0
-                    var probe = position - 1
-                    while probe >= 0, raw.character(at: probe) == 0x5C {
-                        backslashes += 1
-                        probe -= 1
-                    }
-                    if backslashes % 2 == 0,
-                       let after = skipInlineCode(
-                           raw,
-                           at: position,
-                           limit: lineLimit
-                       ) {
-                        position = after
-                        continue
-                    }
-                }
-
-                position += 1
-            }
-
-            index = position > lineLimit
-                ? position
-                : (lineEnd.location == NSNotFound ? raw.length : lineEnd.location + 1)
         }
 
         return nil

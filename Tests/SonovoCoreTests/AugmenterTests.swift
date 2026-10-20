@@ -387,6 +387,27 @@ struct AugmenterTests {
         #expect(HeadingIndex.renderedText(block.summary) == "Real")
     }
 
+    @Test("Ignores summary tags inside a comment before the real summary")
+    func summaryInsideComment() throws {
+        let source = "<details><!-- <summary>Fake</summary> -->"
+            + "<summary>Real</summary>body</details>\n"
+        let block = try #require(details(of: augment(source)).first)
+        #expect(HeadingIndex.renderedText(block.summary) == "Real")
+    }
+
+    @Test("Ignores summary tags inside a fence before the real summary")
+    func summaryInsideFence() throws {
+        let source = """
+        <details>
+        ```
+        <summary>Fake</summary>
+        ```
+        <summary>Real</summary>body</details>
+        """
+        let block = try #require(details(of: augment(source)).first)
+        #expect(HeadingIndex.renderedText(block.summary) == "Real")
+    }
+
     @Test("Does not treat tags in comments, code, or quotes as structural")
     func detailsLexicalSafety() throws {
         let source = """
