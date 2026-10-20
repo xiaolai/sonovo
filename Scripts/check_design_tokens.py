@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Reject raw visual literals in Sonovo view files.
 
-The ledger is dev-docs/DESIGN-TOKENS.md. Token definitions live in
-Sources/Sonovo/Theme.swift. Generated art and the embedded HTML sample are
-content renderers, not app chrome, and are exempt.
+The generated ledger lives in the documentation repository. Token definitions
+live in Sources/Sonovo/Theme.swift. Generated art and the embedded HTML sample
+are content renderers, not app chrome, and are exempt.
 """
 
 from __future__ import annotations

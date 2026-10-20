@@ -4,7 +4,7 @@ import SwiftUI
 /// The single source of every visual value in Sonovo.
 ///
 /// View files reference these tokens; they do not carry numeric design
-/// literals. `dev-docs/DESIGN-TOKENS.md` is the ledger, and
+/// literals. The generated ledger lives in the documentation repository, and
 /// `Scripts/check-design-tokens.sh` enforces the rule.
 enum AppTheme {
     // MARK: - Layout

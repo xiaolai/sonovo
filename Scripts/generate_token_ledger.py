@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Generate dev-docs/DESIGN-TOKENS.md from Sources/Sonovo/Theme.swift."""
+"""Generate the design-token ledger from Sources/Sonovo/Theme.swift."""
 
 from __future__ import annotations
 
+import argparse
 import re
 from collections import OrderedDict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 THEME = ROOT / "Sources" / "Sonovo" / "Theme.swift"
-LEDGER = ROOT / "dev-docs" / "DESIGN-TOKENS.md"
 
 TOKEN = re.compile(r"^\s*static let (\w+)(?::\s*([^=]+?))?\s*=\s*(.+)$")
 ENUM = re.compile(r"^\s*(?:enum|struct)\s+(\w+)")
@@ -54,6 +54,18 @@ def parse() -> OrderedDict[str, list[tuple[str, str]]]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate the design-token ledger from Theme.swift."
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path of the generated Markdown ledger.",
+    )
+    args = parser.parse_args()
+    ledger = args.output.expanduser()
+
     categories = parse()
 
     out: list[str] = []
@@ -132,10 +144,10 @@ def main() -> None:
             out.append(f"| `{name}` | `{value}` |")
         out.append("")
 
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    LEDGER.write_text("\n".join(out).rstrip() + "\n")
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("\n".join(out).rstrip() + "\n")
     total = sum(len(tokens) for tokens in categories.values())
-    print(f"wrote {LEDGER.relative_to(ROOT)} with {total} tokens in {len(categories)} categories")
+    print(f"wrote {ledger} with {total} tokens in {len(categories)} categories")
 
 
 if __name__ == "__main__":
