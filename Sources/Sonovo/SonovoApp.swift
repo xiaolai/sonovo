@@ -8,7 +8,10 @@ struct SonovoApp: App {
     @AppStorage("sonovo.appearance") private var appearance = "system"
 
     var body: some Scene {
-        WindowGroup("Sonovo") {
+        // One window, one AppState. A WindowGroup would give every window the
+        // same cached AppKit editor and terminal views, which cannot be
+        // mounted in two windows at once.
+        Window("Sonovo", id: "main") {
             MainWindow(state: state)
                 .environment(state)
                 .preferredColorScheme(preferredColorScheme)
@@ -30,6 +33,67 @@ struct SonovoApp: App {
                 Button("Toggle Inspector") { state.inspectorVisible.toggle() }
                     .keyboardShortcut("i", modifiers: [.command, .option])
             }
+            CommandMenu("Markdown") {
+                Button("New Document") {
+                    state.showMarkdownWorkspace()
+                    state.markdown.newDocument()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+                Button("Open…") {
+                    state.showMarkdownWorkspace()
+                    state.markdown.presentOpenPanel()
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+                Button("Open Folder…") {
+                    state.showMarkdownWorkspace()
+                    state.markdown.presentOpenFolderPanel()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+                Divider()
+                Button("Save") {
+                    Task { await state.markdown.saveSelected() }
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+                Button("Save As…") {
+                    Task { await state.markdown.saveSelectedAs() }
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button("Toggle Source/Rendered") { state.markdown.toggleMode() }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
+                Divider()
+                Group {
+                    Button("Bold") { state.markdown.performSelected(.toggleStrong) }
+                    Button("Italic") { state.markdown.performSelected(.toggleEmphasis) }
+                    Button("Inline Code") { state.markdown.performSelected(.toggleInlineCode) }
+                    Button("Strikethrough") { state.markdown.performSelected(.toggleStrikethrough) }
+                    Menu("Heading") {
+                        ForEach(1...6, id: \.self) { level in
+                            Button("Heading \(level)") {
+                                state.markdown.performSelected(.toggleHeading(level: level))
+                            }
+                        }
+                    }
+                    Button("Block Quote") { state.markdown.performSelected(.toggleBlockQuote) }
+                    Menu("List") {
+                        Button("Bullet") { state.markdown.performSelected(.toggleList(kind: .bullet)) }
+                        Button("Numbered") { state.markdown.performSelected(.toggleList(kind: .ordered)) }
+                        Button("Task") { state.markdown.performSelected(.toggleList(kind: .task)) }
+                    }
+                    Button("Insert Link") {
+                        state.markdown.performSelected(.insertLink(destination: ""))
+                    }
+                    Button("Insert Wiki Link") {
+                        state.markdown.performSelected(.insertWikiLink(target: "", alias: nil))
+                    }
+                    Button("Insert Details") {
+                        state.markdown.performSelected(.insertDetails(summary: "Details"))
+                    }
+                    Button("Insert TOC") { state.markdown.performSelected(.insertTOC) }
+                }
+                .disabled(!canFormatMarkdown)
+            }
+
             CommandMenu("Terminal") {
                 Button("Toggle Terminal") {
                     state.terminalPresentation = state.terminalPresentation == .hidden ? .split : .hidden
@@ -55,9 +119,9 @@ struct SonovoApp: App {
                 Divider()
 
                 Picker("Dock", selection: $state.terminalDock) {
-                    Text("Automatic").tag(TerminalDock.automatic)
-                    Text("Right").tag(TerminalDock.right)
-                    Text("Bottom").tag(TerminalDock.bottom)
+                    ForEach(TerminalDock.allCases) { dock in
+                        Text(dock.label).tag(dock)
+                    }
                 }
 
                 Divider()
@@ -78,6 +142,15 @@ struct SonovoApp: App {
                 .environment(state)
                 .background(WindowChromeConfigurator())
         }
+    }
+
+    /// Formatting commands act on the visible, editable Markdown source
+    /// editor. With another tab selected they would modify a hidden document.
+    private var canFormatMarkdown: Bool {
+        state.selectedAssetID == "script-md"
+            && state.terminalPresentation != .full
+            && state.markdown.selectedDocument?.mode == .source
+            && state.markdown.selectedDocument?.isReadOnly == false
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -119,6 +192,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    private var terminationPending = false
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        guard let workspace = MarkdownWorkspaceRegistry.active,
+              workspace.hasDirtyDocuments else {
+            return .terminateNow
+        }
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let canTerminate = await workspace.flushAllForTermination()
+            if canTerminate {
+                self.terminationPending = false
+                sender.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            guard workspace.pendingClose != nil else {
+                // The flush failed without a decision to ask about; there is
+                // nothing left to wait for.
+                self.terminationPending = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            // A document needs a decision. Reply only after the user answers
+            // the close alert, so Save or Discard can resume the quit instead
+            // of cancelling it silently.
+            workspace.onTerminationResolved = { [weak self] allowed in
+                guard let self else { return }
+                self.terminationPending = false
+                sender.reply(toApplicationShouldTerminate: allowed)
+            }
+        }
+        return .terminateLater
     }
 }
 

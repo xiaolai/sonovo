@@ -49,7 +49,8 @@ enum AppTheme {
         static let toolbarTitleHeight: CGFloat = 30
 
         static let pageMaxWidth: CGFloat = 760
-        static let scriptPageMaxWidth: CGFloat = 720
+        static let railWidth: CGFloat = 132
+        static let markdownSidebarWidth: CGFloat = 220
         static let mediaMaxWidth: CGFloat = 900
         static let dialogueMaxWidth: CGFloat = 440
         static let urlBarMaxWidth: CGFloat = 420
@@ -117,6 +118,18 @@ enum AppTheme {
     }
 
     // MARK: - Type
+
+    /// Markdown source editor values. The editor is AppKit-backed, so these
+    /// are the only place its visual numbers may live.
+    enum Editor {
+        static let textInset: CGFloat = 16
+        static let lineHeightMultiple: CGFloat = 1.35
+        static let paragraphSpacing: CGFloat = 6
+        static let codeBackgroundOpacity: CGFloat = 0.55
+        static let lineFragmentPadding: CGFloat = 0
+        static let visibleRangeMargin: Int = 2000
+        static let minimumTextSize: CGFloat = 0
+    }
 
     enum TypeScale {
         static let tiny: CGFloat = 7
@@ -281,19 +294,9 @@ enum AppTheme {
         static let searchFieldHeight: CGFloat = 22
         static let noteComposerHeight: CGFloat = 28
         static let browserBarHeight: CGFloat = 38
-        static let timecodePillWidth: CGFloat = 5
-        static let timecodePillHeight: CGFloat = 2
-        static let stillStageWidth: CGFloat = 16
-        static let stillStageHeight: CGFloat = 9
-        static let videoStageWidth: CGFloat = 16
-        static let videoStageHeight: CGFloat = 9
         static let stageAspectWidth: CGFloat = 16
         static let stageAspectHeight: CGFloat = 9
         static let comparisonDeltaWidth: CGFloat = 104
-        static let scriptPageHorizontalPadding: CGFloat = 48
-        static let scriptPageVerticalPadding: CGFloat = 42
-        static let scriptMaxWidth: CGFloat = 720
-        static let transcriptMaxWidth: CGFloat = 760
         static let sourceLineSpacing: CGFloat = 3
         static let noValue: CGFloat = 0
     }

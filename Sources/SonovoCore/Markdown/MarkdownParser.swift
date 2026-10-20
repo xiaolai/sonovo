@@ -1,0 +1,1190 @@
+import Foundation
+import Markdown
+
+/// A parsed Markdown document.
+public struct ParsedMarkdown: Sendable {
+    /// The canonical full source (BOM-free, LF-only).
+    public let source: String
+
+    /// The owned tree, before custom-syntax augmentation.
+    public let ast: SonovoAST
+
+    /// Maps positions in the body to global UTF-16 offsets.
+    public let bodySourceMap: SourceMap
+
+    /// Maps positions in the full canonical source.
+    public let fullSourceMap: SourceMap
+
+    /// The UTF-16 offset where the body starts (after frontmatter).
+    public let bodyStartOffset: Int
+
+    /// Whether the source exceeded the container-nesting limit and was kept
+    /// as a single raw block instead of being parsed. The UI routes this to
+    /// source-only mode.
+    public let exceededNestingLimit: Bool
+
+    public init(
+        source: String,
+        ast: SonovoAST,
+        bodySourceMap: SourceMap,
+        fullSourceMap: SourceMap,
+        bodyStartOffset: Int,
+        exceededNestingLimit: Bool = false
+    ) {
+        self.source = source
+        self.ast = ast
+        self.bodySourceMap = bodySourceMap
+        self.fullSourceMap = fullSourceMap
+        self.bodyStartOffset = bodyStartOffset
+        self.exceededNestingLimit = exceededNestingLimit
+    }
+}
+
+/// The base CommonMark + GFM parser.
+///
+/// Parsing is a pure function over the canonical source. It never touches the
+/// main actor, never writes source text, and never runs an unstructured task.
+/// Custom syntax (wiki links, details, TOC) is applied by
+/// `MarkdownSyntaxAugmenter`, not here.
+public struct MarkdownParser: Sendable {
+    /// Parse options: smart punctuation is off; source positions stay on.
+    public static let parseOptions: ParseOptions = [.disableSmartOpts]
+
+    public init() {}
+
+    /// Parses raw Markdown text.
+    ///
+    /// The input is canonicalized first: a leading BOM is removed and CRLF and
+    /// lone CR line endings become LF. The returned map describes the
+    /// canonical text.
+    public static func parse(
+        _ raw: String,
+        enableAutolinks: Bool = true
+    ) -> ParsedMarkdown {
+        let canonical = SourceMap.canonicalize(raw: raw).text
+        return parseCanonical(canonical, enableAutolinks: enableAutolinks)
+    }
+
+    /// Parses text that is already canonical (BOM-free, LF-only).
+    public static func parseCanonical(
+        _ source: String,
+        enableAutolinks: Bool = true
+    ) -> ParsedMarkdown {
+        let fullMap = SourceMap(source: source)
+
+        // Guard before swift-markdown's recursive converter can overflow the
+        // stack. Content is preserved as one raw block.
+        if NestingGuard.exceedsLimit(source, limit: MarkdownLimits.maxParseDepth) {
+            let end = fullMap.position(atUTF16Offset: source.utf16.count)
+                ?? SourcePosition(line: 1, column: 0, offset: 0)
+            let wholeRange = SourceRange(
+                start: SourcePosition(line: 1, column: 0, offset: 0),
+                end: end
+            )
+            let ast = SonovoAST(
+                blocks: [.htmlBlock(raw: source, range: wholeRange)]
+            )
+            return ParsedMarkdown(
+                source: source,
+                ast: ast,
+                bodySourceMap: fullMap,
+                fullSourceMap: fullMap,
+                bodyStartOffset: 0,
+                exceededNestingLimit: true
+            )
+        }
+
+        let split = FrontmatterSplitter.split(source)
+        let bodyMap: SourceMap
+        if split.bodyStartOffset == 0, split.bodyStartLine == 1 {
+            bodyMap = fullMap
+        } else {
+            bodyMap = SourceMap(
+                source: split.body,
+                baseLine: split.bodyStartLine,
+                baseOffset: split.bodyStartOffset
+            )
+        }
+
+        let document = Document(parsing: split.body, options: parseOptions)
+        let mapper = ASTMapper(
+            sourceMap: bodyMap,
+            lineOffset: split.bodyStartLine - 1,
+            enableAutolinks: enableAutolinks
+        )
+        let blocks = mapper.mapBlocks(document.children)
+
+        var excludedRanges: [SourceRange] = []
+        if let frontmatter = split.frontmatter {
+            excludedRanges.append(frontmatter.range)
+        }
+        Self.collectExcludedRanges(blocks, into: &excludedRanges)
+        let definitions = ReferenceDefinitionScanner.scan(
+            source,
+            sourceMap: fullMap,
+            excluding: excludedRanges
+        )
+
+        let ast = SonovoAST(
+            blocks: blocks,
+            frontmatter: split.frontmatter,
+            referenceDefinitions: definitions
+        )
+
+        return ParsedMarkdown(
+            source: source,
+            ast: ast,
+            bodySourceMap: bodyMap,
+            fullSourceMap: fullMap,
+            bodyStartOffset: split.bodyStartOffset
+        )
+    }
+
+    /// Collects code and raw-HTML ranges at every depth. Reference-shaped
+    /// text inside a nested fence or HTML block must not become a definition,
+    /// just as it must not inside a top-level one.
+    private static func collectExcludedRanges(
+        _ blocks: [Block],
+        into ranges: inout [SourceRange]
+    ) {
+        for block in blocks {
+            switch block {
+            case let .codeBlock(_, range), let .htmlBlock(_, range):
+                if let range { ranges.append(range) }
+            case let .paragraph(_, range):
+                // A link reference definition cannot interrupt a paragraph.
+                // A definition-shaped line inside one is ordinary text.
+                if let range { ranges.append(range) }
+            case let .blockQuote(children, _):
+                collectExcludedRanges(children, into: &ranges)
+            case let .list(list, _):
+                for item in list.items {
+                    collectExcludedRanges(item.blocks, into: &ranges)
+                }
+            case let .details(details, _):
+                collectExcludedRanges(details.blocks, into: &ranges)
+            default:
+                continue
+            }
+        }
+    }
+
+    /// Convenience instance method.
+    public func parse(_ raw: String) -> ParsedMarkdown {
+        Self.parse(raw)
+    }
+}
+
+// MARK: - Nesting guard
+
+enum NestingGuard {
+    /// Detects blockquote nesting above `limit` before parsing.
+    ///
+    /// `swift-markdown` converts the cmark tree recursively; a pathological
+    /// document would overflow the stack before the mapper's own depth guard
+    /// could run. The guard is deliberately cheap and conservative.
+    static func exceedsLimit(_ source: String, limit: Int) -> Bool {
+        // Container nesting accumulates across lines. The stack records the
+        // indentation of each open list/quote level so a document that opens
+        // one level per line still trips the limit.
+        var indentStack: [Int] = []
+        var fence: (character: Character, length: Int)?
+        // An open raw-HTML block: empty means "until a blank line", otherwise
+        // the closing marker to look for.
+        var htmlEnd: String?
+
+        for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
+            // Raw HTML is literal text to cmark, so its markers cannot nest.
+            if let end = htmlEnd {
+                if end.isEmpty {
+                    // A blockquote's blank line is `>`, not whitespace.
+                    if stripContainers(line).allSatisfy({
+                        $0 == " " || $0 == "\t"
+                    }) {
+                        htmlEnd = nil
+                    }
+                } else if line.contains(end) {
+                    htmlEnd = nil
+                }
+                continue
+            }
+
+            // Fenced literal content is not structural Markdown.
+            if let active = fence {
+                if closesFence(line, active) {
+                    fence = nil
+                }
+                continue
+            }
+            if let opened = openingFence(line) {
+                fence = opened
+                continue
+            }
+            if let end = htmlBlockEnd(line) {
+                htmlEnd = end
+                continue
+            }
+
+            // A thematic break is made of the same characters as bullet
+            // markers but is not a container.
+            if isThematicBreak(line) { continue }
+
+            // A leading tab advances to column 4, which is an indented code
+            // block, not a container marker.
+            if line.drop(while: { $0 == " " }).first == "\t" {
+                continue
+            }
+
+            let leadingSpaces = line.prefix(while: { $0 == " " }).count
+            var index = line.startIndex
+            var depth = 0
+            var afterMarker = false
+
+            while index < line.endIndex {
+                // Three columns can indent the first marker; a list marker
+                // can be followed by up to four columns of padding. Inside
+                // an open container, the line may also carry that container's
+                // indentation. Tabs count as one column, conservatively.
+                let indentLimit = afterMarker
+                    ? 4
+                    : (indentStack.isEmpty
+                        ? 3
+                        : max(3, (indentStack.last ?? 0) + 4))
+                var indent = 0
+                while index < line.endIndex,
+                      line[index] == " " || line[index] == "\t",
+                      indent < indentLimit {
+                    indent += 1
+                    index = line.index(after: index)
+                }
+                if index < line.endIndex,
+                   line[index] == " " || line[index] == "\t" {
+                    break
+                }
+                guard index < line.endIndex else { break }
+
+                if line[index] == ">" {
+                    afterMarker = true
+                    depth += 1
+                    if depth > limit { return true }
+                    index = line.index(after: index)
+                    // One optional space or tab belongs to the marker.
+                    if index < line.endIndex,
+                       line[index] == " " || line[index] == "\t" {
+                        index = line.index(after: index)
+                    }
+                    continue
+                }
+
+                if let markerLength = listMarkerLength(at: index, in: line) {
+                    depth += 1
+                    if depth > limit { return true }
+                    afterMarker = true
+                    index = line.index(index, offsetBy: markerLength)
+                    continue
+                }
+
+                break
+            }
+
+            guard depth > 0 else { continue }
+
+            if indentStack.isEmpty {
+                // Four leading spaces at top level make indented code, not a
+                // container.
+                if leadingSpaces < 4 {
+                    indentStack.append(leadingSpaces)
+                }
+            } else if leadingSpaces > indentStack[indentStack.count - 1] {
+                indentStack.append(leadingSpaces)
+            } else {
+                while let top = indentStack.last, top > leadingSpaces {
+                    indentStack.removeLast()
+                }
+                if indentStack.isEmpty {
+                    indentStack.append(leadingSpaces)
+                }
+            }
+
+            let totalDepth = indentStack.count + max(0, depth - 1)
+            if totalDepth > limit { return true }
+        }
+        return false
+    }
+
+    /// Removes blockquote markers and list markers, so a fence inside a
+    /// container is still recognized as a fence.
+    private static func stripContainers(_ line: Substring) -> Substring {
+        var rest = line
+        while true {
+            rest = rest.drop(while: { $0 == " " || $0 == "\t" })
+            if rest.first == ">" {
+                rest = rest.dropFirst()
+                continue
+            }
+            if let index = rest.indices.first,
+               let length = listMarkerLength(at: index, in: rest) {
+                rest = rest.dropFirst(length)
+                continue
+            }
+            return rest
+        }
+    }
+
+    private static func openingFence(
+        _ line: Substring
+    ) -> (character: Character, length: Int)? {
+        let trimmed = stripContainers(line)
+        guard let first = trimmed.first, first == "`" || first == "~" else {
+            return nil
+        }
+        var length = 0
+        for character in trimmed {
+            guard character == first else { break }
+            length += 1
+        }
+        guard length >= 3 else { return nil }
+        if first == "`", trimmed.dropFirst(length).contains("`") {
+            return nil
+        }
+        return (first, length)
+    }
+
+    private static func closesFence(
+        _ line: Substring,
+        _ fence: (character: Character, length: Int)
+    ) -> Bool {
+        let trimmed = stripContainers(line)
+        var length = 0
+        for character in trimmed {
+            guard character == fence.character else { break }
+            length += 1
+        }
+        guard length >= fence.length else { return false }
+        return trimmed.dropFirst(length).allSatisfy {
+            $0 == " " || $0 == "\t"
+        }
+    }
+
+    private static let htmlBlockTags: Set<String> = [
+        "address", "article", "aside", "base", "basefont", "blockquote",
+        "body", "caption", "center", "col", "colgroup", "dd", "details",
+        "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption",
+        "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3",
+        "h4", "h5", "h6", "head", "header", "hr", "html", "iframe",
+        "legend", "li", "link", "main", "menu", "menuitem", "nav",
+        "noframes", "ol", "optgroup", "option", "p", "param", "search",
+        "section", "summary", "table", "tbody", "td", "tfoot", "th",
+        "thead", "title", "tr", "track", "ul",
+    ]
+
+    /// The terminator for a raw-HTML block starting on this line, or nil when
+    /// the line does not open one.
+    private static func htmlBlockEnd(_ line: Substring) -> String? {
+        // A raw HTML block can sit inside a blockquote or list item.
+        let trimmed = stripContainers(line)
+        guard trimmed.first == "<" else { return nil }
+        let lower = trimmed.lowercased()
+
+        if lower.hasPrefix("<!--") {
+            return lower.contains("-->") ? nil : "-->"
+        }
+        if lower.hasPrefix("<![cdata[") {
+            return lower.contains("]]>") ? nil : "]]>"
+        }
+        if lower.hasPrefix("<?") {
+            return lower.contains("?>") ? nil : "?>"
+        }
+        // Type 4: a declaration, ended by `>`. The uppercase test must use
+        // the original text; `lower` has already lost the case.
+        if trimmed.hasPrefix("<!"),
+           trimmed.dropFirst(2).first?.isUppercase == true {
+            return lower.contains(">") ? nil : ">"
+        }
+
+        // Types 1-5 end at their own closing tag.
+        for tag in ["script", "pre", "style", "textarea"] {
+            if lower.hasPrefix("<" + tag),
+               !lower.contains("</" + tag + ">") {
+                return "</" + tag + ">"
+            }
+        }
+
+        // Type 6: a block-level tag, terminated by a blank line.
+        for tag in htmlBlockTags {
+            guard lower.hasPrefix("<" + tag) else { continue }
+            let boundary = lower.index(
+                lower.startIndex,
+                offsetBy: tag.count + 1
+            )
+            if boundary == lower.endIndex {
+                return ""
+            }
+            let next = lower[boundary]
+            if next == " " || next == "\t" || next == ">" || next == "/" {
+                return ""
+            }
+        }
+
+        // Type 7: any complete open or closing tag alone on its line. The
+        // tag name must end at a real boundary, so `<https://…>` is an
+        // autolink, not a tag.
+        let afterBracket = lower.dropFirst()
+        if let first = afterBracket.first,
+           first.isLetter || first == "/" {
+            var probe = lower.index(
+                lower.startIndex,
+                offsetBy: first == "/" ? 2 : 1
+            )
+            while probe < lower.endIndex,
+                  lower[probe].isLetter || lower[probe].isNumber
+                    || lower[probe] == "-" {
+                probe = lower.index(after: probe)
+            }
+            let boundaryOK = probe == lower.endIndex
+                || lower[probe] == " " || lower[probe] == "\t"
+                || lower[probe] == ">" || lower[probe] == "/"
+            if boundaryOK, let close = lower.firstIndex(of: ">") {
+                let remainder = lower[lower.index(after: close)...]
+                if remainder.allSatisfy({ $0 == " " || $0 == "\t" }) {
+                    return ""
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func isThematicBreak(_ line: Substring) -> Bool {
+        let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+        guard let first = trimmed.first,
+              first == "-" || first == "*" || first == "_" else {
+            return false
+        }
+        var count = 0
+        for character in trimmed {
+            if character == first {
+                count += 1
+            } else if character != " " && character != "\t" {
+                return false
+            }
+        }
+        return count >= 3
+    }
+
+    /// The length of a list marker at `index`, or `nil` when the character
+    /// does not begin one. The marker must be followed by whitespace or the
+    /// end of the line.
+    private static func listMarkerLength(
+        at index: String.Index,
+        in line: Substring
+    ) -> Int? {
+        let character = line[index]
+        if character == "-" || character == "+" || character == "*" {
+            let next = line.index(after: index)
+            if next == line.endIndex { return 1 }
+            if line[next] == " " || line[next] == "\t" { return 1 }
+            return nil
+        }
+
+        var probe = index
+        var digits = 0
+        while probe < line.endIndex, line[probe].isNumber, digits < 10 {
+            digits += 1
+            probe = line.index(after: probe)
+        }
+        guard digits >= 1, digits <= 9, probe < line.endIndex else {
+            return nil
+        }
+        let delimiter = line[probe]
+        guard delimiter == "." || delimiter == ")" else { return nil }
+        let after = line.index(after: probe)
+        if after == line.endIndex {
+            return line.distance(from: index, to: after)
+        }
+        guard line[after] == " " || line[after] == "\t" else { return nil }
+        return line.distance(from: index, to: after)
+    }
+}
+
+// MARK: - Frontmatter
+
+struct FrontmatterSplit {
+    let frontmatter: Frontmatter?
+    let body: String
+    let bodyStartLine: Int
+    let bodyStartOffset: Int
+}
+
+enum FrontmatterSplitter {
+    static func split(_ source: String) -> FrontmatterSplit {
+        // Avoid splitting the whole document unless the first line can
+        // actually open a frontmatter block.
+        let firstLine = source.prefix(while: { $0 != "\n" })
+        guard firstLine.trimmingCharacters(in: .whitespaces) == "---" else {
+            return FrontmatterSplit(
+                frontmatter: nil,
+                body: source,
+                bodyStartLine: 1,
+                bodyStartOffset: 0
+            )
+        }
+
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false)
+
+        var closingIndex: Int?
+        for index in 1..<lines.count {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            if trimmed == "---" || trimmed == "..." {
+                closingIndex = index
+                break
+            }
+        }
+
+        guard let closingIndex else {
+            return FrontmatterSplit(
+                frontmatter: nil,
+                body: source,
+                bodyStartLine: 1,
+                bodyStartOffset: 0
+            )
+        }
+
+        // Offsets: every line in `lines[0...closingIndex]` is followed by a
+        // newline except possibly the last line of the file.
+        var rawEnd = 0
+        for index in 0...closingIndex {
+            rawEnd += lines[index].utf16.count
+            if index < closingIndex {
+                rawEnd += 1
+            }
+        }
+        let hasNewlineAfterClose = closingIndex < lines.count - 1
+        let bodyStart = hasNewlineAfterClose ? rawEnd + 1 : rawEnd
+
+        let utf16 = source.utf16
+        let rawEndIndex = utf16.index(utf16.startIndex, offsetBy: rawEnd)
+        let bodyStartIndex = utf16.index(utf16.startIndex, offsetBy: bodyStart)
+        let rawString = String(source[..<rawEndIndex])
+        let bodyString = String(source[bodyStartIndex...])
+
+        let range = SourceRange(
+            start: SourcePosition(line: 1, column: 0, offset: 0),
+            end: SourcePosition(
+                line: closingIndex + 1,
+                column: lines[closingIndex].utf16.count,
+                offset: rawEnd
+            )
+        )
+
+        return FrontmatterSplit(
+            frontmatter: Frontmatter(
+                raw: rawString,
+                body: lines.dropFirst().dropLast(lines.count - closingIndex)
+                    .joined(separator: "\n"),
+                range: range
+            ),
+            body: bodyString,
+            bodyStartLine: closingIndex + 2,
+            bodyStartOffset: bodyStart
+        )
+    }
+}
+
+// MARK: - AST mapping
+
+struct ASTMapper {
+    let sourceMap: SourceMap
+    /// Upstream line numbers are relative to the parsed body; this offset
+    /// converts them to global canonical-source line numbers.
+    let lineOffset: Int
+    let enableAutolinks: Bool
+
+    func mapBlocks(_ children: MarkupChildren) -> [Block] {
+        mapBlocks(children, depth: 0)
+    }
+
+    private func mapBlocks(_ children: MarkupChildren, depth: Int) -> [Block] {
+        var blocks: [Block] = []
+        for child in children {
+            if let block = mapBlock(child, depth: depth) {
+                blocks.append(block)
+            }
+        }
+        return blocks
+    }
+
+    private func mapBlock(_ markup: Markup, depth: Int) -> Block? {
+        let range = resolve(markup)
+
+        if depth > MarkdownLimits.maxParseDepth {
+            let raw = range.flatMap { sourceMap.text(in: $0) } ?? ""
+            return .htmlBlock(raw: raw, range: range)
+        }
+
+        switch markup {
+        case let heading as Heading:
+            return .heading(
+                level: heading.level,
+                inlines: fillMissingTextRanges(
+                    in: mapInlines(heading.children),
+                    within: range
+                ),
+                range: range
+            )
+        case let paragraph as Paragraph:
+            return .paragraph(
+                inlines: fillMissingTextRanges(
+                    in: mapInlines(paragraph.children),
+                    within: range
+                ),
+                range: range
+            )
+        case let quote as BlockQuote:
+            return .blockQuote(blocks: mapBlocks(quote.children, depth: depth + 1), range: range)
+        case let list as UnorderedList:
+            return .list(mapList(list, ordered: false, depth: depth), range: range)
+        case let list as OrderedList:
+            return .list(mapList(list, ordered: true, depth: depth), range: range)
+        case let table as Table:
+            return .table(mapTable(table), range: range)
+        case let code as Markdown.CodeBlock:
+            return .codeBlock(mapCodeBlock(code), range: range)
+        case let html as HTMLBlock:
+            return .htmlBlock(raw: html.rawHTML, range: range)
+        case is ThematicBreak:
+            return .thematicBreak(range: range)
+        default:
+            // Unknown block: keep its source rather than dropping content.
+            let raw = range.flatMap { sourceMap.text(in: $0) } ?? ""
+            return .htmlBlock(raw: raw, range: range)
+        }
+    }
+
+    private func mapList(_ list: Markup, ordered: Bool, depth: Int) -> ListBlock {
+        var items: [ListItem] = []
+        for child in list.children {
+            guard let item = child as? Markdown.ListItem else { continue }
+            let checked: Bool?
+            switch item.checkbox {
+            case .checked: checked = true
+            case .unchecked: checked = false
+            case nil: checked = nil
+            }
+            items.append(
+                ListItem(
+                    blocks: mapBlocks(item.children, depth: depth + 1),
+                    checked: checked,
+                    range: resolve(item)
+                )
+            )
+        }
+
+        let kind: ListBlock.Kind
+        if ordered, let list = list as? OrderedList {
+            kind = .ordered(start: Int(list.startIndex))
+        } else {
+            kind = .bullet
+        }
+
+        return ListBlock(
+            kind: kind,
+            items: items,
+            tight: listTightness(items: items)
+        )
+    }
+
+    private func mapTable(_ table: Table) -> TableBlock {
+        let alignments = table.columnAlignments.map { alignment -> TableBlock.Alignment in
+            switch alignment {
+            case .left: return .left
+            case .center: return .center
+            case .right: return .right
+            case nil: return .none
+            }
+        }
+
+        return TableBlock(
+            header: table.head.cells.map(mapCell),
+            rows: table.body.rows.map { row in
+                row.cells.map(mapCell)
+            },
+            alignments: alignments
+        )
+    }
+
+    private func mapCell(_ cell: Table.Cell) -> TableCell {
+        TableCell(
+            inlines: fillMissingTextRanges(
+                in: mapInlines(cell.children),
+                within: resolve(cell)
+            ),
+            colspan: Int(cell.colspan),
+            rowspan: Int(cell.rowspan),
+            range: resolve(cell)
+        )
+    }
+
+    private func mapCodeBlock(_ code: Markdown.CodeBlock) -> CodeBlock {
+        let range = resolve(code)
+        var fenced = false
+        var info: String?
+        if let range, let text = sourceMap.text(in: range) {
+            let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+                .first
+                .map(String.init) ?? ""
+            let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                fenced = true
+                let fenceCharacter = trimmed.first!
+                var fenceLength = 0
+                for character in trimmed {
+                    guard character == fenceCharacter else { break }
+                    fenceLength += 1
+                }
+                info = String(trimmed.dropFirst(fenceLength))
+                    .trimmingCharacters(in: .whitespaces)
+                if info?.isEmpty == true { info = nil }
+            }
+        }
+
+        return CodeBlock(
+            code: code.code,
+            language: code.language,
+            fenced: fenced,
+            info: info
+        )
+    }
+
+    func mapInlines(_ children: MarkupChildren) -> [Inline] {
+        mapInlines(children, allowAutolinks: enableAutolinks, depth: 0)
+    }
+
+    private func mapInlines(
+        _ children: MarkupChildren,
+        allowAutolinks: Bool,
+        depth: Int
+    ) -> [Inline] {
+        var inlines: [Inline] = []
+        for child in children {
+            appendInlines(
+                for: child,
+                allowAutolinks: allowAutolinks,
+                depth: depth,
+                into: &inlines
+            )
+        }
+        return inlines
+    }
+
+    private func appendInlines(
+        for markup: Markup,
+        allowAutolinks: Bool,
+        depth: Int,
+        into inlines: inout [Inline]
+    ) {
+        let range = resolve(markup)
+
+        if depth > MarkdownLimits.maxParseDepth {
+            let raw = range.flatMap { sourceMap.text(in: $0) } ?? ""
+            inlines.append(.text(raw, range: range))
+            return
+        }
+
+        switch markup {
+        case let text as Text:
+            appendText(
+                text.string,
+                range: range,
+                allowAutolinks: allowAutolinks,
+                into: &inlines
+            )
+        case is SoftBreak:
+            inlines.append(.softBreak(range: range))
+        case is LineBreak:
+            inlines.append(.lineBreak(range: range))
+        case let code as InlineCode:
+            inlines.append(
+                .inlineCode(
+                    code.code,
+                    range: inlineCodeContentRange(around: range)
+                )
+            )
+        case let emphasis as Emphasis:
+            inlines.append(
+                .emphasis(
+                    inlines: mapInlines(
+                        emphasis.children,
+                        allowAutolinks: allowAutolinks,
+                        depth: depth + 1
+                    ),
+                    range: range
+                )
+            )
+        case let strong as Strong:
+            inlines.append(
+                .strong(
+                    inlines: mapInlines(
+                        strong.children,
+                        allowAutolinks: allowAutolinks,
+                        depth: depth + 1
+                    ),
+                    range: range
+                )
+            )
+        case let strike as Strikethrough:
+            inlines.append(
+                .strikethrough(
+                    inlines: mapInlines(
+                        strike.children,
+                        allowAutolinks: allowAutolinks,
+                        depth: depth + 1
+                    ),
+                    range: range
+                )
+            )
+        case let link as Link:
+            inlines.append(
+                .link(
+                    destination: link.destination ?? "",
+                    title: link.title,
+                    inlines: mapInlines(
+                        link.children,
+                        allowAutolinks: false,
+                        depth: depth + 1
+                    ),
+                    range: range
+                )
+            )
+        case let image as Image:
+            inlines.append(
+                .image(
+                    destination: image.source ?? "",
+                    title: image.title,
+                    description: mapInlines(
+                        image.children,
+                        allowAutolinks: false,
+                        depth: depth + 1
+                    ),
+                    range: range
+                )
+            )
+        case let html as InlineHTML:
+            inlines.append(.inlineHTML(html.rawHTML, range: range))
+        default:
+            let raw = range.flatMap { sourceMap.text(in: $0) } ?? ""
+            inlines.append(.text(raw, range: range))
+        }
+    }
+
+    private func appendText(
+        _ literal: String,
+        range: SourceRange?,
+        allowAutolinks: Bool,
+        into inlines: inout [Inline]
+    ) {
+        guard
+            allowAutolinks,
+            let range,
+            let raw = sourceMap.text(in: range),
+            raw.utf16.count == literal.utf16.count
+        else {
+            inlines.append(.text(literal, range: range))
+            return
+        }
+
+        // Every autolink form requires one of these markers. Skipping the
+        // per-character scanner for ordinary prose removes the dominant cost.
+        guard AutolinkScanner.mightContainLink(literal) else {
+            inlines.append(.text(literal, range: range))
+            return
+        }
+
+        let matches = AutolinkScanner.scan(literal)
+        guard !matches.isEmpty else {
+            inlines.append(.text(literal, range: range))
+            return
+        }
+
+        let utf16 = literal.utf16
+        var cursor = 0
+        for match in matches {
+            if match.range.lowerBound > cursor {
+                let slice = Self.slice(literal, utf16Range: cursor..<match.range.lowerBound)
+                let start = sourceMap.position(atUTF16Offset: range.lowerBound + cursor)
+                let end = sourceMap.position(atUTF16Offset: range.lowerBound + match.range.lowerBound)
+                let textRange = start.flatMap { s in
+                    end.map { e in SourceRange(start: s, end: e) }
+                }
+                inlines.append(.text(slice, range: textRange))
+            }
+
+            let display = Self.slice(literal, utf16Range: match.range)
+            let linkRange = sourceMap.position(atUTF16Offset: range.lowerBound + match.range.lowerBound)
+                .flatMap { start in
+                    sourceMap.position(atUTF16Offset: range.lowerBound + match.range.upperBound)
+                        .map { end in SourceRange(start: start, end: end) }
+                }
+            inlines.append(
+                .link(
+                    destination: match.destination,
+                    title: nil,
+                    inlines: [.text(display, range: linkRange)],
+                    range: linkRange
+                )
+            )
+            cursor = match.range.upperBound
+        }
+
+        if cursor < utf16.count {
+            let slice = Self.slice(literal, utf16Range: cursor..<utf16.count)
+            let start = sourceMap.position(atUTF16Offset: range.lowerBound + cursor)
+            let end = sourceMap.position(atUTF16Offset: range.upperBound)
+            let textRange = start.flatMap { s in end.map { e in SourceRange(start: s, end: e) } }
+            inlines.append(.text(slice, range: textRange))
+        }
+    }
+
+    private static func slice(_ text: String, utf16Range: Range<Int>) -> String {
+        text.utf16Slice(utf16Range)
+    }
+
+    /// cmark reports a code span's range over its content; swift-markdown
+    /// reports the span including delimiters, and its upstream end position is
+    /// truncated when the span contains escapes. Locate the authored
+    /// delimiters in the full source instead of trusting the upstream range.
+    private func inlineCodeContentRange(
+        around range: SourceRange?
+    ) -> SourceRange? {
+        guard let range else { return nil }
+        let source = sourceMap.source as NSString
+        let relativeLower = range.lowerBound - sourceMap.baseOffset
+        guard relativeLower >= 0, relativeLower <= source.length else {
+            return range
+        }
+
+        var openingRun = 0
+        var contentStart = relativeLower
+
+        if relativeLower < source.length,
+           source.character(at: relativeLower) == 0x60 {
+            while contentStart < source.length,
+                  source.character(at: contentStart) == 0x60 {
+                openingRun += 1
+                contentStart += 1
+            }
+        } else {
+            var probe = relativeLower - 1
+            while probe >= 0, source.character(at: probe) == 0x60 {
+                openingRun += 1
+                probe -= 1
+            }
+        }
+
+        guard openingRun > 0 else { return range }
+
+        var probe = contentStart
+        while probe < source.length {
+            if source.character(at: probe) == 0x60 {
+                var run = 0
+                while probe + run < source.length,
+                      source.character(at: probe + run) == 0x60 {
+                    run += 1
+                }
+                if run == openingRun {
+                    guard
+                        let start = sourceMap.position(
+                            atUTF16Offset: sourceMap.baseOffset + contentStart
+                        ),
+                        let end = sourceMap.position(
+                            atUTF16Offset: sourceMap.baseOffset + probe
+                        )
+                    else {
+                        return range
+                    }
+                    return SourceRange(start: start, end: end)
+                }
+                probe += run
+            } else {
+                probe += 1
+            }
+        }
+
+        return range
+    }
+
+    /// Fills a missing text range when the source slice at the inferred
+    /// position is exactly the literal. This is a deterministic recovery for
+    /// swift-markdown's occasional nil text ranges, not a guess.
+    private func fillMissingTextRanges(
+        in inlines: [Inline],
+        within parent: SourceRange?
+    ) -> [Inline] {
+        guard let parent else { return inlines }
+
+        var result: [Inline] = []
+        result.reserveCapacity(inlines.count)
+        var cursor = parent.lowerBound
+        var index = 0
+
+        while index < inlines.count {
+            let inline = inlines[index]
+            switch inline {
+            case let .text(literal, nil):
+                let nextStart = inlines[(index + 1)...].lazy.compactMap {
+                    $0.range?.lowerBound
+                }.first ?? parent.upperBound
+                if nextStart >= cursor, nextStart - cursor == literal.utf16.count,
+                   let start = sourceMap.position(atUTF16Offset: cursor),
+                   let end = sourceMap.position(atUTF16Offset: nextStart) {
+                    let candidate = SourceRange(start: start, end: end)
+                    if sourceMap.text(in: candidate) == literal {
+                        result.append(.text(literal, range: candidate))
+                        cursor = nextStart
+                        index += 1
+                        continue
+                    }
+                }
+                result.append(inline)
+            case let .emphasis(children, range):
+                result.append(
+                    .emphasis(
+                        inlines: fillMissingTextRanges(in: children, within: range),
+                        range: range
+                    )
+                )
+                if let range { cursor = max(cursor, range.upperBound) }
+            case let .strong(children, range):
+                result.append(
+                    .strong(
+                        inlines: fillMissingTextRanges(in: children, within: range),
+                        range: range
+                    )
+                )
+                if let range { cursor = max(cursor, range.upperBound) }
+            case let .strikethrough(children, range):
+                result.append(
+                    .strikethrough(
+                        inlines: fillMissingTextRanges(in: children, within: range),
+                        range: range
+                    )
+                )
+                if let range { cursor = max(cursor, range.upperBound) }
+            default:
+                result.append(inline)
+                if let range = inline.range {
+                    cursor = max(cursor, range.upperBound)
+                }
+            }
+            index += 1
+        }
+        return result
+    }
+
+    private func resolve(_ markup: Markup) -> SourceRange? {
+        guard let range = markup.range else { return nil }
+        return sourceMap.sourceRange(
+            startLine: range.lowerBound.line + lineOffset,
+            startUTF8Column: range.lowerBound.column,
+            endLine: range.upperBound.line + lineOffset,
+            endUTF8Column: range.upperBound.column
+        )
+    }
+
+    /// Resolves a node's source range for callers outside the mapper.
+    func sourceRange(for markup: Markup) -> SourceRange? {
+        resolve(markup)
+    }
+
+    /// A list is loose when a blank line separates two items or two block
+    /// elements inside one item.
+    ///
+    /// Scanning the whole list source is wrong: blank lines inside a fenced
+    /// code block or between a paragraph and its lazy continuation do not
+    /// loosen the list. Only gaps between sibling blocks are inspected.
+    private func listTightness(items: [ListItem]) -> Bool? {
+        // Use the content extremes inside each item, not the item range:
+        // cmark item ranges include trailing newlines, which would hide the
+        // blank line between two items.
+        var contentRanges: [SourceRange] = []
+        contentRanges.reserveCapacity(items.count)
+        for item in items {
+            if let first = item.blocks.first?.range,
+               let last = item.blocks.last?.range {
+                contentRanges.append(
+                    SourceRange(start: first.start, end: last.end)
+                )
+            } else if let range = item.range {
+                contentRanges.append(range)
+            } else {
+                return nil
+            }
+        }
+
+        if rangesHaveBlankLine(contentRanges) {
+            return false
+        }
+
+        for item in items {
+            let blockRanges = item.blocks.map(\.range)
+            guard blockRanges.allSatisfy({ $0 != nil }) else { continue }
+            if rangesHaveBlankLine(blockRanges.compactMap { $0 }) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func rangesHaveBlankLine(_ ranges: [SourceRange]) -> Bool {
+        guard ranges.count > 1 else { return false }
+        for index in 0..<(ranges.count - 1) {
+            if gapHasBlankLine(
+                from: ranges[index].upperBound,
+                to: ranges[index + 1].lowerBound
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func gapHasBlankLine(from lower: Int, to upper: Int) -> Bool {
+        guard lower <= upper,
+              let start = sourceMap.position(atUTF16Offset: lower),
+              let end = sourceMap.position(atUTF16Offset: upper),
+              let gap = sourceMap.text(in: SourceRange(start: start, end: end))
+        else {
+            return false
+        }
+
+        // A blank line means two newlines with only whitespace or blockquote
+        // markers between them. A single newline followed by the next item's
+        // marker is not a blank line.
+        var sawNewline = false
+        if lower > sourceMap.baseOffset {
+            // A newline immediately before the gap belongs to the previous
+            // line; treating it as seen lets one more newline count as blank.
+            let relative = lower - 1 - sourceMap.baseOffset
+            let utf16 = sourceMap.source.utf16
+            if let index = utf16.index(
+                utf16.startIndex,
+                offsetBy: relative,
+                limitedBy: utf16.endIndex
+            ), index < utf16.endIndex, utf16[index] == 10 {
+                sawNewline = true
+            }
+        }
+        for character in gap {
+            switch character {
+            case "\n":
+                if sawNewline { return true }
+                sawNewline = true
+            case " ", "\t", "\r", ">":
+                continue
+            default:
+                sawNewline = false
+            }
+        }
+        return false
+    }
+}

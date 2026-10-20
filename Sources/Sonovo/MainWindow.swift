@@ -31,7 +31,38 @@ struct MainWindow: View {
                 .accessibilityLabel(state.inspectorVisible ? "Hide Inspector" : "Show Inspector")
             }
         }
+        .background(WindowCloseGuard(workspace: state.markdown))
         .navigationTitle("\(state.production.title) — \(state.production.episode)")
         .navigationSubtitle(state.activityText)
+        .alert(
+            "Unsaved Changes",
+            isPresented: Binding(
+                get: { state.markdown.pendingClose != nil },
+                set: { presented in
+                    if !presented { state.markdown.dismissCloseAlert() }
+                }
+            )
+        ) {
+            Button("Save") {
+                guard let document = state.markdown.pendingClose else {
+                    return
+                }
+                // A save can fail; show the document and its error instead
+                // of failing silently behind a non-Markdown tab.
+                state.revealMarkdownDocument(document)
+                Task { await state.markdown.saveAndClose(document) }
+            }
+            Button("Discard", role: .destructive) {
+                guard let document = state.markdown.pendingClose else {
+                    return
+                }
+                state.markdown.discardAndClose(document)
+            }
+            Button("Cancel", role: .cancel) {
+                state.markdown.cancelPendingClose()
+            }
+        } message: {
+            Text("This document has unsaved changes.")
+        }
     }
 }

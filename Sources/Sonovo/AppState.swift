@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Observation
+import SonovoCore
 import SwiftUI
 
 enum TerminalPresentation: String, CaseIterable, Hashable, Identifiable, Sendable {
@@ -38,6 +39,7 @@ enum TerminalDockPosition: Sendable {
 final class AppState {
     let production = Production.sample
     let transcript = SampleContent.transcript
+    let markdown = MarkdownWorkspace()
 
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -54,7 +56,6 @@ final class AppState {
     var terminalPresentation: TerminalPresentation = .hidden
     var terminalDock: TerminalDock = .automatic
     var terminalFraction: CGFloat = AppTheme.Layout.terminalDefaultFraction
-    var terminalWorkingDirectory = "~"
     let terminalSessions = TerminalSessionsStore()
 
     var isPlaying = false
@@ -71,11 +72,16 @@ final class AppState {
     var selectedStillIndex = 3
     var selectedShotIndex = 2
     var previewQuality = "1080p"
-    var scriptRendered = true
-    var approvedAssetIDs: Set<String> = []
+    /// Explicit review decisions, keyed by asset. Reopening an asset that
+    /// shipped as approved must be able to move it back to needs-review;
+    /// removing an "approved" flag cannot do that.
+    var reviewStatusOverrides: [String: ReviewStatus] = [:]
 
     var activityText: String {
-        isPlaying ? "Playing Take 03" : production.updated
+        if isPlaying {
+            return "Playing \(selectedAsset?.name ?? "media")"
+        }
+        return production.updated
     }
 
     init() {
@@ -120,13 +126,25 @@ final class AppState {
         transcript.first { $0.id == selectedTranscriptID }
     }
 
+    /// The segment under the playhead. Captions follow playback, skipping,
+    /// and scrubbing; `selectedTranscriptID` remains the explicit transcript
+    /// selection.
+    var currentTranscript: TranscriptSegment? {
+        if let active = transcript.first(where: {
+            playhead >= $0.start && playhead < $0.end
+        }) {
+            return active
+        }
+        return transcript.last { $0.end <= playhead } ?? transcript.first
+    }
+
     var canUseReviewModes: Bool {
         guard let kind = selectedTab?.kind else { return false }
         return kind == .audio || kind == .video
     }
 
     func status(for asset: ProductionAsset) -> ReviewStatus {
-        approvedAssetIDs.contains(asset.id) ? .approved : asset.status
+        reviewStatusOverrides[asset.id] ?? asset.status
     }
 
     var needsReviewCount: Int {
@@ -146,16 +164,12 @@ final class AppState {
 
     func openAsset(_ id: String?) {
         guard let id, let asset = production.asset(id: id) else { return }
-        selectedAssetID = id
         if let existing = openTabs.first(where: { $0.assetID == id }) {
-            selectedTabID = existing.id
+            selectTab(existing.id)
         } else {
             let tab = EditorTab(asset: asset)
             openTabs.append(tab)
-            selectedTabID = tab.id
-        }
-        if !canUseReviewModes {
-            editorMode = .player
+            selectTab(tab.id)
         }
     }
 
@@ -163,7 +177,9 @@ final class AppState {
         guard let tab = openTabs.first(where: { $0.id == id }) else { return }
         selectedTabID = id
         selectedAssetID = tab.assetID
-        if tab.kind != .audio && tab.kind != .video && tab.kind != .delivery {
+        // One eligibility rule for every navigation path: review modes
+        // require an audio or video asset.
+        if !canUseReviewModes {
             editorMode = .player
         }
     }
@@ -200,28 +216,38 @@ final class AppState {
     }
 
     func approve(_ asset: ProductionAsset) {
-        approvedAssetIDs.insert(asset.id)
+        reviewStatusOverrides[asset.id] = .approved
     }
 
     func reopen(_ asset: ProductionAsset) {
-        approvedAssetIDs.remove(asset.id)
+        reviewStatusOverrides[asset.id] = .needsReview
     }
 
     func requestChange(for asset: ProductionAsset) {
-        let timecode = TranscriptSegment.timecode(for: playhead)
-        notes.insert(
-            ReviewNote(
-                id: "note-\(notes.count + 1)-\(Int(playhead * 100))",
-                timecode: timecode,
-                text: "Requested a change to \(asset.name).",
-                author: "You",
-                createdAt: "Just now",
-                isResolved: false
-            ),
-            at: 0
-        )
+        insertNote("Requested a change to \(asset.name).")
         inspectorVisible = true
         inspectorTab = .notes
+    }
+
+    /// Brings the Markdown workspace's tab to the front. Menu commands that
+    /// create or open a document must not leave it hidden behind an audio or
+    /// delivery tab.
+    func showMarkdownWorkspace() {
+        if let tab = openTabs.first(where: { $0.assetID == "script-md" }) {
+            selectTab(tab.id)
+        } else if production.asset(id: "script-md") != nil {
+            openAsset("script-md")
+        }
+    }
+
+    /// Brings a Markdown document to the front so a save started from another
+    /// tab fails where the document and its error are visible.
+    func revealMarkdownDocument(_ document: MarkdownDocument) {
+        showMarkdownWorkspace()
+        if terminalPresentation == .full {
+            terminalPresentation = .hidden
+        }
+        markdown.select(document)
     }
 
     func closeAllTabs() {
@@ -233,19 +259,23 @@ final class AppState {
     func addNote() {
         let trimmed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        insertNote(trimmed)
+        noteDraft = ""
+    }
+
+    private func insertNote(_ text: String) {
         let timecode = TranscriptSegment.timecode(for: playhead)
         notes.insert(
             ReviewNote(
                 id: "note-\(notes.count + 1)-\(Int(playhead * 100))",
                 timecode: timecode,
-                text: trimmed,
+                text: text,
                 author: "You",
                 createdAt: "Just now",
                 isResolved: false
             ),
             at: 0
         )
-        noteDraft = ""
     }
 
     func toggleNoteResolved(_ id: String) {

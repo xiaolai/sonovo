@@ -177,7 +177,7 @@ struct VideoStageView: View {
                                 .foregroundStyle(AppTheme.Palette.white)
                                 .frame(width: AppTheme.IconSize.play, height: AppTheme.IconSize.play)
                                 .background(Circle().fill(AppTheme.Surface.mediaOverlay))
-                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.border), lineWidth: 0.5))
+                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.border), lineWidth: AppTheme.BorderWidth.hairline))
                         }
                         .buttonStyle(.plain)
                         .help(state.isPlaying ? "Pause" : "Play")
@@ -186,7 +186,7 @@ struct VideoStageView: View {
                         Spacer()
 
                         VStack(spacing: AppTheme.Spacing.sm) {
-                            if state.showCaptions, let segment = state.selectedTranscript {
+                            if state.showCaptions, let segment = state.currentTranscript {
                                 Text(segment.text)
                                     .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                                     .foregroundStyle(AppTheme.Palette.white)
@@ -301,7 +301,7 @@ struct VideoCompareView: View {
                             Circle()
                                 .fill(AppTheme.Surface.mediaOverlay)
                                 .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
-                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.secondary), lineWidth: 0.5))
+                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.secondary), lineWidth: AppTheme.BorderWidth.hairline))
                             HStack(spacing: AppTheme.Spacing.xxs) {
                                 Image(systemName: "chevron.left")
                                 Image(systemName: "chevron.right")

@@ -457,7 +457,7 @@ private struct AppearanceCard: View {
 
                     if isSelected {
                         RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                            .strokeBorder(Color.accentColor, lineWidth: 2)
+                            .strokeBorder(Color.accentColor, lineWidth: AppTheme.BorderWidth.thick)
                     } else {
                         RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                             .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)

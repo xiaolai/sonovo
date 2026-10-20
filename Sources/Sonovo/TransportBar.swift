@@ -31,7 +31,12 @@ struct TransportBar: View {
             Text("Terminal")
                 .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
 
-            Text((state.terminalWorkingDirectory as NSString).abbreviatingWithTildeInPath)
+            Text(
+                (
+                    (state.terminalSessions.selectedSession?.workingDirectory
+                        ?? "~") as NSString
+                ).abbreviatingWithTildeInPath
+            )
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

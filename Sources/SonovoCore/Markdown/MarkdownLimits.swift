@@ -1,0 +1,26 @@
+import Foundation
+
+/// One namespace for every Markdown limit.
+///
+/// Limits live here so the parser, augmenter, and viewer cannot drift apart
+/// with scattered literals. A limit is a safety floor, not a rendering
+/// preference: exceeding it falls back to a safe representation rather than
+/// crashing or hanging.
+public enum MarkdownLimits {
+    /// Maximum nested `<details>` depth. The remainder stays raw HTML.
+    public static let maxDetailsDepth = 16
+
+    /// Maximum rendered TOC rows. The heading index stays complete.
+    public static let maxTOCEntries = 1000
+
+    /// Maximum container nesting depth the parser will walk.
+    public static let maxParseDepth = 128
+
+    /// Documents larger than this are routed to source-only/read-only mode.
+    ///
+    /// Provisional until the M0 measurement; adjust only with a measurement.
+    public static let maxEditableDocumentBytes = 4 * 1024 * 1024
+
+    /// Maximum number of wiki-link resolution candidates considered.
+    public static let maxWikiLinkCandidates = 64
+}
