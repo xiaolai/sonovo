@@ -205,8 +205,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         view.isAutomaticTextReplacementEnabled = false
         view.isAutomaticLinkDetectionEnabled = false
         view.isAutomaticDataDetectionEnabled = false
-        view.drawsBackground = true
-        view.backgroundColor = NSColor(AppTheme.Palette.canvas)
+        // The card behind the editor owns the surface color; a second
+        // background here would paint a square rectangle inside the card.
+        view.drawsBackground = false
         view.textContainerInset = NSSize(
             width: AppTheme.Editor.textInset,
             height: AppTheme.Editor.textInset
@@ -859,49 +860,128 @@ final class MarkdownTextView: NSTextView {
     }
 }
 
-// MARK: - Formatting rail
+// MARK: - Formatting toolbar
 
-/// The rail calls the same registry as menus and key equivalents.
-struct MarkdownFormattingRail: View {
+/// The editor's formatting controls. Buttons call the same registry as the
+/// menus and key equivalents; menus keep the infrequent commands out of the
+/// way instead of stringing every heading and list onto the toolbar.
+struct MarkdownFormattingToolbar: View {
     let controller: MarkdownEditorController
 
-    private let commands: [MarkdownCommandKind] = [
-        .toggleEmphasis,
-        .toggleStrong,
-        .toggleInlineCode,
-        .toggleStrikethrough,
-        .toggleHeading(level: 1),
-        .toggleHeading(level: 2),
-        .toggleHeading(level: 3),
-        .toggleBlockQuote,
-        .toggleList(kind: .bullet),
-        .toggleList(kind: .ordered),
-        .toggleList(kind: .task),
-        .insertLink(destination: ""),
-        .insertImage(destination: "", alt: "image"),
-        .insertCodeFence,
-        .insertRule,
-        .insertWikiLink(target: "", alias: nil),
-        .insertDetails(summary: "Details"),
-        .insertTOC
-    ]
-
     var body: some View {
-        VStack(spacing: AppTheme.Spacing.xs) {
-            ForEach(Array(commands.enumerated()), id: \.offset) { _, command in
-                Button {
-                    controller.perform(command)
-                } label: {
-                    Text(controller.title(for: command))
-                        .font(.system(size: AppTheme.TypeScale.xxs))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .help(controller.title(for: command))
+        HStack(spacing: AppTheme.Spacing.xxs) {
+            BarIconButton(systemName: "bold", help: "Bold") {
+                controller.perform(.toggleStrong)
             }
+            BarIconButton(systemName: "italic", help: "Italic") {
+                controller.perform(.toggleEmphasis)
+            }
+            BarIconButton(systemName: "strikethrough", help: "Strikethrough") {
+                controller.perform(.toggleStrikethrough)
+            }
+            BarIconButton(systemName: "curlybraces", help: "Inline Code") {
+                controller.perform(.toggleInlineCode)
+            }
+
+            toolbarDivider
+
+            headingMenu
+            BarIconButton(systemName: "text.quote", help: "Block Quote") {
+                controller.perform(.toggleBlockQuote)
+            }
+            listMenu
+
+            toolbarDivider
+
+            insertMenu
         }
-        .padding(AppTheme.Spacing.s6)
-        .frame(width: AppTheme.Layout.railWidth)
+    }
+
+    private var headingMenu: some View {
+        Menu {
+            ForEach(1...6, id: \.self) { level in
+                Button("Heading \(level)") {
+                    controller.perform(.toggleHeading(level: level))
+                }
+            }
+        } label: {
+            toolbarIcon("textformat.size")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Heading")
+        .accessibilityLabel("Heading")
+    }
+
+    private var listMenu: some View {
+        Menu {
+            Button("Bullet List") {
+                controller.perform(.toggleList(kind: .bullet))
+            }
+            Button("Numbered List") {
+                controller.perform(.toggleList(kind: .ordered))
+            }
+            Button("Task List") {
+                controller.perform(.toggleList(kind: .task))
+            }
+        } label: {
+            toolbarIcon("list.bullet")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("List")
+        .accessibilityLabel("List")
+    }
+
+    private var insertMenu: some View {
+        Menu {
+            Button("Link") {
+                controller.perform(.insertLink(destination: ""))
+            }
+            Button("Image") {
+                controller.perform(.insertImage(destination: "", alt: "image"))
+            }
+            Button("Wiki Link") {
+                controller.perform(.insertWikiLink(target: "", alias: nil))
+            }
+            Button("Details") {
+                controller.perform(.insertDetails(summary: "Details"))
+            }
+            Button("Table of Contents") {
+                controller.perform(.insertTOC)
+            }
+            Divider()
+            Button("Code Block") {
+                controller.perform(.insertCodeFence)
+            }
+            Button("Horizontal Rule") {
+                controller.perform(.insertRule)
+            }
+        } label: {
+            toolbarIcon("text.badge.plus")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Insert")
+        .accessibilityLabel("Insert")
+    }
+
+    private func toolbarIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
+            .frame(
+                width: AppTheme.ControlSize.medium,
+                height: AppTheme.ControlSize.regular
+            )
+            .contentShape(Rectangle())
+    }
+
+    private var toolbarDivider: some View {
+        Divider()
+            .frame(height: AppTheme.Size.toolbarDividerHeight)
     }
 }
 

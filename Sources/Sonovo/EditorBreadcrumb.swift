@@ -18,7 +18,7 @@ struct EditorBreadcrumb: View {
                 Text(state.production.stage(for: asset.id)?.title ?? "Production")
                     .lineLimit(1)
                 chevron
-                Text(asset.name)
+                Text(state.displayName(for: asset))
                     .fontWeight(.medium)
                     .lineLimit(1)
 

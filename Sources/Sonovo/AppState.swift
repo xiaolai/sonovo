@@ -122,6 +122,62 @@ final class AppState {
         openTabs.first { $0.id == selectedTabID }
     }
 
+    /// The name the top chrome should show for a tab. A script tab hosts the
+    /// Markdown workspace, whose open document is the file actually being
+    /// edited; the production asset name would describe the demo slot, not
+    /// the file.
+    func displayName(for tab: EditorTab) -> String {
+        guard tab.kind == .script,
+              tab.id == selectedTabID,
+              let document = markdown.selectedDocument else {
+            return tab.title
+        }
+        return document.fileURL?.lastPathComponent ?? "Untitled"
+    }
+
+    func displayName(for asset: ProductionAsset) -> String {
+        guard asset.kind == .script,
+              selectedTab?.assetID == asset.id,
+              let document = markdown.selectedDocument else {
+            return asset.name
+        }
+        return document.fileURL?.lastPathComponent ?? "Untitled"
+    }
+
+    /// Counts words the way an editor footer should: whitespace-separated
+    /// runs, with CJK characters counted individually because they are not
+    /// space-delimited.
+    func markdownWordCount(_ text: String) -> Int {
+        var count = 0
+        var inWord = false
+        for scalar in text.unicodeScalars {
+            if scalar.properties.isWhitespace {
+                inWord = false
+            } else if Self.isCJK(scalar) {
+                count += 1
+                inWord = false
+            } else if !inWord {
+                count += 1
+                inWord = true
+            }
+        }
+        return count
+    }
+
+    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3040...0x30FF,   // Hiragana and Katakana
+             0x3400...0x4DBF,   // CJK Extension A
+             0x4E00...0x9FFF,   // CJK Unified Ideographs
+             0xAC00...0xD7AF,   // Hangul syllables
+             0xF900...0xFAFF,   // CJK compatibility ideographs
+             0x20000...0x2FA1F: // CJK Extension B and later
+            return true
+        default:
+            return false
+        }
+    }
+
     var selectedTranscript: TranscriptSegment? {
         transcript.first { $0.id == selectedTranscriptID }
     }

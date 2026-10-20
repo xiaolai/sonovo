@@ -68,7 +68,7 @@ private struct EditorTabButton: View {
                         .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
 
-                    Text(tab.title)
+                    Text(state.displayName(for: tab))
                         .font(.system(size: AppTheme.TypeScale.sm, weight: isSelected ? .medium : .regular))
                         .lineLimit(1)
                 }

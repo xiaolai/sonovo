@@ -1,3 +1,4 @@
+import SonovoCore
 import SwiftUI
 
 enum InspectorPlacement: Equatable {
@@ -59,7 +60,7 @@ struct InspectorView: View {
             .frame(width: AppTheme.Size.inspectorTabsWidth)
 
             if let asset = state.selectedAsset {
-                Text(asset.name)
+                Text(state.displayName(for: asset))
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
                     .lineLimit(1)
                 StatusBadge(status: state.status(for: asset))
@@ -405,7 +406,7 @@ struct InspectorView: View {
             .frame(width: AppTheme.Size.avatar, height: AppTheme.Size.avatar)
 
             VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
-                Text(asset.name)
+                Text(state.displayName(for: asset))
                     .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
                     .lineLimit(2)
 
@@ -640,7 +641,26 @@ struct InspectorView: View {
     }
 
     private func metadataRows(for asset: ProductionAsset) -> [MetadataItem] {
-        switch asset.kind {
+        if asset.kind == .script,
+           state.selectedTab?.kind == .script,
+           let document = state.markdown.selectedDocument {
+            return [
+                MetadataItem(label: "Kind", value: "Markdown"),
+                MetadataItem(
+                    label: "Words",
+                    value: state.markdownWordCount(document.source).formatted()
+                ),
+                MetadataItem(
+                    label: "Encoding",
+                    value: document.hasBOM ? "UTF-8 BOM" : "UTF-8"
+                ),
+                MetadataItem(
+                    label: "Modified",
+                    value: modifiedDescription(for: document)
+                )
+            ]
+        }
+        return switch asset.kind {
         case .audio:
             [
                 MetadataItem(label: "Kind", value: "WAV audio"),
@@ -660,12 +680,7 @@ struct InspectorView: View {
                 MetadataItem(label: "Size", value: "18.6 MB")
             ]
         case .script:
-            [
-                MetadataItem(label: "Kind", value: "Markdown"),
-                MetadataItem(label: "Words", value: "1,240"),
-                MetadataItem(label: "Encoding", value: "UTF-8"),
-                MetadataItem(label: "Modified", value: "2 min ago")
-            ]
+            []
         case .stills:
             [
                 MetadataItem(label: "Kind", value: "PNG image"),
@@ -688,6 +703,22 @@ struct InspectorView: View {
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
         }
+    }
+
+    private func modifiedDescription(for document: MarkdownDocument) -> String {
+        if document.isDirty {
+            return "Unsaved changes"
+        }
+        guard let url = document.fileURL,
+              let values = try? url.resourceValues(
+                  forKeys: [.contentModificationDateKey]
+              ),
+              let date = values.contentModificationDate else {
+            return "Not saved"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private func provenanceRows(for asset: ProductionAsset) -> [MetadataItem] {

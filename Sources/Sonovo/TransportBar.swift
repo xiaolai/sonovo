@@ -144,17 +144,17 @@ struct TransportBar: View {
                     .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
 
-                Text(asset.name)
+                Text(state.displayName(for: asset))
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                     .lineLimit(1)
 
-                Text(contextDetail(for: tab.kind))
+                Text(contextDetail(for: tab))
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
 
                 Spacer(minLength: AppTheme.Spacing.sm)
 
-                Text(contextRight(for: tab.kind))
+                Text(contextRight(for: tab))
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.tertiary)
             } else {
@@ -167,9 +167,13 @@ struct TransportBar: View {
         .padding(.horizontal, AppTheme.Spacing.lg)
     }
 
-    private func contextDetail(for kind: AssetKind) -> String {
-        switch kind {
-        case .script: "1,240 words"
+    private func contextDetail(for tab: EditorTab) -> String {
+        if tab.kind == .script,
+           let document = state.markdown.selectedDocument {
+            return "\(state.markdownWordCount(document.source).formatted()) words"
+        }
+        return switch tab.kind {
+        case .script: "0 words"
         case .stills: "8 frames"
         case .audio: "00:12.4"
         case .video: "00:12.4"
@@ -178,9 +182,15 @@ struct TransportBar: View {
         }
     }
 
-    private func contextRight(for kind: AssetKind) -> String {
-        switch kind {
-        case .script: "Markdown · UTF-8"
+    private func contextRight(for tab: EditorTab) -> String {
+        if tab.kind == .script,
+           let document = state.markdown.selectedDocument {
+            return document.hasBOM
+                ? "Markdown · UTF-8 BOM"
+                : "Markdown · UTF-8"
+        }
+        return switch tab.kind {
+        case .script: "Markdown"
         case .stills: "2048 px · 2 need review"
         case .audio: "48 kHz · Stereo"
         case .video: "1920×1080 · H.264"

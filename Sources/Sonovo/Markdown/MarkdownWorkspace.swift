@@ -32,6 +32,10 @@ final class MarkdownWorkspace {
 
     var lastError: String?
     var pendingClose: MarkdownDocument?
+
+    func dismissError() {
+        lastError = nil
+    }
     /// Called exactly once when a quit waiting on a close decision resolves.
     var onTerminationResolved: (@MainActor (Bool) -> Void)?
     var scrollTargets: [UUID: String] = [:]

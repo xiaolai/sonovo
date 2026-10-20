@@ -13,130 +13,206 @@ struct MarkdownWorkspaceView: View {
                 Divider()
             }
 
-            VStack(spacing: AppTheme.Spacing.zero) {
-                documentTabs
-                Divider()
-
-                if let document = workspace.selectedDocument {
-                    documentContent(document)
-                    if document.conflict != nil {
-                        conflictBanner(document)
-                    }
-                } else {
-                    emptyState
-                }
-
-                statusBar
+            if let document = workspace.selectedDocument {
+                editorPage(document)
+                    .padding(AppTheme.Spacing.lg)
+            } else {
+                emptyState
+                    .padding(AppTheme.Spacing.lg)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.appText)
+        .background(Color.appCanvas)
         // The unsaved-changes alert lives on the window root. This view is
         // mounted only while the Markdown tab is selected, so an alert here
         // would never appear when termination starts from an audio tab.
     }
 
-    // MARK: - Tabs
+    // MARK: - Editor page
 
-    private var documentTabs: some View {
-        HStack(spacing: AppTheme.Spacing.xxs) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppTheme.Spacing.xxs) {
-                    ForEach(workspace.documents) { document in
-                        documentTab(document)
-                    }
-                }
-                .padding(.horizontal, AppTheme.Spacing.sm)
-                .padding(.vertical, AppTheme.Spacing.xs)
-            }
+    /// One document surface on the canvas, built like the audio page: a
+    /// rounded card at `Radius.surface` with its controls in a header strip.
+    private func editorPage(_ document: MarkdownDocument) -> some View {
+        VStack(spacing: AppTheme.Spacing.zero) {
+            editorToolbar(document)
+            Divider()
 
-            Spacer(minLength: AppTheme.Spacing.zero)
-
-            Button {
-                workspace.toggleMode()
-            } label: {
-                Image(
-                    systemName: workspace.selectedDocument?.mode == .source
-                        ? "eye"
-                        : "chevron.left.forwardslash.chevron.right"
+            if let error = workspace.lastError {
+                banner(
+                    text: error,
+                    systemImage: "exclamationmark.triangle",
+                    tint: AppTheme.Palette.needsReview,
+                    dismiss: workspace.dismissError
                 )
-                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
             }
-            .buttonStyle(.plain)
-            .help("Toggle Source/Rendered")
-            .accessibilityLabel("Toggle Source or Rendered")
 
-            Menu {
-                Button("New Document") { workspace.newDocument() }
-                Button("Open…") { workspace.presentOpenPanel() }
-                Button("Open Folder…") { workspace.presentOpenFolderPanel() }
-                Divider()
-                Button("Save") {
-                    Task { await workspace.saveSelected() }
-                }
-                .disabled(!(workspace.selectedDocument?.isDirty ?? false))
-                Button("Save As…") {
-                    Task { await workspace.saveSelectedAs() }
-                }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
-                    .frame(
-                        width: AppTheme.Size.addIcon,
-                        height: AppTheme.Size.addIcon
-                    )
+            if document.isMissingOnDisk {
+                banner(
+                    text: "This file is missing on disk.",
+                    systemImage: "questionmark.folder",
+                    tint: AppTheme.Palette.needsReview
+                )
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .padding(.trailing, AppTheme.Spacing.sm)
-            .help("Document Menu")
-            .accessibilityLabel("Document Menu")
+
+            if document.conflict != nil {
+                conflictBanner(document)
+            }
+
+            documentContent(document)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: AppTheme.Layout.tabBarHeight)
-        .background(Color.appText)
-    }
-
-    private func documentTab(_ document: MarkdownDocument) -> some View {
-        let selected = workspace.selectedDocumentID == document.id
-        return HStack(spacing: AppTheme.Spacing.xs) {
-            Button {
-                workspace.select(document)
-            } label: {
-                HStack(spacing: AppTheme.Spacing.s6) {
-                    if document.isDirty {
-                        Circle()
-                            .fill(Color(AppTheme.Palette.needsReview))
-                            .frame(
-                                width: AppTheme.Size.statusDot,
-                                height: AppTheme.Size.statusDot
-                            )
-                    }
-                    Text(document.fileURL?.lastPathComponent ?? "Untitled")
-                        .font(.system(size: AppTheme.TypeScale.sm))
-                        .lineLimit(1)
-                }
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                Task { await workspace.close(document) }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-            }
-            .buttonStyle(.plain)
-            .help("Close")
-            .accessibilityLabel("Close Document")
-        }
-        .padding(.horizontal, AppTheme.Spacing.sm)
-        .padding(.vertical, AppTheme.Spacing.xs)
         .background(
             RoundedRectangle(
-                cornerRadius: AppTheme.Radius.control,
+                cornerRadius: AppTheme.Radius.surface,
                 style: .continuous
             )
-            .fill(selected ? Color.appCard : Color.clear)
+            .fill(Color.appText)
         )
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.surface,
+                style: .continuous
+            )
+        )
+        .overlay(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.surface,
+                style: .continuous
+            )
+            .strokeBorder(
+                Color.appSeparator,
+                lineWidth: AppTheme.BorderWidth.hairline
+            )
+        )
+    }
+
+    /// Document actions and the editing controls. The file name stays in the
+    /// window's tab bar, so this strip never repeats it.
+    private func editorToolbar(_ document: MarkdownDocument) -> some View {
+        HStack(spacing: AppTheme.Spacing.xs) {
+            documentMenu
+
+            if document.isReadOnly {
+                Label("Read-only", systemImage: "lock")
+                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: AppTheme.Spacing.sm)
+
+            if document.mode == .source, !document.isReadOnly {
+                MarkdownFormattingToolbar(
+                    controller: workspace.controller(for: document)
+                )
+                Divider()
+                    .frame(height: AppTheme.Size.toolbarDividerHeight)
+            }
+
+            modePicker(document)
+        }
+        .padding(.horizontal, AppTheme.Spacing.sm)
+        .frame(height: AppTheme.Layout.tabBarHeight)
+    }
+
+    private var documentMenu: some View {
+        Menu {
+            if !workspace.documents.isEmpty {
+                Section("Open Documents") {
+                    ForEach(workspace.documents) { document in
+                        Button {
+                            workspace.select(document)
+                        } label: {
+                            Text(
+                                document.fileURL?.lastPathComponent
+                                    ?? "Untitled"
+                            )
+                        }
+                    }
+                }
+                Divider()
+            }
+            Button("New Document") { workspace.newDocument() }
+            Button("Open…") { workspace.presentOpenPanel() }
+            Button("Open Folder…") { workspace.presentOpenFolderPanel() }
+            Divider()
+            Button("Save") {
+                Task { await workspace.saveSelected() }
+            }
+            .disabled(!(workspace.selectedDocument?.isDirty ?? false))
+            Button("Save As…") {
+                Task { await workspace.saveSelectedAs() }
+            }
+            if let document = workspace.selectedDocument {
+                Divider()
+                Button("Close Document") {
+                    Task { await workspace.close(document) }
+                }
+            }
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
+                .frame(
+                    width: AppTheme.ControlSize.medium,
+                    height: AppTheme.ControlSize.regular
+                )
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Documents")
+        .accessibilityLabel("Documents")
+    }
+
+    private func modePicker(_ document: MarkdownDocument) -> some View {
+        Picker(
+            "Mode",
+            selection: Binding(
+                get: { document.mode },
+                set: { document.mode = $0 }
+            )
+        ) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .tag(MarkdownDocumentMode.source)
+                .help("Source")
+            Image(systemName: "eye")
+                .tag(MarkdownDocumentMode.rendered)
+                .help("Rendered")
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .help("Source or Rendered")
+        .accessibilityLabel("Source or Rendered")
+    }
+
+    private func banner(
+        text: String,
+        systemImage: String,
+        tint: Color,
+        dismiss: (() -> Void)? = nil
+    ) -> some View {
+        HStack(spacing: AppTheme.Spacing.sm) {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .lineLimit(2)
+            Spacer(minLength: AppTheme.Spacing.sm)
+            if let dismiss {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss")
+                .accessibilityLabel("Dismiss")
+            }
+        }
+        .padding(.horizontal, AppTheme.Spacing.sm)
+        .padding(.vertical, AppTheme.Spacing.s6)
+        .background(tint.opacity(AppTheme.Opacity.muted))
     }
 
     // MARK: - Content
@@ -145,15 +221,12 @@ struct MarkdownWorkspaceView: View {
     private func documentContent(_ document: MarkdownDocument) -> some View {
         switch document.mode {
         case .source:
-            HStack(spacing: AppTheme.Spacing.zero) {
-                MarkdownSourceEditor(
-                    document: document,
-                    cache: workspace.editorCache,
-                    parseService: workspace.parseService
-                )
-                .id(document.id)
-                MarkdownFormattingRail(controller: workspace.controller(for: document))
-            }
+            MarkdownSourceEditor(
+                document: document,
+                cache: workspace.editorCache,
+                parseService: workspace.parseService
+            )
+            .id(document.id)
         case .rendered:
             MarkdownRenderedDocumentView(
                 document: document,
@@ -195,7 +268,8 @@ struct MarkdownWorkspaceView: View {
                 Task { await workspace.saveAs(document) }
             }
         }
-        .padding(AppTheme.Spacing.sm)
+        .padding(.horizontal, AppTheme.Spacing.sm)
+        .padding(.vertical, AppTheme.Spacing.s6)
         .background(Color(AppTheme.Palette.needsReview).opacity(AppTheme.Opacity.muted))
     }
 
@@ -236,44 +310,6 @@ struct MarkdownWorkspaceView: View {
         .background(Color.appContent)
     }
 
-    // MARK: - Status
-
-    private var statusBar: some View {
-        HStack(spacing: AppTheme.Spacing.sm) {
-            if let document = workspace.selectedDocument {
-                Text(document.fileURL?.path ?? "Untitled")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(document.isDirty ? "Edited" : "Saved")
-                Text(document.lineEnding.rawValue.uppercased())
-                if document.hasBOM {
-                    Text("BOM")
-                }
-                if document.isReadOnly {
-                    Text("Read-only")
-                }
-                if document.isMissingOnDisk {
-                    Text("Missing on disk")
-                        .foregroundStyle(
-                            Color(AppTheme.Palette.needsReview)
-                        )
-                }
-            }
-
-            Spacer(minLength: AppTheme.Spacing.zero)
-
-            if let error = workspace.lastError {
-                Text(error)
-                    .lineLimit(1)
-                    .foregroundStyle(Color(AppTheme.Palette.needsReview))
-            }
-        }
-        .font(.system(size: AppTheme.TypeScale.xxs))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, AppTheme.Spacing.md)
-        .frame(height: AppTheme.Layout.breadcrumbHeight)
-        .background(Color.appText)
-    }
 }
 
 // MARK: - Rendered document

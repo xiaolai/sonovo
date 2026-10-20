@@ -49,7 +49,6 @@ enum AppTheme {
         static let toolbarTitleHeight: CGFloat = 30
 
         static let pageMaxWidth: CGFloat = 760
-        static let railWidth: CGFloat = 132
         static let markdownSidebarWidth: CGFloat = 220
         static let mediaMaxWidth: CGFloat = 900
         static let dialogueMaxWidth: CGFloat = 440
