@@ -52,6 +52,10 @@ struct DetailWorkspace: View {
                     .zIndex(3)
             }
             .background(Color.appText)
+            // The inspector is a custom pane, not a NavigationSplitView
+            // column. Animate its slide and the editor reflow with the same
+            // timing used by the system sidebar.
+            .animation(AppTheme.Motion.panel, value: state.inspectorVisible)
         }
     }
 }
@@ -130,6 +134,19 @@ struct WorkspaceLayout {
         }
 
         let mainWidth = max(size.width - rightWidth, 0)
+        let bottomInspectorHeight: CGFloat
+        if terminalAtRight {
+            bottomInspectorHeight = min(
+                AppTheme.Layout.bottomInspectorHeight,
+                max(
+                    AppTheme.Layout.bottomInspectorMinHeight,
+                    contentAboveTransport * AppTheme.Layout.bottomInspectorFraction
+                )
+            )
+        } else {
+            bottomInspectorHeight = 0
+        }
+
         let bottomHeight: CGFloat
         if terminalAtBottom {
             bottomHeight = min(
@@ -137,13 +154,7 @@ struct WorkspaceLayout {
                 max(0, contentAboveTransport - AppTheme.Layout.terminalMinEditorHeight)
             )
         } else if terminalAtRight && inspectorVisible {
-            bottomHeight = min(
-                AppTheme.Layout.bottomInspectorHeight,
-                max(
-                    AppTheme.Layout.bottomInspectorMinHeight,
-                    contentAboveTransport * AppTheme.Layout.bottomInspectorFraction
-                )
-            )
+            bottomHeight = bottomInspectorHeight
         } else {
             bottomHeight = 0
         }
@@ -177,9 +188,25 @@ struct WorkspaceLayout {
                 )
                 inspectorPlacement = .right
             }
+        } else if terminalAtRight {
+            // Park the hidden pane just below the window so showing it
+            // slides up from the bottom edge instead of growing from zero.
+            inspectorFrame = CGRect(
+                x: 0,
+                y: contentHeight,
+                width: mainWidth,
+                height: bottomInspectorHeight
+            )
+            inspectorPlacement = .bottom
         } else {
-            inspectorFrame = .zero
-            inspectorPlacement = .hidden
+            // Park it just beyond the trailing edge for the same reason.
+            inspectorFrame = CGRect(
+                x: size.width,
+                y: 0,
+                width: AppTheme.Layout.inspectorWidth,
+                height: contentHeight
+            )
+            inspectorPlacement = .right
         }
 
         let transportY: CGFloat

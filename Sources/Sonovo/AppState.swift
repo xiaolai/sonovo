@@ -40,6 +40,7 @@ final class AppState {
     let production = Production.sample
     let transcript = SampleContent.transcript
     let markdown = MarkdownWorkspace()
+    let subtitles = SubtitleWorkspace()
 
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -86,7 +87,10 @@ final class AppState {
 
     init() {
         let sample = Production.sample
-        let initialAssets = ["script-md", "vo-take-03", "take-03", "stills", "storyboard-html"]
+        let initialAssets = [
+            "script-md", "captions-srt", "vo-take-03", "take-03", "stills",
+            "storyboard-html"
+        ]
         openTabs = initialAssets.compactMap { id in
             sample.asset(id: id).map(EditorTab.init(asset:))
         }
@@ -122,26 +126,43 @@ final class AppState {
         openTabs.first { $0.id == selectedTabID }
     }
 
-    /// The name the top chrome should show for a tab. A script tab hosts the
-    /// Markdown workspace, whose open document is the file actually being
-    /// edited; the production asset name would describe the demo slot, not
-    /// the file.
+    /// The name the top chrome should show for a tab. A script or subtitle
+    /// tab hosts a file workspace, whose open document is the file actually
+    /// being edited; the production asset name would describe the demo slot.
     func displayName(for tab: EditorTab) -> String {
-        guard tab.kind == .script,
-              tab.id == selectedTabID,
-              let document = markdown.selectedDocument else {
+        guard tab.id == selectedTabID else { return tab.title }
+        switch tab.kind {
+        case .script:
+            guard let document = markdown.selectedDocument else {
+                return tab.title
+            }
+            return document.fileURL?.lastPathComponent ?? "Untitled"
+        case .subtitle:
+            guard let document = subtitles.selectedDocument else {
+                return tab.title
+            }
+            return document.fileURL.lastPathComponent
+        default:
             return tab.title
         }
-        return document.fileURL?.lastPathComponent ?? "Untitled"
     }
 
     func displayName(for asset: ProductionAsset) -> String {
-        guard asset.kind == .script,
-              selectedTab?.assetID == asset.id,
-              let document = markdown.selectedDocument else {
+        guard selectedTab?.assetID == asset.id else { return asset.name }
+        switch asset.kind {
+        case .script:
+            guard let document = markdown.selectedDocument else {
+                return asset.name
+            }
+            return document.fileURL?.lastPathComponent ?? "Untitled"
+        case .subtitle:
+            guard let document = subtitles.selectedDocument else {
+                return asset.name
+            }
+            return document.fileURL.lastPathComponent
+        default:
             return asset.name
         }
-        return document.fileURL?.lastPathComponent ?? "Untitled"
     }
 
     /// Counts words the way an editor footer should: whitespace-separated
@@ -294,6 +315,72 @@ final class AppState {
         } else if production.asset(id: "script-md") != nil {
             openAsset("script-md")
         }
+    }
+
+    func showSubtitleWorkspace() {
+        if let tab = openTabs.first(where: { $0.assetID == "captions-srt" }) {
+            selectTab(tab.id)
+        } else if production.asset(id: "captions-srt") != nil {
+            openAsset("captions-srt")
+        }
+    }
+
+    /// Brings a subtitle document to the front so a save started from another
+    /// tab fails where the document and its error are visible.
+    func revealSubtitleDocument(_ document: SubtitleDocument) {
+        showSubtitleWorkspace()
+        if terminalPresentation == .full {
+            terminalPresentation = .hidden
+        }
+        subtitles.select(document)
+    }
+
+    /// ⌘S dispatches on the visible editor. Saving a hidden workspace would
+    /// report success for a file the user cannot see.
+    var canSaveSelectedDocument: Bool {
+        guard terminalPresentation != .full else { return false }
+        switch selectedTab?.kind {
+        case .script:
+            return true
+        case .subtitle:
+            return subtitles.selectedDocument != nil
+        default:
+            return false
+        }
+    }
+
+    func saveSelectedDocument() async {
+        switch selectedTab?.kind {
+        case .script:
+            await markdown.saveSelected()
+        case .subtitle:
+            await subtitles.saveSelected()
+        default:
+            break
+        }
+    }
+
+    /// Saves both workspaces before the window closes. Subtitle files always
+    /// have a path, so they never ask for a save/discard decision; a failed
+    /// subtitle save cancels the close and leaves the error visible.
+    func flushAllBeforeClose() async -> Bool {
+        if subtitles.hasDirtyDocuments {
+            let saved = await subtitles.flushAllForTermination()
+            guard saved else {
+                // The workspace leaves the failing document selected. Make
+                // that document visible so its error is not hidden behind
+                // another tab.
+                if let document = subtitles.selectedDocument {
+                    revealSubtitleDocument(document)
+                }
+                return false
+            }
+        }
+        if markdown.hasDirtyDocuments,
+           !(await markdown.flushAllForTermination()) {
+            return false
+        }
+        return true
     }
 
     /// Brings a Markdown document to the front so a save started from another

@@ -24,6 +24,21 @@ struct SonovoApp: App {
         )
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") {
+                    Task { await state.saveSelectedDocument() }
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+                .disabled(!state.canSaveSelectedDocument)
+                Button("Save As…") {
+                    Task { await state.markdown.saveSelectedAs() }
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(
+                    state.selectedTab?.kind != .script
+                        || state.terminalPresentation == .full
+                )
+            }
             CommandGroup(after: .newItem) {
                 Button("New Take") { state.newTake() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -49,15 +64,6 @@ struct SonovoApp: App {
                     state.markdown.presentOpenFolderPanel()
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
-                Divider()
-                Button("Save") {
-                    Task { await state.markdown.saveSelected() }
-                }
-                .keyboardShortcut("s", modifiers: [.command])
-                Button("Save As…") {
-                    Task { await state.markdown.saveSelectedAs() }
-                }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
                 Divider()
                 Button("Toggle Source/Rendered") { state.markdown.toggleMode() }
                     .keyboardShortcut("r", modifiers: [.command, .option])
@@ -92,6 +98,37 @@ struct SonovoApp: App {
                     Button("Insert TOC") { state.markdown.performSelected(.insertTOC) }
                 }
                 .disabled(!canFormatMarkdown)
+            }
+
+            CommandMenu("Subtitles") {
+                Button("Show Subtitle Editor") {
+                    state.showSubtitleWorkspace()
+                }
+                Button(
+                    state.subtitles.previewMode == .collapsed
+                        ? "Show Video"
+                        : "Hide Video"
+                ) {
+                    state.subtitles.togglePreviewMode()
+                }
+                Button("Open Subtitle…") {
+                    state.showSubtitleWorkspace()
+                    state.subtitles.presentOpenPanel()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .option])
+                Button("Open Media…") {
+                    state.showSubtitleWorkspace()
+                    guard let document = state.subtitles.selectedDocument else {
+                        return
+                    }
+                    state.subtitles.presentOpenMediaPanel(for: document)
+                }
+                .disabled(state.subtitles.selectedDocument == nil)
+                Divider()
+                Button("Close Document") {
+                    Task { await state.subtitles.closeSelected() }
+                }
+                .disabled(state.subtitles.selectedDocument == nil)
             }
 
             CommandMenu("Terminal") {
@@ -199,8 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
-        guard let workspace = MarkdownWorkspaceRegistry.active,
-              workspace.hasDirtyDocuments else {
+        let subtitles = SubtitleWorkspaceRegistry.active
+        let markdown = MarkdownWorkspaceRegistry.active
+        let subtitleDirty = subtitles?.hasDirtyDocuments ?? false
+        let markdownDirty = markdown?.hasDirtyDocuments ?? false
+        guard subtitleDirty || markdownDirty else {
             return .terminateNow
         }
         guard !terminationPending else { return .terminateLater }
@@ -208,13 +248,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let canTerminate = await workspace.flushAllForTermination()
+
+            // Subtitle documents always have a path: flush them first, and
+            // refuse the quit outright if one cannot be saved. There is no
+            // second unsaved-changes decision for them.
+            if let subtitles, subtitles.hasDirtyDocuments {
+                let saved = await subtitles.flushAllForTermination()
+                guard saved else {
+                    self.terminationPending = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                    return
+                }
+            }
+
+            guard let markdown, markdown.hasDirtyDocuments else {
+                self.terminationPending = false
+                sender.reply(toApplicationShouldTerminate: true)
+                return
+            }
+
+            let canTerminate = await markdown.flushAllForTermination()
             if canTerminate {
                 self.terminationPending = false
                 sender.reply(toApplicationShouldTerminate: true)
                 return
             }
-            guard workspace.pendingClose != nil else {
+            guard markdown.pendingClose != nil else {
                 // The flush failed without a decision to ask about; there is
                 // nothing left to wait for.
                 self.terminationPending = false
@@ -224,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A document needs a decision. Reply only after the user answers
             // the close alert, so Save or Discard can resume the quit instead
             // of cancelling it silently.
-            workspace.onTerminationResolved = { [weak self] allowed in
+            markdown.onTerminationResolved = { [weak self] allowed in
                 guard let self else { return }
                 self.terminationPending = false
                 sender.reply(toApplicationShouldTerminate: allowed)

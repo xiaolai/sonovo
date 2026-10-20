@@ -42,6 +42,7 @@ enum AppTheme {
         static let bottomInspectorFraction: CGFloat = 0.30
 
         static let tabBarHeight: CGFloat = 34
+        static let subtitleHeaderHeight: CGFloat = 40
         static let breadcrumbHeight: CGFloat = 28
         static let transportHeight: CGFloat = 46
         static let toolbarControlHeight: CGFloat = 24
@@ -124,6 +125,27 @@ enum AppTheme {
         static let lineFragmentPadding: CGFloat = 0
         static let visibleRangeMargin: Int = 2000
         static let minimumTextSize: CGFloat = 0
+    }
+
+    /// Subtitle preview and cue-list geometry. Caption text is read at a
+    /// glance over moving pictures, so it is sans, semibold, and larger than
+    /// prose; the cue list itself uses `Reading` sizes.
+    enum Subtitle {
+        static let stageMaxWidth: CGFloat = 720
+        static let stageMaxHeight: CGFloat = 360
+        static let stageMinHeight: CGFloat = 180
+        static let captionSize: CGFloat = 22
+        static let captionMaxWidth: CGFloat = 620
+        static let cueTimeFieldWidth: CGFloat = 82
+        static let cueIndexWidth: CGFloat = 20
+        static let cueDividerInset: CGFloat = 44
+        static let cueMapHeight: CGFloat = 18
+        static let cueMapTrackHeight: CGFloat = 14
+        static let cueMapBlockHeight: CGFloat = 4
+        static let cueMapBlockCorner: CGFloat = 2
+        static let cueMapPlayheadWidth: CGFloat = 2
+        static let cueMapTooltipOffset: CGFloat = 20
+        static let cueMapTooltipEdgeInset: CGFloat = 40
     }
 
     /// Typography for document text, deliberately separate from `TypeScale`.
@@ -235,6 +257,13 @@ enum AppTheme {
 
     enum Time {
         static let zero: Double = 0
+    }
+
+    /// Motion shared by panes so the inspector and the sidebar feel like the
+    /// same system.
+    enum Motion {
+        static let panelDuration: Double = 0.25
+        static let panel = Animation.easeInOut(duration: panelDuration)
     }
 
     enum Preferences {
@@ -487,6 +516,12 @@ enum AppTheme {
             radius: 1,
             x: 0,
             y: 0.5
+        )
+        static let caption = ShadowToken(
+            color: Palette.black.opacity(Opacity.dim),
+            radius: 4,
+            x: 0,
+            y: 1
         )
     }
 }

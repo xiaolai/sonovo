@@ -74,6 +74,7 @@ let package = Package(
                 .linkedFramework("CoreText"),
                 .linkedFramework("Carbon"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("AVFoundation"),
                 .linkedLibrary("z"),
                 .linkedLibrary("c++")
             ]

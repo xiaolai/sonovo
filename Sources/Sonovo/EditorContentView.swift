@@ -15,6 +15,8 @@ struct EditorContentView: View {
                     reviewContent(for: tab)
                 case .stills:
                     StillsView(state: state)
+                case .subtitle:
+                    SubtitleWorkspaceView(state: state)
                 case .html:
                     HTMLPreviewView(state: state)
                 case .delivery:

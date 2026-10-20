@@ -31,7 +31,9 @@ struct MainWindow: View {
                 .accessibilityLabel(state.inspectorVisible ? "Hide Inspector" : "Show Inspector")
             }
         }
-        .background(WindowCloseGuard(workspace: state.markdown))
+        .background(
+            WindowCloseGuard { await state.flushAllBeforeClose() }
+        )
         .navigationTitle("\(state.production.title) — \(state.production.episode)")
         .navigationSubtitle(state.activityText)
         .alert(

@@ -39,6 +39,7 @@ enum AssetKind: String, Hashable, Sendable {
     case audio
     case video
     case stills
+    case subtitle
     case html
     case delivery
 
@@ -48,6 +49,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .audio: "waveform"
         case .video: "film"
         case .stills: "photo.on.rectangle.angled"
+        case .subtitle: "captions.bubble"
         case .html: "chevron.left.forwardslash.chevron.right"
         case .delivery: "shippingbox"
         }
@@ -59,6 +61,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .audio: "waveform"
         case .video: "film"
         case .stills: "photo"
+        case .subtitle: "captions.bubble"
         case .html: "globe"
         case .delivery: "shippingbox"
         }
@@ -124,6 +127,15 @@ struct Production: Hashable, Sendable {
                     detail: "Beat sheet · 12 beats",
                     kind: .script,
                     status: .approved
+                )
+            ]),
+            ProductionStage(id: "subtitles", title: "Subtitles", assets: [
+                ProductionAsset(
+                    id: "captions-srt",
+                    name: "captions.srt",
+                    detail: "Subtitle track · SRT · 3 cues",
+                    kind: .subtitle,
+                    status: .needsReview
                 )
             ]),
             ProductionStage(id: "voice", title: "Voice", assets: [
@@ -411,6 +423,7 @@ enum SampleContent {
         FileNode(id: "root", name: "Tidewater", icon: "folder", assetID: nil, children: [
             FileNode(id: "file-script", name: "tidewater-script.md", icon: "doc.text", assetID: "script-md", children: nil),
             FileNode(id: "file-outline", name: "outline.md", icon: "doc.text", assetID: "outline-md", children: nil),
+            FileNode(id: "file-captions", name: "captions.srt", icon: "captions.bubble", assetID: "captions-srt", children: nil),
             FileNode(id: "folder-voice", name: "voice", icon: "folder", assetID: nil, children: [
                 FileNode(id: "file-vo-03", name: "vo-take-03.wav", icon: "waveform", assetID: "vo-take-03", children: nil),
                 FileNode(id: "file-vo-02", name: "vo-take-02.wav", icon: "waveform", assetID: "vo-take-02", children: nil)

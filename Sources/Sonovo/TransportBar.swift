@@ -172,11 +172,16 @@ struct TransportBar: View {
            let document = state.markdown.selectedDocument {
             return "\(state.markdownWordCount(document.source).formatted()) words"
         }
+        if tab.kind == .subtitle,
+           let document = state.subtitles.selectedDocument {
+            return "\(document.cueCount) cues"
+        }
         return switch tab.kind {
         case .script: "0 words"
         case .stills: "8 frames"
         case .audio: "00:12.4"
         case .video: "00:12.4"
+        case .subtitle: "No subtitle open"
         case .html: "Local preview"
         case .delivery: "Not rendered"
         }
@@ -189,11 +194,16 @@ struct TransportBar: View {
                 ? "Markdown · UTF-8 BOM"
                 : "Markdown · UTF-8"
         }
+        if tab.kind == .subtitle,
+           let document = state.subtitles.selectedDocument {
+            return "\(document.format.displayName) · \(document.encoding.displayName)"
+        }
         return switch tab.kind {
         case .script: "Markdown"
         case .stills: "2048 px · 2 need review"
         case .audio: "48 kHz · Stereo"
         case .video: "1920×1080 · H.264"
+        case .subtitle: "SRT · WebVTT · ASS"
         case .html: "No network"
         case .delivery: "1920×1080 · H.264"
         }
