@@ -172,39 +172,94 @@ public struct MarkdownFileStore: Sendable {
     private static let renameExclusive: UInt32 = 0x0000_0004
 
     public func save(_ request: SaveRequest) throws -> SaveOutcome {
+        let workspace = try prepare(request)
+        if !workspace.exists {
+            return try writeNewFile(request, workspace)
+        }
+        return try replaceExistingFile(request, workspace)
+    }
+
+    /// The files and identity of one save attempt.
+    ///
+    /// The temporary file's lifetime spans the whole replacement. It is
+    /// removed on every ordinary failure, but a failure that leaves it as the
+    /// only copy of displaced external bytes sets `keepTemporary`, so cleanup
+    /// deliberately leaves it for recovery.
+    private final class SaveWorkspace {
+        let destination: URL
+        let directory: URL
+        let token: String
+        let exists: Bool
+        let previousBytes: Data?
+        let temporary: URL
+        let newArtifact: URL
+        let displacedArtifact: URL
+        var keepTemporary = false
+
+        init(destination: URL, exists: Bool, previousBytes: Data?) {
+            self.destination = destination
+            self.directory = destination.deletingLastPathComponent()
+            self.token = UUID().uuidString
+            self.exists = exists
+            self.previousBytes = previousBytes
+
+            let name = destination.lastPathComponent
+            temporary = self.directory.appendingPathComponent(
+                ".\(name).sonovo-tmp-\(self.token)"
+            )
+            newArtifact = self.directory.appendingPathComponent(
+                ".\(name).sonovo-new-\(self.token)"
+            )
+            displacedArtifact = self.directory.appendingPathComponent(
+                ".\(name).sonovo-displaced-\(self.token)"
+            )
+        }
+
+        deinit {
+            if !keepTemporary {
+                try? FileManager.default.removeItem(at: temporary)
+            }
+        }
+
+        func removeNewArtifact() {
+            try? FileManager.default.removeItem(at: newArtifact)
+        }
+
+        func removeDisplacedArtifact() {
+            try? FileManager.default.removeItem(at: displacedArtifact)
+        }
+    }
+
+    /// Validates the compare-and-swap precondition and creates the two
+    /// replacement files. Every replacement strategy works from this state.
+    private func prepare(_ request: SaveRequest) throws -> SaveWorkspace {
         let destination = request.destination
-        let directory = destination.deletingLastPathComponent()
         let fileManager = FileManager.default
         let exists = fileManager.fileExists(atPath: destination.path)
-
-        let currentData: Data? = exists ? try Data(contentsOf: destination) : nil
+        let previousBytes: Data? = exists
+            ? try Data(contentsOf: destination)
+            : nil
 
         if let expected = request.expectedDisk {
-            guard let currentData, currentData == expected.bytes else {
+            guard let previousBytes, previousBytes == expected.bytes else {
                 throw SaveError.diskChanged(.none)
             }
         } else if exists, request.mode == .automatic {
             throw SaveError.diskChanged(.none)
         }
 
-        let token = UUID().uuidString
-        let tempURL = directory.appendingPathComponent(
-            ".\(destination.lastPathComponent).sonovo-tmp-\(token)"
+        let workspace = SaveWorkspace(
+            destination: destination,
+            exists: exists,
+            previousBytes: previousBytes
         )
-        let newArtifact = directory.appendingPathComponent(
-            ".\(destination.lastPathComponent).sonovo-new-\(token)"
-        )
-        let displacedArtifact = directory.appendingPathComponent(
-            ".\(destination.lastPathComponent).sonovo-displaced-\(token)"
-        )
-
         do {
             guard try PrivateFileWriter.createExclusively(
                 request.data,
-                at: tempURL
+                at: workspace.temporary
             ), try PrivateFileWriter.createExclusively(
                 request.data,
-                at: newArtifact
+                at: workspace.newArtifact
             ) else {
                 throw SaveError.writeFailed(
                     "temporary save file already exists"
@@ -213,219 +268,256 @@ public struct MarkdownFileStore: Sendable {
             if exists {
                 // Replacement bytes must not broaden permissions or drop
                 // ACLs/extended attributes from the original file.
-                try preserveAttributes(from: destination, to: tempURL)
-                try preserveAttributes(from: destination, to: newArtifact)
+                try preserveAttributes(
+                    from: destination,
+                    to: workspace.temporary
+                )
+                try preserveAttributes(
+                    from: destination,
+                    to: workspace.newArtifact
+                )
             }
         } catch {
-            try? fileManager.removeItem(at: tempURL)
-            try? fileManager.removeItem(at: newArtifact)
+            workspace.removeNewArtifact()
             throw SaveError.writeFailed(String(describing: error))
         }
+        return workspace
+    }
 
-        var keepTemporaryFile = false
-        defer {
-            if !keepTemporaryFile {
-                try? fileManager.removeItem(at: tempURL)
+    /// Creates a file that did not exist before. `RENAME_EXCL` refuses to
+    /// replace anything that appeared after the preflight check.
+    private func writeNewFile(
+        _ request: SaveRequest,
+        _ workspace: SaveWorkspace
+    ) throws -> SaveOutcome {
+        request.hooks?.beforeRename?(workspace.destination)
+        guard renameatx_np(
+            Self.atFDCWD,
+            workspace.temporary.path,
+            Self.atFDCWD,
+            workspace.destination.path,
+            Self.renameExclusive
+        ) == 0 else {
+            let code = errno
+            workspace.removeNewArtifact()
+            if code == EEXIST {
+                throw SaveError.destinationExists
             }
+            throw SaveError.writeFailed("renameatx_np EXCL errno \(code)")
         }
+        request.hooks?.afterSwap?(workspace.destination)
 
-        if !exists {
-            request.hooks?.beforeRename?(destination)
-            guard renameatx_np(
-                Self.atFDCWD,
-                tempURL.path,
-                Self.atFDCWD,
-                destination.path,
-                Self.renameExclusive
-            ) == 0 else {
-                let code = errno
-                try? fileManager.removeItem(at: newArtifact)
-                if code == EEXIST {
-                    throw SaveError.destinationExists
-                }
-                throw SaveError.writeFailed("renameatx_np EXCL errno \(code)")
-            }
-            request.hooks?.afterSwap?(destination)
+        let artifacts = SaveArtifacts(
+            displaced: nil,
+            newContent: workspace.newArtifact
+        )
+        try verify(
+            workspace.destination,
+            holds: request.data,
+            artifacts: artifacts
+        )
+        return SaveOutcome(
+            snapshot: DiskSnapshot(bytes: request.data),
+            artifacts: artifacts
+        )
+    }
 
-            try verify(
-                destination,
-                holds: request.data,
-                artifacts: SaveArtifacts(displaced: nil, newContent: newArtifact)
-            )
+    /// Replaces an existing target, choosing the strongest strategy the
+    /// filesystem supports.
+    private func replaceExistingFile(
+        _ request: SaveRequest,
+        _ workspace: SaveWorkspace
+    ) throws -> SaveOutcome {
+        try preserveDisplacedCopy(workspace)
+        request.hooks?.beforeRename?(workspace.destination)
 
-            return SaveOutcome(
-                snapshot: DiskSnapshot(bytes: request.data),
-                artifacts: SaveArtifacts(displaced: nil, newContent: newArtifact)
-            )
-        }
-
-        // Preserve an independent copy of the displaced target before any
-        // replacement. A hard link would share the inode and could be mutated
-        // by an external in-place writer.
-        if let currentData {
-            do {
-                guard try PrivateFileWriter.createExclusively(
-                    currentData,
-                    at: displacedArtifact
-                ) else {
-                    throw SaveError.writeFailed(
-                        "displaced artifact already exists"
-                    )
-                }
-                try preserveAttributes(from: destination, to: displacedArtifact)
-            } catch {
-                try? fileManager.removeItem(at: newArtifact)
-                throw SaveError.writeFailed(String(describing: error))
-            }
-        }
-
-        request.hooks?.beforeRename?(destination)
-
-        let swapResult: Int32
-        if options.supportsAtomicSwap {
-            swapResult = renameatx_np(
-                Self.atFDCWD,
-                tempURL.path,
-                Self.atFDCWD,
-                destination.path,
-                Self.renameSwap
-            )
-        } else {
-            swapResult = -1
-            errno = ENOTSUP
-        }
-
-        if swapResult == 0 {
-            request.hooks?.afterSwap?(destination)
-
-            let displaced: Data
-            do {
-                displaced = try Data(contentsOf: tempURL)
-            } catch {
-                // The temporary file may be the only copy of an external
-                // edit. Keep it and report its recovery path.
-                keepTemporaryFile = true
-                throw SaveError.recoveryRequired(tempURL.path)
-            }
-
-            // Preserve the actual swapped-out bytes before any verification
-            // check can throw. The defer deletes `tempURL`; a verification
-            // failure must not take the only copy of the external edit with
-            // it.
-            do {
-                // The pre-swap artifact already exists with owner-only
-                // permissions; overwrite it with the bytes that were
-                // actually swapped out.
-                try displaced.write(to: displacedArtifact)
-                // The swapped-out inode's attributes now live on `tempURL`;
-                // the artifact must not be broader than the original file.
-                try preserveAttributes(from: tempURL, to: displacedArtifact)
-            } catch {
-                // The artifact write failed, so `tempURL` is now the only
-                // surviving copy. Do not let the defer delete it.
-                keepTemporaryFile = true
-                throw SaveError.writeFailed(
-                    "cannot preserve displaced bytes at "
-                        + "\(tempURL.path): \(error)"
-                )
-            }
-
-            try verify(
-                destination,
-                holds: request.data,
-                artifacts: SaveArtifacts(
-                    displaced: displacedArtifact,
-                    newContent: newArtifact
-                )
-            )
-            if let expected = request.expectedDisk, displaced != expected.bytes {
-                // An external writer changed the target between the initial
-                // read and the swap. Restore its bytes so reload/keep-local
-                // decisions operate on the disk state they describe.
-                // The restore is a swap, not an overwrite: whatever the
-                // destination holds at that instant is preserved as a
-                // recovery artifact, never silently discarded.
-                let newerVersion = try restoreDisplaced(
-                    displaced,
-                    to: destination,
-                    directory: directory,
-                    token: token,
-                    requestData: request.data,
-                    artifact: displacedArtifact
-                )
-                throw SaveError.diskChanged(
-                    SaveArtifacts(
-                        displaced: newerVersion ?? displacedArtifact,
-                        newContent: newArtifact
-                    )
-                )
-            }
-
-            return SaveOutcome(
-                snapshot: DiskSnapshot(bytes: request.data),
-                artifacts: SaveArtifacts(
-                    displaced: displacedArtifact,
-                    newContent: newArtifact
-                )
-            )
+        if attemptSwap(workspace) == 0 {
+            return try finishSwap(request, workspace)
         }
 
         let code = errno
         if code == EINVAL || code == ENOTSUP || code == ENOSYS {
-            if request.mode == .automatic {
-                try? fileManager.removeItem(at: displacedArtifact)
-                try? fileManager.removeItem(at: newArtifact)
-                throw SaveError.swapUnavailable
-            }
+            return try replaceWithoutSwap(request, workspace)
+        }
+        throw SaveError.writeFailed("renameatx_np SWAP errno \(code)")
+    }
 
-            // Explicit resolution: a plain atomic replace, with the displaced
-            // bytes already preserved. Re-read immediately before replacing:
-            // this path cannot compare-and-swap, so an edit that arrived
-            // after the initial read must be detected and preserved now.
-            let latest: Data?
-            do {
-                latest = try Data(contentsOf: destination)
-            } catch {
-                latest = nil
-            }
-            if let expected = request.expectedDisk, latest != expected.bytes {
-                if let latest {
-                    // The artifact already exists with owner-only
-                    // permissions; truncate it in place.
-                    try? latest.write(to: displacedArtifact)
-                }
-                throw SaveError.diskChanged(
-                    SaveArtifacts(displaced: displacedArtifact, newContent: newArtifact)
+    /// Preserves an independent copy of the displaced target before any
+    /// replacement. A hard link would share the inode and could be mutated by
+    /// an external in-place writer.
+    private func preserveDisplacedCopy(_ workspace: SaveWorkspace) throws {
+        guard let previousBytes = workspace.previousBytes else { return }
+        do {
+            guard try PrivateFileWriter.createExclusively(
+                previousBytes,
+                at: workspace.displacedArtifact
+            ) else {
+                throw SaveError.writeFailed(
+                    "displaced artifact already exists"
                 )
             }
-
-            guard renameatx_np(
-                Self.atFDCWD,
-                tempURL.path,
-                Self.atFDCWD,
-                destination.path,
-                0
-            ) == 0 else {
-                throw SaveError.writeFailed("renameatx_np errno \(errno)")
-            }
-            try verify(
-                destination,
-                holds: request.data,
-                artifacts: SaveArtifacts(
-                    displaced: displacedArtifact,
-                    newContent: newArtifact
-                )
+            try preserveAttributes(
+                from: workspace.destination,
+                to: workspace.displacedArtifact
             )
-            return SaveOutcome(
-                snapshot: DiskSnapshot(bytes: request.data),
-                artifacts: SaveArtifacts(
-                    displaced: displacedArtifact,
-                    newContent: newArtifact
+        } catch {
+            workspace.removeNewArtifact()
+            throw SaveError.writeFailed(String(describing: error))
+        }
+    }
+
+    private func attemptSwap(_ workspace: SaveWorkspace) -> Int32 {
+        guard options.supportsAtomicSwap else {
+            errno = ENOTSUP
+            return -1
+        }
+        return renameatx_np(
+            Self.atFDCWD,
+            workspace.temporary.path,
+            Self.atFDCWD,
+            workspace.destination.path,
+            Self.renameSwap
+        )
+    }
+
+    /// Completes a successful swap: preserves the actual swapped-out bytes,
+    /// verifies the target, and turns a concurrent external write into a
+    /// conflict without losing either version.
+    private func finishSwap(
+        _ request: SaveRequest,
+        _ workspace: SaveWorkspace
+    ) throws -> SaveOutcome {
+        request.hooks?.afterSwap?(workspace.destination)
+
+        let displaced: Data
+        do {
+            displaced = try Data(contentsOf: workspace.temporary)
+        } catch {
+            // The temporary file may be the only copy of an external edit.
+            // Keep it and report its recovery path.
+            workspace.keepTemporary = true
+            throw SaveError.recoveryRequired(workspace.temporary.path)
+        }
+
+        // Preserve the actual swapped-out bytes before any verification
+        // check can throw. Cleanup must not take the only copy of the
+        // external edit with it.
+        do {
+            // The pre-swap artifact already exists with owner-only
+            // permissions; overwrite it with the bytes that were actually
+            // swapped out.
+            try displaced.write(to: workspace.displacedArtifact)
+            // The swapped-out inode's attributes now live on the temporary
+            // file; the artifact must not be broader than the original.
+            try preserveAttributes(
+                from: workspace.temporary,
+                to: workspace.displacedArtifact
+            )
+        } catch {
+            // The artifact write failed, so the temporary file is now the
+            // only surviving copy. Do not let cleanup delete it.
+            workspace.keepTemporary = true
+            throw SaveError.writeFailed(
+                "cannot preserve displaced bytes at "
+                    + "\(workspace.temporary.path): \(error)"
+            )
+        }
+
+        let artifacts = SaveArtifacts(
+            displaced: workspace.displacedArtifact,
+            newContent: workspace.newArtifact
+        )
+        try verify(
+            workspace.destination,
+            holds: request.data,
+            artifacts: artifacts
+        )
+
+        if let expected = request.expectedDisk, displaced != expected.bytes {
+            // An external writer changed the target between the initial read
+            // and the swap. Restore its bytes so reload/keep-local decisions
+            // operate on the disk state they describe. The restore is a
+            // swap, not an overwrite: whatever the destination holds at that
+            // instant is preserved as a recovery artifact, never silently
+            // discarded.
+            let newerVersion = try restoreDisplaced(
+                displaced,
+                in: workspace,
+                requestData: request.data
+            )
+            throw SaveError.diskChanged(
+                SaveArtifacts(
+                    displaced: newerVersion ?? workspace.displacedArtifact,
+                    newContent: workspace.newArtifact
                 )
             )
         }
 
-        throw SaveError.writeFailed("renameatx_np SWAP errno \(code)")
+        return SaveOutcome(
+            snapshot: DiskSnapshot(bytes: request.data),
+            artifacts: artifacts
+        )
+    }
+
+    /// The filesystem refused a swap. An automatic save must never replace
+    /// an existing file on such a filesystem; an explicit resolution does a
+    /// plain atomic replace with the displaced bytes already preserved.
+    private func replaceWithoutSwap(
+        _ request: SaveRequest,
+        _ workspace: SaveWorkspace
+    ) throws -> SaveOutcome {
+        if request.mode == .automatic {
+            workspace.removeDisplacedArtifact()
+            workspace.removeNewArtifact()
+            throw SaveError.swapUnavailable
+        }
+
+        // Re-read immediately before replacing: this path cannot
+        // compare-and-swap, so an edit that arrived after the initial read
+        // must be detected and preserved now.
+        let latest: Data?
+        do {
+            latest = try Data(contentsOf: workspace.destination)
+        } catch {
+            latest = nil
+        }
+        if let expected = request.expectedDisk, latest != expected.bytes {
+            if let latest {
+                // The artifact already exists with owner-only permissions;
+                // truncate it in place.
+                try? latest.write(to: workspace.displacedArtifact)
+            }
+            throw SaveError.diskChanged(
+                SaveArtifacts(
+                    displaced: workspace.displacedArtifact,
+                    newContent: workspace.newArtifact
+                )
+            )
+        }
+
+        guard renameatx_np(
+            Self.atFDCWD,
+            workspace.temporary.path,
+            Self.atFDCWD,
+            workspace.destination.path,
+            0
+        ) == 0 else {
+            throw SaveError.writeFailed("renameatx_np errno \(errno)")
+        }
+
+        let artifacts = SaveArtifacts(
+            displaced: workspace.displacedArtifact,
+            newContent: workspace.newArtifact
+        )
+        try verify(
+            workspace.destination,
+            holds: request.data,
+            artifacts: artifacts
+        )
+        return SaveOutcome(
+            snapshot: DiskSnapshot(bytes: request.data),
+            artifacts: artifacts
+        )
     }
 
     /// Restores `data` to `destination` with an atomic swap.
@@ -438,14 +530,13 @@ public struct MarkdownFileStore: Sendable {
     /// overwrite of unknown content.
     private func restoreDisplaced(
         _ data: Data,
-        to destination: URL,
-        directory: URL,
-        token: String,
-        requestData: Data,
-        artifact: URL
+        in workspace: SaveWorkspace,
+        requestData: Data
     ) throws -> URL? {
-        let restoreURL = directory.appendingPathComponent(
-            ".\(destination.lastPathComponent).sonovo-restore-\(token)"
+        let destination = workspace.destination
+        let restoreURL = workspace.directory.appendingPathComponent(
+            ".\(destination.lastPathComponent).sonovo-restore-"
+                + workspace.token
         )
         do {
             guard try PrivateFileWriter.createExclusively(
@@ -494,7 +585,7 @@ public struct MarkdownFileStore: Sendable {
         }
 
         do {
-            try swappedOut.write(to: artifact)
+            try swappedOut.write(to: workspace.displacedArtifact)
             try? FileManager.default.removeItem(at: restoreURL)
             return nil
         } catch {

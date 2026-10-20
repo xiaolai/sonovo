@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import SonovoCore
@@ -181,6 +182,50 @@ struct FileStoreTests {
         } catch let SaveError.verificationFailed(artifacts) {
             let displaced = try #require(artifacts.displaced)
             #expect(try Data(contentsOf: displaced) == Data("old".utf8))
+        }
+    }
+
+    @Test("A swapped-out file that cannot be read is kept for recovery")
+    func unreadableDisplacedFileIsKept() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data("old".utf8).write(to: url)
+
+        let store = MarkdownFileStore()
+        let snapshot = try #require(try store.diskSnapshot(at: url))
+        let hooks = SaveHooks(afterSwap: { destination in
+            let folder = destination.deletingLastPathComponent()
+            let names = (try? FileManager.default.contentsOfDirectory(
+                atPath: folder.path
+            )) ?? []
+            for name in names where name.contains(".sonovo-tmp-") {
+                _ = chmod(folder.appendingPathComponent(name).path, 0o000)
+            }
+        })
+        let request = SaveRequest(
+            documentID: UUID(),
+            identityGeneration: 0,
+            sourceRevision: 1,
+            destination: url,
+            expectedDisk: snapshot,
+            data: Data("new".utf8),
+            mode: .automatic,
+            hooks: hooks
+        )
+
+        do {
+            _ = try store.save(request)
+            Issue.record("expected recoveryRequired")
+        } catch let SaveError.recoveryRequired(path) {
+            // The only remaining copy of the displaced bytes must survive
+            // cleanup, even though reading it failed during the save.
+            #expect(FileManager.default.fileExists(atPath: path))
+            #expect(chmod(path, 0o600) == 0)
+            #expect(
+                try Data(contentsOf: URL(fileURLWithPath: path))
+                    == Data("old".utf8)
+            )
         }
     }
 
