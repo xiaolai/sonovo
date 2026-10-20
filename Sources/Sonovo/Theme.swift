@@ -121,13 +121,77 @@ enum AppTheme {
     /// Markdown source editor values. The editor is AppKit-backed, so these
     /// are the only place its visual numbers may live.
     enum Editor {
-        static let textInset: CGFloat = 16
-        static let lineHeightMultiple: CGFloat = 1.35
-        static let paragraphSpacing: CGFloat = 6
-        static let codeBackgroundOpacity: CGFloat = 0.55
         static let lineFragmentPadding: CGFloat = 0
         static let visibleRangeMargin: Int = 2000
         static let minimumTextSize: CGFloat = 0
+    }
+
+    /// Typography for document text, deliberately separate from `TypeScale`.
+    ///
+    /// `TypeScale` sizes chrome. Reading text is larger, leads generously, and
+    /// uses a narrower measure, because a document is read rather than
+    /// scanned like a settings pane.
+    enum Reading {
+        // Rendered prose
+        static let bodySize: CGFloat = 16.5
+        static let bodyLineSpacing: CGFloat = 7
+        static let blockSpacing: CGFloat = 14
+        static let measure: CGFloat = 660
+        static let codeSize: CGFloat = 14
+        static let codeLineSpacing: CGFloat = 4
+        static let tableSize: CGFloat = 15
+        static let captionSize: CGFloat = 12
+        static let h1: CGFloat = 32
+        static let h2: CGFloat = 26
+        static let h3: CGFloat = 22
+        static let h4: CGFloat = 19
+        static let h5: CGFloat = 17
+        static let h6: CGFloat = 16
+
+        // Source editor
+        static let sourceSize: CGFloat = 13.5
+        static let sourceLineHeightMultiple: CGFloat = 1.5
+        static let sourceParagraphSpacing: CGFloat = 2
+        static let sourceInsetHorizontal: CGFloat = 28
+        static let sourceInsetVertical: CGFloat = 20
+        static let sourceH1: CGFloat = 20
+        static let sourceH2: CGFloat = 18
+        static let sourceH3: CGFloat = 16
+        static let sourceH4: CGFloat = 15
+        static let sourceH5: CGFloat = 14
+        static let sourceH6: CGFloat = 13.5
+
+        static func headingSize(_ level: Int) -> CGFloat {
+            switch level {
+            case 1: h1
+            case 2: h2
+            case 3: h3
+            case 4: h4
+            case 5: h5
+            default: h6
+            }
+        }
+
+        static func headingTopPadding(_ level: Int) -> CGFloat {
+            switch level {
+            case 1: 30
+            case 2: 24
+            case 3: 18
+            case 4: 14
+            default: 10
+            }
+        }
+
+        static func sourceHeadingSize(_ level: Int) -> CGFloat {
+            switch level {
+            case 1: sourceH1
+            case 2: sourceH2
+            case 3: sourceH3
+            case 4: sourceH4
+            case 5: sourceH5
+            default: sourceH6
+            }
+        }
     }
 
     enum TypeScale {

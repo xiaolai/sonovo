@@ -209,8 +209,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         // background here would paint a square rectangle inside the card.
         view.drawsBackground = false
         view.textContainerInset = NSSize(
-            width: AppTheme.Editor.textInset,
-            height: AppTheme.Editor.textInset
+            width: AppTheme.Reading.sourceInsetHorizontal,
+            height: AppTheme.Reading.sourceInsetVertical
         )
         // Resizing and width-tracking are owned by `configureScrollView`.
         view.textContainer?.lineFragmentPadding = AppTheme.Editor.lineFragmentPadding
@@ -222,10 +222,15 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     private var baseAttributes: [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineHeightMultiple = AppTheme.Editor.lineHeightMultiple
-        paragraph.paragraphSpacing = AppTheme.Editor.paragraphSpacing
+        paragraph.lineHeightMultiple = AppTheme.Reading.sourceLineHeightMultiple
+        paragraph.paragraphSpacing = AppTheme.Reading.sourceParagraphSpacing
+        // Source is code-shaped text: monospaced, wide leading, and a
+        // smaller paragraph gap so consecutive lines stay together.
         return [
-            .font: NSFont.systemFont(ofSize: AppTheme.TypeScale.md),
+            .font: NSFont.monospacedSystemFont(
+                ofSize: AppTheme.Reading.sourceSize,
+                weight: .regular
+            ),
             .foregroundColor: NSColor(AppTheme.Palette.label),
             .paragraphStyle: paragraph
         ]
@@ -1223,7 +1228,7 @@ private struct MarkdownHighlighter {
     private let tertiary = NSColor(AppTheme.Palette.tertiaryLabel)
     private let accent = NSColor(AppTheme.Palette.generating)
     private let codeBackground = NSColor(AppTheme.Palette.card)
-    private let baseSize = AppTheme.TypeScale.md
+    private let baseSize = AppTheme.Reading.sourceSize
 
     func apply(ast: SonovoAST, to storage: NSTextStorage) {
         walk(ast.blocks, storage: storage)
@@ -1247,6 +1252,7 @@ private struct MarkdownHighlighter {
                 if let range {
                     add(.font, font, range, storage)
                     add(.foregroundColor, textColor, range, storage)
+                    tintHeadingMarker(range, storage)
                 }
                 applyInlines(inlines, base: font, bold: true, italic: false, storage)
             case let .paragraph(inlines, _):
@@ -1257,10 +1263,16 @@ private struct MarkdownHighlighter {
                     italic: false,
                     storage
                 )
-            case let .blockQuote(children, _):
+            case let .blockQuote(children, range):
+                if let range {
+                    tintBlockQuoteMarkers(range, storage)
+                }
                 walk(children, storage: storage)
             case let .list(list, _):
                 for item in list.items {
+                    if let range = item.range {
+                        tintListMarker(range, storage)
+                    }
                     walk(item.blocks, storage: storage)
                 }
             case let .codeBlock(_, range):
@@ -1291,7 +1303,106 @@ private struct MarkdownHighlighter {
     }
 
     private var bodyFont: NSFont {
-        NSFont.systemFont(ofSize: baseSize)
+        NSFont.monospacedSystemFont(ofSize: baseSize, weight: .regular)
+    }
+
+    /// Syntax markers recede so the content, not the punctuation, carries the
+    /// page. Heading `#` runs and list bullets are structural, not prose.
+    private func tintHeadingMarker(
+        _ range: SourceRange,
+        _ storage: NSTextStorage
+    ) {
+        let ns = storage.string as NSString
+        let end = min(range.upperBound, ns.length)
+        var index = range.lowerBound
+        while index < end, isSpace(ns.character(at: index)) { index += 1 }
+        var hashes = 0
+        while index < end, ns.character(at: index) == 0x23 {
+            hashes += 1
+            index += 1
+        }
+        guard hashes > 0 else { return }
+        while index < end, isSpace(ns.character(at: index)) { index += 1 }
+        add(
+            .foregroundColor,
+            tertiary,
+            nsRange: NSRange(
+                location: range.lowerBound,
+                length: index - range.lowerBound
+            ),
+            storage
+        )
+    }
+
+    private func tintListMarker(
+        _ range: SourceRange,
+        _ storage: NSTextStorage
+    ) {
+        let ns = storage.string as NSString
+        let end = min(range.upperBound, ns.length)
+        var index = range.lowerBound
+        while index < end, isSpace(ns.character(at: index)) { index += 1 }
+        let start = index
+        if index < end, "-+*".utf16.contains(ns.character(at: index)) {
+            index += 1
+        } else {
+            while index < end,
+                  ns.character(at: index) >= 0x30,
+                  ns.character(at: index) <= 0x39 {
+                index += 1
+            }
+            guard index > start, index < end else { return }
+            let delimiter = ns.character(at: index)
+            guard delimiter == 0x2E || delimiter == 0x29 else { return }
+            index += 1
+        }
+        while index < end, isSpace(ns.character(at: index)) { index += 1 }
+        add(
+            .foregroundColor,
+            tertiary,
+            nsRange: NSRange(location: start, length: index - start),
+            storage
+        )
+    }
+
+    private func tintBlockQuoteMarkers(
+        _ range: SourceRange,
+        _ storage: NSTextStorage
+    ) {
+        let ns = storage.string as NSString
+        let end = min(range.upperBound, ns.length)
+        var lineStart = range.lowerBound
+        while lineStart < end, lineStart < ns.length {
+            let lineRange = ns.lineRange(
+                for: NSRange(location: lineStart, length: 0)
+            )
+            let lineEnd = min(NSMaxRange(lineRange), end)
+            var index = lineStart
+            while index < lineEnd, isSpace(ns.character(at: index)) {
+                index += 1
+            }
+            if index < lineEnd, ns.character(at: index) == 0x3E {
+                var markerEnd = index + 1
+                if markerEnd < lineEnd, isSpace(ns.character(at: markerEnd)) {
+                    markerEnd += 1
+                }
+                add(
+                    .foregroundColor,
+                    tertiary,
+                    nsRange: NSRange(
+                        location: index,
+                        length: markerEnd - index
+                    ),
+                    storage
+                )
+            }
+            guard lineEnd > lineStart else { break }
+            lineStart = lineEnd
+        }
+    }
+
+    private func isSpace(_ character: unichar) -> Bool {
+        character == 0x20 || character == 0x09
     }
 
     private func applyInlines(
@@ -1357,31 +1468,18 @@ private struct MarkdownHighlighter {
     }
 
     private func headingFont(_ level: Int) -> NSFont {
-        let size: CGFloat
-        switch level {
-        case 1: size = AppTheme.TypeScale.displaySmall
-        case 2: size = AppTheme.TypeScale.titleLarge
-        case 3: size = AppTheme.TypeScale.title
-        case 4: size = AppTheme.TypeScale.xl
-        case 5: size = AppTheme.TypeScale.lg
-        default: size = AppTheme.TypeScale.md
-        }
-        return NSFont.systemFont(ofSize: size, weight: .semibold)
+        NSFont.monospacedSystemFont(
+            ofSize: AppTheme.Reading.sourceHeadingSize(level),
+            weight: level <= 2 ? .bold : .semibold
+        )
     }
 
     private func font(base: NSFont, bold: Bool, italic: Bool) -> NSFont {
-        if bold {
-            let size = base.pointSize
-            var font = NSFont.systemFont(ofSize: size, weight: .semibold)
-            if italic {
-                font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-            }
-            return font
-        }
-        if italic {
-            return NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
-        }
-        return base
+        var traits: NSFontTraitMask = []
+        if bold { traits.insert(.boldFontMask) }
+        if italic { traits.insert(.italicFontMask) }
+        guard !traits.isEmpty else { return base }
+        return NSFontManager.shared.convert(base, toHaveTrait: traits)
     }
 
     private func add(
@@ -1397,6 +1495,24 @@ private struct MarkdownHighlighter {
         guard nsRange.location >= 0,
               nsRange.length > 0,
               nsRange.location + nsRange.length <= storage.length else {
+            return
+        }
+        let intersection = NSIntersectionRange(nsRange, affectedRange)
+        guard intersection.length > 0 else { return }
+        storage.addAttribute(key, value: value, range: intersection)
+    }
+
+    /// Adds an attribute for a marker range that has no `SourceRange`
+    /// position of its own (it is a slice of an already-mapped block).
+    private func add(
+        _ key: NSAttributedString.Key,
+        _ value: Any,
+        nsRange: NSRange,
+        _ storage: NSTextStorage
+    ) {
+        guard nsRange.location >= 0,
+              nsRange.length > 0,
+              NSMaxRange(nsRange) <= storage.length else {
             return
         }
         let intersection = NSIntersectionRange(nsRange, affectedRange)

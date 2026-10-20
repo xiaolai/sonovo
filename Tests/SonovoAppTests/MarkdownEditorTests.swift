@@ -317,7 +317,7 @@ final class MarkdownEditorTests: XCTestCase {
         let storage = try XCTUnwrap(controller.textView.textStorage)
 
         let before = storage.attribute(.font, at: headingOffset, effectiveRange: nil) as? NSFont
-        XCTAssertEqual(before?.pointSize, AppTheme.TypeScale.md)
+        XCTAssertEqual(before?.pointSize, AppTheme.Reading.sourceSize)
 
         controller.scrollView.contentView.scroll(
             to: NSPoint(

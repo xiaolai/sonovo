@@ -75,10 +75,10 @@ struct MarkdownViewer: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: AppTheme.Spacing.s10) {
+                VStack(alignment: .leading, spacing: AppTheme.Reading.blockSpacing) {
                     blocksView(ast.blocks, proxy: proxy)
                 }
-                .frame(maxWidth: AppTheme.Layout.pageMaxWidth, alignment: .leading)
+                .frame(maxWidth: AppTheme.Reading.measure, alignment: .leading)
                 .padding(.horizontal, AppTheme.Spacing.xl)
                 .padding(.vertical, AppTheme.Spacing.xl)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -114,7 +114,7 @@ struct MarkdownViewer: View {
 
     private func blocksView(_ blocks: [Block], proxy: ScrollViewProxy) -> AnyView {
         AnyView(
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.s10) {
+            VStack(alignment: .leading, spacing: AppTheme.Reading.blockSpacing) {
                 ForEach(blocks.indices, id: \.self) { index in
                     blockView(blocks[index], proxy: proxy)
                 }
@@ -169,14 +169,11 @@ struct MarkdownViewer: View {
     ) -> AnyView {
         let id = range.flatMap { headingIDs[$0.lowerBound] }
             ?? "heading-\(range?.lowerBound ?? 0)"
-        let topPadding: CGFloat = level == 1
-            ? AppTheme.Spacing.s6
-            : AppTheme.Spacing.xs
         return AnyView(
             Text(attributed(inlines))
                 .font(headingFont(level))
                 .textSelection(.enabled)
-                .padding(.top, topPadding)
+                .padding(.top, AppTheme.Reading.headingTopPadding(level))
                 .id(id)
                 .environment(\.openURL, openAction(proxy: proxy))
         )
@@ -200,7 +197,8 @@ struct MarkdownViewer: View {
         }
         return AnyView(
             Text(attributed(inlines))
-                .font(.system(size: AppTheme.TypeScale.md))
+                .font(.system(size: AppTheme.Reading.bodySize, design: .serif))
+                .lineSpacing(AppTheme.Reading.bodyLineSpacing)
                 .textSelection(.enabled)
                 .environment(\.openURL, openAction(proxy: proxy))
         )
@@ -237,7 +235,13 @@ struct MarkdownViewer: View {
                     .padding(.top, AppTheme.Spacing.xs)
             } label: {
                 Text(attributed(label))
-                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
+                    .font(
+                        .system(
+                            size: AppTheme.Reading.bodySize,
+                            weight: .semibold,
+                            design: .serif
+                        )
+                    )
                     .environment(\.openURL, openAction(proxy: proxy))
             }
         )
@@ -245,10 +249,10 @@ struct MarkdownViewer: View {
 
     private func listView(_ list: ListBlock, proxy: ScrollViewProxy) -> AnyView {
         AnyView(
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
                 ForEach(list.items.indices, id: \.self) { index in
                     let item = list.items[index]
-                    HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.s6) {
+                    HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.sm) {
                         marker(for: item, list: list, index: index)
                         blocksView(item.blocks, proxy: proxy)
                     }
@@ -261,18 +265,23 @@ struct MarkdownViewer: View {
     private func marker(for item: ListItem, list: ListBlock, index: Int) -> some View {
         if let checked = item.checked {
             Image(systemName: checked ? "checkmark.square" : "square")
-                .font(.system(size: AppTheme.TypeScale.sm))
+                .font(.system(size: AppTheme.Reading.bodySize))
                 .foregroundStyle(Color.appSecondaryLabel)
                 .accessibilityLabel(checked ? "Completed" : "Not completed")
         } else {
             switch list.kind {
             case .bullet:
                 Text("•")
-                    .font(.system(size: AppTheme.TypeScale.md))
+                    .font(.system(size: AppTheme.Reading.bodySize))
                     .foregroundStyle(Color.appSecondaryLabel)
             case .ordered(let start):
                 Text("\(start + index).")
-                    .font(.system(size: AppTheme.TypeScale.md))
+                    .font(
+                        .system(
+                            size: AppTheme.Reading.bodySize,
+                            design: .monospaced
+                        )
+                    )
                     .foregroundStyle(Color.appSecondaryLabel)
             }
         }
@@ -282,18 +291,24 @@ struct MarkdownViewer: View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
             if let language = code.language, !language.isEmpty {
                 Text(language)
-                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .font(.system(size: AppTheme.Reading.captionSize, weight: .medium))
                     .foregroundStyle(Color.appTertiaryLabel)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code.code)
-                    .font(.system(size: AppTheme.TypeScale.md, design: .monospaced))
+                    .font(
+                        .system(
+                            size: AppTheme.Reading.codeSize,
+                            design: .monospaced
+                        )
+                    )
+                    .lineSpacing(AppTheme.Reading.codeLineSpacing)
                     .textSelection(.enabled)
             }
         }
         .padding(AppTheme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.appCard)
+        .background(Color.appCanvas)
         .clipShape(
             RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
         )
@@ -342,7 +357,8 @@ struct MarkdownViewer: View {
         proxy: ScrollViewProxy
     ) -> some View {
         Text(attributed(cell.inlines))
-            .font(.system(size: AppTheme.TypeScale.sm))
+            .font(.system(size: AppTheme.Reading.tableSize))
+            .lineSpacing(AppTheme.Reading.codeLineSpacing)
             .multilineTextAlignment(textAlignment(alignment))
             .frame(maxWidth: .infinity, alignment: alignment)
             .environment(\.openURL, openAction(proxy: proxy))
@@ -381,7 +397,7 @@ struct MarkdownViewer: View {
                         navigate(to: row, proxy: proxy)
                     } label: {
                         Text(row.text.isEmpty ? "Untitled heading" : row.text)
-                            .font(.system(size: AppTheme.TypeScale.md))
+                            .font(.system(size: AppTheme.Reading.tableSize))
                             .foregroundStyle(Color.appLabel)
                             .padding(.leading, AppTheme.Spacing.md * CGFloat(row.indent))
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -399,7 +415,7 @@ struct MarkdownViewer: View {
         }
         .padding(AppTheme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.appCard)
+        .background(Color.appCanvas)
         .clipShape(
             RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
         )
@@ -446,10 +462,10 @@ struct MarkdownViewer: View {
                 var container = AttributeContainer()
                 container.inlinePresentationIntent = .code
                 container.font = .system(
-                    size: AppTheme.TypeScale.md,
+                    size: AppTheme.Reading.codeSize,
                     design: .monospaced
                 )
-                container.backgroundColor = Color.appCard
+                container.backgroundColor = Color.appCanvas
                 var segment = AttributedString(value)
                 segment.mergeAttributes(container)
                 result.append(segment)
@@ -614,29 +630,11 @@ struct MarkdownViewer: View {
     // MARK: - Fonts
 
     private func headingFont(_ level: Int) -> Font {
-        let size: CGFloat
-        let weight: Font.Weight
-        switch level {
-        case 1:
-            size = AppTheme.TypeScale.displaySmall
-            weight = .bold
-        case 2:
-            size = AppTheme.TypeScale.titleLarge
-            weight = .semibold
-        case 3:
-            size = AppTheme.TypeScale.title
-            weight = .semibold
-        case 4:
-            size = AppTheme.TypeScale.xl
-            weight = .semibold
-        case 5:
-            size = AppTheme.TypeScale.lg
-            weight = .semibold
-        default:
-            size = AppTheme.TypeScale.md
-            weight = .semibold
-        }
-        return .system(size: size, weight: weight)
+        .system(
+            size: AppTheme.Reading.headingSize(level),
+            weight: level == 1 ? .bold : .semibold,
+            design: .serif
+        )
     }
 
     // MARK: - Metadata
