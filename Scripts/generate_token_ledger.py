@@ -17,7 +17,11 @@ ENUM = re.compile(r"^\s*(?:enum|struct)\s+(\w+)")
 
 def parse() -> OrderedDict[str, list[tuple[str, str]]]:
     categories: OrderedDict[str, list[tuple[str, str]]] = OrderedDict()
-    stack: list[str] = []
+    # Each entry is (name, brace depth inside the opened declaration). A
+    # `static func` body contains braces of its own; only dropping below the
+    # declaration's opening depth closes it.
+    stack: list[tuple[str, int]] = []
+    depth = 0
     lines = THEME.read_text().splitlines()
     index = 0
 
@@ -27,7 +31,7 @@ def parse() -> OrderedDict[str, list[tuple[str, str]]]:
 
         enum_match = ENUM.match(line)
         if enum_match and not stripped.startswith("//"):
-            stack.append(enum_match.group(1))
+            stack.append((enum_match.group(1), depth + 1))
 
         token_match = TOKEN.match(line)
         if token_match and stack:
@@ -42,10 +46,11 @@ def parse() -> OrderedDict[str, list[tuple[str, str]]]:
                     parts.append(part)
                     balance += part.count("(") - part.count(")")
                 value = " ".join(parts)
-            category = ".".join(stack[1:]) or "AppTheme"
+            category = ".".join(entry[0] for entry in stack[1:]) or "AppTheme"
             categories.setdefault(category, []).append((name, value))
 
-        if stripped == "}" and stack:
+        depth += line.count("{") - line.count("}")
+        while stack and depth < stack[-1][1]:
             stack.pop()
 
         index += 1
