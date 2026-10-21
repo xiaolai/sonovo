@@ -64,7 +64,8 @@ let package = Package(
                 .copy("Resources/terminfo"),
                 .copy("Resources/version.txt"),
                 .copy("Resources/AppIcon.png"),
-                .copy("Resources/ModelViewer")
+                .copy("Resources/ModelViewer"),
+                .copy("Resources/SampleProject")
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),

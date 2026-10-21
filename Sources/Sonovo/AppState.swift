@@ -42,6 +42,17 @@ final class AppState {
     let markdown = MarkdownWorkspace()
     let subtitles = SubtitleWorkspace()
     let models = Model3DWorkspace()
+    private let sampleProject = SampleProjectDocuments.live()
+
+    /// Sample assets that name a real document. Selecting one of their tabs
+    /// has to select that document; otherwise the tab says
+    /// `tidewater-script.md` while the workspace shows whichever Markdown file
+    /// happened to be open.
+    private static let sampleDocumentNames: [String: String] = [
+        "script-md": "tidewater-script.md",
+        "outline-md": "outline.md",
+        "captions-srt": "captions.srt"
+    ]
 
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -269,10 +280,27 @@ final class AppState {
         guard let tab = openTabs.first(where: { $0.id == id }) else { return }
         selectedTabID = id
         selectedAssetID = tab.assetID
+        selectSampleDocument(for: tab.assetID)
         // One eligibility rule for every navigation path: review modes
         // require an audio or video asset.
         if !canUseReviewModes {
             editorMode = .player
+        }
+    }
+
+    private func selectSampleDocument(for assetID: String) {
+        guard let name = Self.sampleDocumentNames[assetID],
+              let url = sampleProject?.documentURL(named: name),
+              let kind = production.asset(id: assetID)?.kind else {
+            return
+        }
+        switch kind {
+        case .script:
+            markdown.open(url: url)
+        case .subtitle:
+            subtitles.open(url: url)
+        default:
+            break
         }
     }
 
