@@ -131,6 +131,36 @@ struct SonovoApp: App {
                 .disabled(state.subtitles.selectedDocument == nil)
             }
 
+            CommandMenu("3D") {
+                Button("Show 3D Viewer") {
+                    state.showModel3DWorkspace()
+                }
+                Button("Open Model…") {
+                    state.showModel3DWorkspace()
+                    state.models.presentOpenPanel()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                Divider()
+                Button("Reload Model") {
+                    state.models.reloadSelected()
+                }
+                .disabled(state.models.selectedDocument == nil)
+                Button("Convert with Blender…") {
+                    state.showModel3DWorkspace()
+                    state.models.convertSelectedWithBlender()
+                }
+                .disabled(
+                    state.models.selectedDocument?
+                        .format.canConvertWithBlender != true
+                        || state.models.blenderInstallation == nil
+                )
+                Divider()
+                Button("Close Model") {
+                    Task { await state.models.closeSelected() }
+                }
+                .disabled(state.models.selectedDocument == nil)
+            }
+
             CommandMenu("Terminal") {
                 Button("Toggle Terminal") {
                     state.terminalPresentation = state.terminalPresentation == .hidden ? .split : .hidden
@@ -229,6 +259,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    /// Runs only after the quit is approved. Doing this earlier would stop
+    /// model watchers and delete converted output even when a Markdown close
+    /// decision cancels the quit.
+    func applicationWillTerminate(_ notification: Notification) {
+        Model3DWorkspaceRegistry.active?.prepareForTermination()
     }
 
     private var terminationPending = false

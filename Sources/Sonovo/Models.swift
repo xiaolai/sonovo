@@ -40,6 +40,7 @@ enum AssetKind: String, Hashable, Sendable {
     case video
     case stills
     case subtitle
+    case model3d
     case html
     case delivery
 
@@ -50,6 +51,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .video: "film"
         case .stills: "photo.on.rectangle.angled"
         case .subtitle: "captions.bubble"
+        case .model3d: "cube.transparent"
         case .html: "chevron.left.forwardslash.chevron.right"
         case .delivery: "shippingbox"
         }
@@ -62,6 +64,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .video: "film"
         case .stills: "photo"
         case .subtitle: "captions.bubble"
+        case .model3d: "cube"
         case .html: "globe"
         case .delivery: "shippingbox"
         }
@@ -167,6 +170,15 @@ struct Production: Hashable, Sendable {
                     name: "B-roll — 4 clips",
                     detail: "Water · Boats · Town",
                     kind: .video,
+                    status: .draft
+                )
+            ]),
+            ProductionStage(id: "models", title: "3D Models", assets: [
+                ProductionAsset(
+                    id: "model-3d",
+                    name: "3D Models",
+                    detail: "GLB · STL · 3MF · USDZ",
+                    kind: .model3d,
                     status: .draft
                 )
             ]),
@@ -431,6 +443,9 @@ enum SampleContent {
             FileNode(id: "folder-visuals", name: "visuals", icon: "folder", assetID: nil, children: [
                 FileNode(id: "folder-stills", name: "stills", icon: "folder", assetID: "stills", children: nil),
                 FileNode(id: "folder-broll", name: "b-roll", icon: "folder", assetID: "broll", children: nil)
+            ]),
+            FileNode(id: "folder-models", name: "models", icon: "folder", assetID: nil, children: [
+                FileNode(id: "file-model", name: "set-dressing.glb", icon: "cube.transparent", assetID: "model-3d", children: nil)
             ]),
             FileNode(id: "folder-takes", name: "takes", icon: "folder", assetID: nil, children: [
                 FileNode(id: "file-take-03", name: "take-03.mp4", icon: "film", assetID: "take-03", children: nil),

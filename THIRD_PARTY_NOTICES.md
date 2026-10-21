@@ -26,3 +26,14 @@ The full license text is in `Vendor/Calyx-LICENSE.txt`.
 
 The adapted source files carry a short attribution header pointing back to
 this notice.
+
+## three.js
+
+- **Project:** https://threejs.org
+- **License:** MIT
+- **Copyright:** Copyright © 2010-2026 three.js authors
+- **Used as:** the vendored renderer and loaders under
+  `Sources/Sonovo/Resources/ModelViewer/vendor/three`, copied at version
+  0.186.1 by `Scripts/vendor-three.sh`.
+
+The full license text is in `Vendor/three-LICENSE.txt`.

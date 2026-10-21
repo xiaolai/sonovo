@@ -63,7 +63,8 @@ let package = Package(
                 .copy("Resources/ghostty-themes"),
                 .copy("Resources/terminfo"),
                 .copy("Resources/version.txt"),
-                .copy("Resources/AppIcon.png")
+                .copy("Resources/AppIcon.png"),
+                .copy("Resources/ModelViewer")
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),

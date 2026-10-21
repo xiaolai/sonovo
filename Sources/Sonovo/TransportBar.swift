@@ -176,12 +176,27 @@ struct TransportBar: View {
            let document = state.subtitles.selectedDocument {
             return "\(document.cueCount) cues"
         }
+        if tab.kind == .model3d,
+           let document = state.models.selectedDocument {
+            if let stats = document.stats {
+                return "\(stats.triangles.formatted()) triangles"
+            }
+            return switch document.state {
+            case .needsConversion: "Needs conversion"
+            case .converting: "Converting…"
+            case .conversionFailed: "Conversion failed"
+            case .loading: "Loading…"
+            case .ready: "Ready"
+            case .failed: "Could not load"
+            }
+        }
         return switch tab.kind {
         case .script: "0 words"
         case .stills: "8 frames"
         case .audio: "00:12.4"
         case .video: "00:12.4"
         case .subtitle: "No subtitle open"
+        case .model3d: "No model open"
         case .html: "Local preview"
         case .delivery: "Not rendered"
         }
@@ -198,12 +213,17 @@ struct TransportBar: View {
            let document = state.subtitles.selectedDocument {
             return "\(document.format.displayName) · \(document.encoding.displayName)"
         }
+        if tab.kind == .model3d,
+           let document = state.models.selectedDocument {
+            return "\(document.format.displayName) · three.js"
+        }
         return switch tab.kind {
         case .script: "Markdown"
         case .stills: "2048 px · 2 need review"
         case .audio: "48 kHz · Stereo"
         case .video: "1920×1080 · H.264"
         case .subtitle: "SRT · WebVTT · ASS"
+        case .model3d: "GLB · STL · 3MF · USDZ"
         case .html: "No network"
         case .delivery: "1920×1080 · H.264"
         }

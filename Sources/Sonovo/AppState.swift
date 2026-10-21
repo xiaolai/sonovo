@@ -41,6 +41,7 @@ final class AppState {
     let transcript = SampleContent.transcript
     let markdown = MarkdownWorkspace()
     let subtitles = SubtitleWorkspace()
+    let models = Model3DWorkspace()
 
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -116,6 +117,10 @@ final class AppState {
                 terminalPresentation = presentation
             }
         }
+
+        if ProcessInfo.processInfo.environment["SONOVO_DEMO_MODEL"] != nil {
+            showModel3DWorkspace()
+        }
     }
 
     var selectedAsset: ProductionAsset? {
@@ -142,6 +147,11 @@ final class AppState {
                 return tab.title
             }
             return document.fileURL.lastPathComponent
+        case .model3d:
+            guard let document = models.selectedDocument else {
+                return tab.title
+            }
+            return document.displayName
         default:
             return tab.title
         }
@@ -160,6 +170,11 @@ final class AppState {
                 return asset.name
             }
             return document.fileURL.lastPathComponent
+        case .model3d:
+            guard let document = models.selectedDocument else {
+                return asset.name
+            }
+            return document.displayName
         default:
             return asset.name
         }
@@ -322,6 +337,17 @@ final class AppState {
             selectTab(tab.id)
         } else if production.asset(id: "captions-srt") != nil {
             openAsset("captions-srt")
+        }
+    }
+
+    func showModel3DWorkspace() {
+        if terminalPresentation == .full {
+            terminalPresentation = .hidden
+        }
+        if let tab = openTabs.first(where: { $0.assetID == "model-3d" }) {
+            selectTab(tab.id)
+        } else if production.asset(id: "model-3d") != nil {
+            openAsset("model-3d")
         }
     }
 

@@ -17,6 +17,8 @@ struct EditorContentView: View {
                     StillsView(state: state)
                 case .subtitle:
                     SubtitleWorkspaceView(state: state)
+                case .model3d:
+                    Model3DWorkspaceView(state: state)
                 case .html:
                     HTMLPreviewView(state: state)
                 case .delivery:

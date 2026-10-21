@@ -130,6 +130,12 @@ enum AppTheme {
     /// Subtitle preview and cue-list geometry. Caption text is read at a
     /// glance over moving pictures, so it is sans, semibold, and larger than
     /// prose; the cue list itself uses `Reading` sizes.
+    enum Model3D {
+        static let conversionCardMaxWidth: CGFloat = 460
+        static let logSheetWidth: CGFloat = 620
+        static let logSheetHeight: CGFloat = 380
+    }
+
     enum Subtitle {
         static let stageMaxWidth: CGFloat = 720
         static let stageMaxHeight: CGFloat = 360

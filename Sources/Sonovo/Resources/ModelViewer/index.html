@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Viewer</title>
+<link rel="stylesheet" href="./viewer.css">
+<script type="importmap" nonce="__CSP_NONCE__">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="viewport" aria-label="3D model viewport"></div>
+<div id="status" hidden></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

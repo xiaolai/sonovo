@@ -37,10 +37,12 @@ struct PerformanceTests {
 
         let clock = ContinuousClock()
         var samples: [Double] = []
+        var cpuSamples: [Double] = []
         var parseSamples: [Double] = []
         var augmentSamples: [Double] = []
         var indexSamples: [Double] = []
         for _ in 0..<10 {
+            let cpuStart = Self.processCPUSeconds()
             let start = clock.now
             let parsed = MarkdownParser.parseCanonical(source)
             let afterParse = clock.now
@@ -49,6 +51,7 @@ struct PerformanceTests {
             _ = HeadingIndex(ast: ast)
             let afterIndex = clock.now
             samples.append(seconds(afterIndex - start))
+            cpuSamples.append(Self.processCPUSeconds() - cpuStart)
             parseSamples.append(seconds(afterParse - start))
             augmentSamples.append(seconds(afterAugment - afterParse))
             indexSamples.append(seconds(afterIndex - afterAugment))
@@ -57,20 +60,37 @@ struct PerformanceTests {
 
         let sorted = samples.sorted()
         let p95 = sorted[Int(Double(sorted.count - 1) * 0.95)]
+        let sortedCPU = cpuSamples.sorted()
+        let cpuP95 = sortedCPU[Int(Double(sortedCPU.count - 1) * 0.95)]
         print(
             "parse+augment+index on \(source.utf8.count) bytes: "
-                + "p50 \(sorted[sorted.count / 2])s, p95 \(p95)s"
+                + "wall p50 \(sorted[sorted.count / 2])s, p95 \(p95)s; "
+                + "cpu p50 \(sortedCPU[sortedCPU.count / 2])s, p95 \(cpuP95)s"
         )
 
         #if DEBUG
-        // Unoptimized builds are not the performance gate; the release run is.
-        #expect(p95 < 2.0, "debug p95 \(p95)s")
+        // Unoptimized builds are not the responsiveness gate; the release run
+        // is. Wall-clock during a debug run measures the build machine's load
+        // as much as the parser, so the debug guard uses process CPU time:
+        // a descheduled process accrues none. It still catches an
+        // order-of-magnitude regression.
+        #expect(cpuP95 < 1.5, "debug CPU p95 \(cpuP95)s")
         #else
-        // Target is 100 ms; the automated gate allows 150 ms so a loaded
-        // machine does not produce a false red. Clean release runs measure
-        // ~60-70 ms p95.
-        #expect(p95 < 0.15, "release p95 \(p95)s")
+        // Target is 100 ms of parser work; the automated gate allows 150 ms.
+        // Gating on CPU time keeps scheduler contention out of the verdict:
+        // a release run measured 0.35 s wall and 0.11 s CPU on a machine with
+        // a load average above 100. Wall time is printed for the record.
+        #expect(cpuP95 < 0.15, "release CPU p95 \(cpuP95)s")
         #endif
+    }
+
+    private static func processCPUSeconds() -> Double {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
+        func seconds(_ value: timeval) -> Double {
+            Double(value.tv_sec) + Double(value.tv_usec) / 1_000_000
+        }
+        return seconds(usage.ru_utime) + seconds(usage.ru_stime)
     }
 
     @Test("Large files route to read-only")
