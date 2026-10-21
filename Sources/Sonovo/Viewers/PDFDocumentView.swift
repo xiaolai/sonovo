@@ -355,7 +355,7 @@ struct PDFDocumentView: View {
                         weight: .ultraLight
                     )
                 )
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text("Could not open this PDF")
                 .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
             Text(message)

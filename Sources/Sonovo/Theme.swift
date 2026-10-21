@@ -304,7 +304,6 @@ enum AppTheme {
     enum IconSize {
         static let dotSmall: CGFloat = 5
         static let dot: CGFloat = 6
-        static let dotLarge: CGFloat = 7
         static let micro: CGFloat = 8
         static let tiny: CGFloat = 9
         static let small: CGFloat = 10
@@ -334,11 +333,8 @@ enum AppTheme {
         static let toolbarDividerHeight: CGFloat = 16
         static let metadataLabelWidth: CGFloat = 76
         static let avatar: CGFloat = 36
-        static let inspectorTabsWidth: CGFloat = 96
         static let bottomHeaderHeight: CGFloat = 34
         static let bottomInfoColumnMinWidth: CGFloat = 170
-        static let bottomNoteWidth: CGFloat = 260
-        static let takeCardWidth: CGFloat = 210
         static let timecodeWidth: CGFloat = 54
         static let timecodeColumnWidth: CGFloat = 56
         static let transportTimeWidth: CGFloat = 62
@@ -351,8 +347,6 @@ enum AppTheme {
         static let scrubberHitHeight: CGFloat = 14
         static let waveformHeight: CGFloat = 208
         static let compareWaveformHeight: CGFloat = 108
-        static let timelineLineHeight: CGFloat = 42
-        static let timelineDotColumnWidth: CGFloat = 8
         static let letterBadge: CGFloat = 17
         static let thumbnailWidth: CGFloat = 116
         static let thumbnailHeight: CGFloat = 65
@@ -371,7 +365,7 @@ enum AppTheme {
         static let menuIcon: CGFloat = 18
         static let addIcon: CGFloat = 20
         static let navigatorPickerWidth: CGFloat = 76
-        static let reviewModePickerWidth: CGFloat = 94
+        static let mediaModePickerWidth: CGFloat = 94
         static let miniWindowSidebar: CGFloat = 26
         static let miniWindowTrafficDot: CGFloat = 3
         static let miniWindowTitlebarHeight: CGFloat = 8
@@ -444,11 +438,9 @@ enum AppTheme {
         static let tertiaryLabel = Color(nsColor: .tertiaryLabelColor)
         static let separator = Color(nsColor: .separatorColor)
         static let selection = Color(nsColor: .selectedContentBackgroundColor)
-        static let approved = Color(nsColor: .systemGreen)
-        static let needsReview = Color(nsColor: .systemOrange)
-        static let generating = Color(nsColor: .systemBlue)
-        static let draft = Color(nsColor: .secondaryLabelColor)
-        static let note = Color(nsColor: .systemOrange)
+        static let success = Color(nsColor: .systemGreen)
+        static let warning = Color(nsColor: .systemOrange)
+        static let info = Color(nsColor: .systemBlue)
         static let white = Color.white
         static let black = Color.black
         // Keep these in sync with the Ghostty theme files. They match

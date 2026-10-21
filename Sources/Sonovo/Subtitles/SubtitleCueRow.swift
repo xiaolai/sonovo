@@ -77,7 +77,7 @@ struct SubtitleCueRow: View {
                     if let timingError {
                         Text(timingError)
                             .font(.system(size: AppTheme.TypeScale.xxs))
-                            .foregroundStyle(AppTheme.Palette.needsReview)
+                            .foregroundStyle(AppTheme.Palette.warning)
                     }
                 }
 
@@ -223,7 +223,7 @@ struct SubtitleCueRow: View {
             if let warning = warnings.first {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: AppTheme.TypeScale.xxs))
-                    .foregroundStyle(AppTheme.Palette.needsReview)
+                    .foregroundStyle(AppTheme.Palette.warning)
                     .help(warnings.map(\.message).joined(separator: "\n"))
             }
         }

@@ -54,6 +54,7 @@ struct SettingsView: View {
     @AppStorage("sonovo.shell") private var shell = "/bin/zsh"
     @AppStorage("sonovo.terminalFont") private var terminalFont = "SF Mono 12"
     @AppStorage("sonovo.loginShell") private var loginShell = true
+    @AppStorage("sonovo.terminals.tmux") private var terminalTmux = true
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.zero) {
@@ -288,7 +289,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
             paneHeader(
                 title: "Audio",
-                detail: "Playback and review defaults for voice and music."
+                detail: "Playback defaults for voice and music."
             )
 
             SettingsGroup {
@@ -369,6 +370,21 @@ struct SettingsView: View {
                 SettingsRow {
                     Toggle("Use login shell", isOn: $loginShell)
                     Text("Start the terminal as a login shell so your profile is loaded.")
+                }
+                SettingsRow {
+                    Toggle("Keep terminals in tmux", isOn: $terminalTmux)
+                    Text(
+                        "Sessions outlive Sonovo and can be reattached "
+                            + "over SSH. New tabs use tmux; existing tabs "
+                            + "keep their mode."
+                    )
+                    if !LiveTmux.shared.isAvailable {
+                        Text(
+                            "tmux was not found. Install it with Homebrew "
+                                + "to enable persistent sessions."
+                        )
+                        .foregroundStyle(AppTheme.Palette.warning)
+                    }
                 }
             }
         }

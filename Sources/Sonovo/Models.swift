@@ -1,39 +1,5 @@
 import SwiftUI
 
-enum ReviewStatus: String, CaseIterable, Hashable, Sendable {
-    case draft
-    case generating
-    case needsReview
-    case approved
-
-    var label: String {
-        switch self {
-        case .draft: "Draft"
-        case .generating: "Generating"
-        case .needsReview: "Needs review"
-        case .approved: "Approved"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .draft: AppTheme.Palette.draft
-        case .generating: AppTheme.Palette.generating
-        case .needsReview: AppTheme.Palette.needsReview
-        case .approved: AppTheme.Palette.approved
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .draft: "circle.dashed"
-        case .generating: "sparkles"
-        case .needsReview: "exclamationmark.circle.fill"
-        case .approved: "checkmark.circle.fill"
-        }
-    }
-}
-
 enum AssetKind: String, Hashable, Sendable {
     case script
     case document
@@ -89,7 +55,6 @@ struct ProductionAsset: Identifiable, Hashable, Sendable {
     let name: String
     let detail: String
     let kind: AssetKind
-    let status: ReviewStatus
 
     var shortDetail: String {
         detail.components(separatedBy: " · ").first ?? detail
@@ -130,15 +95,13 @@ struct Production: Hashable, Sendable {
                     id: "script-md",
                     name: "tidewater-script.md",
                     detail: "Narration draft · 1,240 words",
-                    kind: .script,
-                    status: .needsReview
+                    kind: .script
                 ),
                 ProductionAsset(
                     id: "outline-md",
                     name: "outline.md",
                     detail: "Beat sheet · 12 beats",
-                    kind: .script,
-                    status: .approved
+                    kind: .script
                 )
             ]),
             ProductionStage(id: "subtitles", title: "Subtitles", assets: [
@@ -146,8 +109,7 @@ struct Production: Hashable, Sendable {
                     id: "captions-srt",
                     name: "captions.srt",
                     detail: "Subtitle track · SRT · 3 cues",
-                    kind: .subtitle,
-                    status: .needsReview
+                    kind: .subtitle
                 )
             ]),
             ProductionStage(id: "voice", title: "Voice", assets: [
@@ -155,15 +117,13 @@ struct Production: Hashable, Sendable {
                     id: "vo-take-03",
                     name: "vo-take-03.wav",
                     detail: "00:12.4 · 48 kHz · Stereo",
-                    kind: .audio,
-                    status: .needsReview
+                    kind: .audio
                 ),
                 ProductionAsset(
                     id: "vo-take-02",
                     name: "vo-take-02.wav",
                     detail: "00:12.8 · 48 kHz · Stereo",
-                    kind: .audio,
-                    status: .approved
+                    kind: .audio
                 )
             ]),
             ProductionStage(id: "visuals", title: "Visuals", assets: [
@@ -171,15 +131,13 @@ struct Production: Hashable, Sendable {
                     id: "stills",
                     name: "Stills — 8 frames",
                     detail: "Harbor · Dawn · 2048 px",
-                    kind: .stills,
-                    status: .needsReview
+                    kind: .stills
                 ),
                 ProductionAsset(
                     id: "broll",
                     name: "B-roll — 4 clips",
                     detail: "Water · Boats · Town",
-                    kind: .video,
-                    status: .draft
+                    kind: .video
                 )
             ]),
             ProductionStage(id: "models", title: "3D Models", assets: [
@@ -187,8 +145,7 @@ struct Production: Hashable, Sendable {
                     id: "model-3d",
                     name: "3D Models",
                     detail: "GLB · STL · 3MF · USDZ",
-                    kind: .model3d,
-                    status: .draft
+                    kind: .model3d
                 )
             ]),
             ProductionStage(id: "takes", title: "Takes", assets: [
@@ -196,31 +153,27 @@ struct Production: Hashable, Sendable {
                     id: "take-03",
                     name: "take-03.mp4",
                     detail: "00:12.4 · 1920×1080 · H.264",
-                    kind: .video,
-                    status: .needsReview
+                    kind: .video
                 ),
                 ProductionAsset(
                     id: "take-02",
                     name: "take-02.mp4",
                     detail: "00:12.8 · 1920×1080 · H.264",
-                    kind: .video,
-                    status: .approved
+                    kind: .video
                 )
             ]),
             ProductionStage(id: "delivery", title: "Delivery", assets: [
                 ProductionAsset(
                     id: "storyboard-html",
                     name: "storyboard.html",
-                    detail: "Web review · 8 scenes",
-                    kind: .html,
-                    status: .draft
+                    detail: "Web storyboard · 8 scenes",
+                    kind: .html
                 ),
                 ProductionAsset(
                     id: "render-1080",
                     name: "Tidewater — 1080p.mp4",
                     detail: "Not rendered",
-                    kind: .delivery,
-                    status: .draft
+                    kind: .delivery
                 )
             ])
         ]
@@ -316,30 +269,6 @@ enum EditorMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum InspectorTab: String, CaseIterable, Identifiable, Sendable {
-    case info
-    case history
-    case notes
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .info: "Info"
-        case .history: "History"
-        case .notes: "Notes"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .info: "info.circle"
-        case .history: "clock.arrow.circlepath"
-        case .notes: "text.bubble"
-        }
-    }
-}
-
 enum NavigatorMode: String, CaseIterable, Identifiable, Sendable {
     case production
     case files
@@ -389,23 +318,6 @@ struct TranscriptSegment: Identifiable, Hashable, Sendable {
     }
 }
 
-struct ReviewNote: Identifiable, Hashable, Sendable {
-    let id: String
-    let timecode: String
-    let text: String
-    let author: String
-    let createdAt: String
-    var isResolved: Bool
-}
-
-struct TakeVersion: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let status: ReviewStatus
-    let createdAt: String
-    let detail: String
-}
-
 struct FileNode: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -443,61 +355,6 @@ enum SampleContent {
             end: 12.4,
             speaker: "Narrator",
             text: "And the day begins the way it always has."
-        )
-    ]
-
-    static let notes: [ReviewNote] = [
-        ReviewNote(
-            id: "note-1",
-            timecode: "00:03.20",
-            text: "“Held breath” lands a little flat. Try a warmer read without pushing the last word.",
-            author: "You",
-            createdAt: "2 min ago",
-            isResolved: false
-        ),
-        ReviewNote(
-            id: "note-2",
-            timecode: "00:07.10",
-            text: "The pause before “By six” runs long. Tighten it by about 0.4 seconds.",
-            author: "You",
-            createdAt: "6 min ago",
-            isResolved: false
-        ),
-        ReviewNote(
-            id: "note-3",
-            timecode: "00:10.40",
-            text: "Good close. Keep this timing.",
-            author: "You",
-            createdAt: "8 min ago",
-            isResolved: true
-        )
-    ]
-
-    /// The take the player is currently showing. One constant keeps the
-    /// history badge and the take strip from disagreeing.
-    static let currentTakeID = "take-03"
-
-    static let takes: [TakeVersion] = [
-        TakeVersion(
-            id: "take-03",
-            name: "Take 03",
-            status: .needsReview,
-            createdAt: "Today, 21:12",
-            detail: "Current · 00:12.4"
-        ),
-        TakeVersion(
-            id: "take-02",
-            name: "Take 02",
-            status: .approved,
-            createdAt: "Today, 20:48",
-            detail: "Approved · 00:12.8"
-        ),
-        TakeVersion(
-            id: "take-01",
-            name: "Take 01",
-            status: .draft,
-            createdAt: "Today, 20:31",
-            detail: "Archived · 00:13.1"
         )
     ]
 

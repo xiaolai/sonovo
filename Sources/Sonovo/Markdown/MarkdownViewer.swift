@@ -490,7 +490,7 @@ struct MarkdownViewer: View {
                 if case .allowed = MarkdownSecurity.linkDecision(for: destination),
                    let url = URL(string: destination) {
                     segment.link = url
-                    segment.foregroundColor = Color(AppTheme.Palette.generating)
+                    segment.foregroundColor = Color(AppTheme.Palette.info)
                 } else {
                     segment.foregroundColor = Color.appSecondaryLabel
                 }
@@ -508,11 +508,11 @@ struct MarkdownViewer: View {
                 }
                 switch wikiLinkState(link) {
                 case .normal:
-                    segment.foregroundColor = Color(AppTheme.Palette.generating)
+                    segment.foregroundColor = Color(AppTheme.Palette.info)
                 case .missing:
                     segment.foregroundColor = Color.appSecondaryLabel
                 case .ambiguous:
-                    segment.foregroundColor = Color(AppTheme.Palette.needsReview)
+                    segment.foregroundColor = Color(AppTheme.Palette.warning)
                 }
                 segment.underlineStyle = .single
                 result.append(segment)

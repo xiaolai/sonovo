@@ -1,30 +1,5 @@
 import SwiftUI
 
-struct StatusBadge: View {
-    let status: ReviewStatus
-    var compact = false
-
-    var body: some View {
-        HStack(spacing: AppTheme.Spacing.xs) {
-            Image(systemName: status.symbol)
-                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-                .foregroundStyle(status.color)
-
-            if !compact {
-                Text(status.label)
-                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
-                    .lineLimit(1)
-            }
-        }
-        .padding(.horizontal, compact ? AppTheme.Spacing.xs : AppTheme.Spacing.s6)
-        .padding(.vertical, compact ? AppTheme.Spacing.xxs : AppTheme.Spacing.s3)
-        .background(Capsule().fill(status.color.opacity(AppTheme.Opacity.tint)))
-        .foregroundStyle(status.color)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(status.label)
-    }
-}
-
 struct BarIconButton: View {
     let systemName: String
     let help: String

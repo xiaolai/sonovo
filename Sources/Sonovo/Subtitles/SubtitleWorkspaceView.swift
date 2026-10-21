@@ -147,7 +147,7 @@ private struct SubtitleDocumentPage: View {
                 banner(
                     text: error,
                     systemImage: "exclamationmark.triangle",
-                    tint: AppTheme.Palette.needsReview,
+                    tint: AppTheme.Palette.warning,
                     dismiss: workspace.dismissError
                 )
             }
@@ -156,7 +156,7 @@ private struct SubtitleDocumentPage: View {
                 banner(
                     text: "This file is missing on disk.",
                     systemImage: "questionmark.folder",
-                    tint: AppTheme.Palette.needsReview
+                    tint: AppTheme.Palette.warning
                 )
             }
 
@@ -164,7 +164,7 @@ private struct SubtitleDocumentPage: View {
                 banner(
                     text: notice,
                     systemImage: "arrow.clockwise",
-                    tint: AppTheme.Palette.generating,
+                    tint: AppTheme.Palette.info,
                     dismiss: workspace.dismissReloadNotice
                 )
             }
@@ -419,7 +419,7 @@ private struct SubtitleDocumentPage: View {
                 systemImage: "exclamationmark.triangle"
             )
             .font(.system(size: AppTheme.TypeScale.xxs))
-            .foregroundStyle(AppTheme.Palette.needsReview)
+            .foregroundStyle(AppTheme.Palette.warning)
             Spacer(minLength: AppTheme.Spacing.xxs)
         }
         .frame(maxWidth: .infinity)
@@ -561,7 +561,7 @@ private struct SubtitleDocumentPage: View {
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .font(.system(size: AppTheme.TypeScale.xs))
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text("This file changed on disk while you had unsaved edits.")
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .lineLimit(2)
@@ -576,7 +576,7 @@ private struct SubtitleDocumentPage: View {
         .padding(.horizontal, AppTheme.Spacing.md)
         .padding(.vertical, AppTheme.Spacing.sm)
         .background(
-            AppTheme.Palette.needsReview.opacity(AppTheme.Opacity.ghostSoft)
+            AppTheme.Palette.warning.opacity(AppTheme.Opacity.ghostSoft)
         )
     }
 
@@ -584,7 +584,7 @@ private struct SubtitleDocumentPage: View {
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: AppTheme.TypeScale.xs))
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text(
                 "\(document.parsed.errorCount) parsing problems. "
                     + "Cue editing is paused until the source parses."
@@ -601,7 +601,7 @@ private struct SubtitleDocumentPage: View {
         .padding(.horizontal, AppTheme.Spacing.md)
         .padding(.vertical, AppTheme.Spacing.sm)
         .background(
-            AppTheme.Palette.needsReview.opacity(AppTheme.Opacity.ghostSoft)
+            AppTheme.Palette.warning.opacity(AppTheme.Opacity.ghostSoft)
         )
     }
 }

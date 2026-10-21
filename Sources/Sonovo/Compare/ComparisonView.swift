@@ -274,7 +274,7 @@ struct ComparisonView: View {
                         weight: .ultraLight
                     )
                 )
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text(message)
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .foregroundStyle(.secondary)
@@ -536,7 +536,7 @@ struct ComparisonView: View {
                         Text(row.leading)
                             .foregroundStyle(
                                 row.differs
-                                    ? AppTheme.Palette.needsReview
+                                    ? AppTheme.Palette.warning
                                     : Color.appLabel
                             )
                         Text("vs")
@@ -544,7 +544,7 @@ struct ComparisonView: View {
                         Text(row.trailing)
                             .foregroundStyle(
                                 row.differs
-                                    ? AppTheme.Palette.needsReview
+                                    ? AppTheme.Palette.warning
                                     : Color.appLabel
                             )
                     }

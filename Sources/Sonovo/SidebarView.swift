@@ -33,11 +33,6 @@ private struct ProductionListView: View {
                     .tracking(AppTheme.Tracking.wide)
                     .foregroundStyle(.tertiary)
                 Spacer()
-                if state.needsReviewCount > 0 {
-                    Text("\(state.needsReviewCount) need review")
-                        .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
-                        .foregroundStyle(AppTheme.Palette.needsReview)
-                }
             }
             .padding(.horizontal, AppTheme.Spacing.md)
             .padding(.top, AppTheme.Spacing.sm)
@@ -130,7 +125,6 @@ private struct AssetRow: View {
     let asset: ProductionAsset
 
     var body: some View {
-        let status = state.status(for: asset)
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: asset.kind.icon)
                 .font(.system(size: AppTheme.TypeScale.body))
@@ -142,12 +136,6 @@ private struct AssetRow: View {
                 .lineLimit(1)
 
             Spacer(minLength: AppTheme.Spacing.xs)
-
-            Image(systemName: status.symbol)
-                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-                .foregroundStyle(status.color)
-                .help(status.label)
-                .accessibilityLabel(status.label)
         }
         .help(asset.detail)
         .contextMenu {
@@ -159,13 +147,6 @@ private struct AssetRow: View {
                 state.selectedAssetID = asset.id
             }
             Divider()
-            Button(status == .approved ? "Reopen Review" : "Approve") {
-                if status == .approved {
-                    state.reopen(asset)
-                } else {
-                    state.approve(asset)
-                }
-            }
             Button("Copy Name") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(asset.name, forType: .string)
@@ -321,15 +302,6 @@ private struct FileTreeView: View {
                         .lineLimit(1)
 
                     Spacer(minLength: AppTheme.Spacing.xs)
-
-                    if let assetID = node.assetID,
-                       let asset = state.production.asset(id: assetID) {
-                        Image(systemName: state.status(for: asset).symbol)
-                            .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-                            .foregroundStyle(state.status(for: asset).color)
-                            .help(state.status(for: asset).label)
-                            .accessibilityLabel(state.status(for: asset).label)
-                    }
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {

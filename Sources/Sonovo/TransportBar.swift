@@ -291,7 +291,7 @@ struct TransportBar: View {
         }
         return switch tab.kind {
         case .script: "Markdown"
-        case .stills: "2048 px · 2 need review"
+        case .stills: "2048 px · 8 frames"
         case .audio: "48 kHz · Stereo"
         case .video: "1920×1080 · H.264"
         case .subtitle: "SRT · WebVTT · ASS"

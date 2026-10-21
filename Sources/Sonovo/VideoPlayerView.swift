@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct VideoReviewView: View {
+struct VideoPlayerView: View {
     let state: AppState
     let project: Project
 
@@ -23,8 +23,7 @@ struct VideoReviewView: View {
             VideoStageView(
                 state: state,
                 palette: .dawn,
-                takeLabel: "TAKE 03",
-                status: state.status(for: asset)
+                takeLabel: "TAKE 03"
             )
             .frame(maxWidth: AppTheme.Layout.mediaMaxWidth)
 
@@ -37,13 +36,9 @@ struct VideoReviewView: View {
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
-                HStack(spacing: AppTheme.Spacing.sm) {
-                    Text(asset.name)
-                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                        .lineLimit(1)
-
-                    StatusBadge(status: state.status(for: asset))
-                }
+                Text(asset.name)
+                    .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
+                    .lineLimit(1)
 
                 Text("\(asset.shortDetail) · 24 fps · Rec. 709")
                     .font(.system(size: AppTheme.TypeScale.xs))
@@ -58,20 +53,6 @@ struct VideoReviewView: View {
             ) {
                 state.editorMode = .compare
             }
-
-            if state.status(for: asset) == .approved {
-                Label("Approved", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
-                    .foregroundStyle(AppTheme.Palette.approved)
-            } else {
-                Button {
-                    state.approve(asset)
-                } label: {
-                    Label("Approve", systemImage: "checkmark")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
         }
     }
 
@@ -80,11 +61,11 @@ struct VideoReviewView: View {
             HStack(spacing: AppTheme.Spacing.sm) {
                 Text("Shots")
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
-                Text("8 shots · 4 approved")
+                Text("8 shots")
                     .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("Select a frame to review")
+                Text("Select a frame")
                     .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.tertiary)
             }
@@ -134,7 +115,6 @@ struct VideoStageView: View {
     let state: AppState
     let palette: CoastalPalette
     let takeLabel: String
-    let status: ReviewStatus
 
     var body: some View {
         Color.clear
@@ -228,7 +208,7 @@ struct VideoStageView: View {
     private var takeBadge: some View {
         HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
-                .fill(status.color)
+                .fill(Color.accentColor)
                 .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
             Text(takeLabel)
                 .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
@@ -265,7 +245,7 @@ struct VideoCompareView: View {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 Text("Compare Takes")
                     .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                Text("Take 02 (approved) against \(selectedAsset?.name ?? "the current take")")
+                Text("Take 02 against \(selectedAsset?.name ?? "the current take")")
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
@@ -301,37 +281,20 @@ struct VideoCompareView: View {
             .appShadow(AppTheme.Shadow.media)
     }
 
-    private func compareLabel(_ text: String, color: Color) -> some View {
-        HStack(spacing: AppTheme.Spacing.s5) {
-            Circle()
-                .fill(color)
-                .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
-            Text(text)
-                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-                .tracking(AppTheme.Tracking.wide)
-        }
-        .foregroundStyle(AppTheme.Palette.white)
-        .padding(.horizontal, AppTheme.Spacing.sm)
-        .padding(.vertical, AppTheme.Spacing.xs)
-        .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
-    }
-
     private var summaries: some View {
         HStack(spacing: AppTheme.Spacing.md) {
             summaryCard(
                 letter: "A",
                 name: "take-02.mp4",
                 detail: "00:12.8 · Warmer read",
-                status: .approved,
-                tint: AppTheme.Palette.approved
+                tint: Color.accentColor
             )
 
             summaryCard(
                 letter: "B",
                 name: selectedAsset?.name ?? "take-03.mp4",
                 detail: "00:12.4 · Tighter pauses",
-                status: selectedAsset.map { state.status(for: $0) } ?? .needsReview,
-                tint: AppTheme.Palette.needsReview
+                tint: Color.secondary
             )
 
             VStack(spacing: AppTheme.Spacing.xs) {
@@ -339,8 +302,8 @@ struct VideoCompareView: View {
                     .font(.system(size: AppTheme.TypeScale.md, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                 Text("0.4s shorter")
-                Text("2 open notes")
                 Text("−1.2 LUFS")
+                Text("1 line re-read")
             }
             .font(.system(size: AppTheme.TypeScale.xxs))
             .foregroundStyle(.secondary)
@@ -353,7 +316,6 @@ struct VideoCompareView: View {
         letter: String,
         name: String,
         detail: String,
-        status: ReviewStatus,
         tint: Color
     ) -> some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
@@ -366,7 +328,6 @@ struct VideoCompareView: View {
                 Text(name)
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                 Spacer()
-                StatusBadge(status: status, compact: true)
             }
 
             Text(detail)
@@ -450,9 +411,9 @@ private struct WipeStageContent: View {
     private var labels: some View {
         VStack {
             HStack {
-                compareLabel("A · TAKE 02", color: AppTheme.Palette.approved)
+                compareLabel("A · TAKE 02", color: Color.accentColor)
                 Spacer()
-                compareLabel("B · TAKE 03", color: AppTheme.Palette.needsReview)
+                compareLabel("B · TAKE 03", color: Color.secondary)
             }
             Spacer()
             HStack {

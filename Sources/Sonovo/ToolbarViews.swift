@@ -24,17 +24,6 @@ struct TrailingToolbarView: View {
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.s6) {
-            Button {
-                state.newTake()
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: AppTheme.Size.addIcon, height: AppTheme.Size.addIcon)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Request a new take")
-            .accessibilityLabel("Request a new take")
-
             Menu {
                 previewQualityButton("1080p")
                 previewQualityButton("720p")
@@ -66,6 +55,10 @@ struct TrailingToolbarView: View {
                     state.terminalSessions.addSession()
                 }
 
+                Button("Reattach Sessions") {
+                    state.terminalSessions.restoreTmuxSessions()
+                }
+
                 Button("Restart Shell") {
                     NotificationCenter.default.post(name: .sonovoRestartTerminal, object: nil)
                 }
@@ -90,7 +83,7 @@ struct TrailingToolbarView: View {
             .help("Editor Options")
             .accessibilityLabel("Editor Options")
 
-            Picker("Review Mode", selection: $state.editorMode) {
+            Picker("Mode", selection: $state.editorMode) {
                 ForEach(EditorMode.allCases) { mode in
                     Image(systemName: mode.icon)
                         .accessibilityLabel(mode.label)
@@ -99,10 +92,10 @@ struct TrailingToolbarView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: AppTheme.Size.reviewModePickerWidth)
-            .disabled(!state.canUseReviewModes)
-            .help("Review mode")
-            .accessibilityLabel("Review mode")
+            .frame(width: AppTheme.Size.mediaModePickerWidth)
+            .disabled(!state.canUseMediaModes)
+            .help("View mode")
+            .accessibilityLabel("View mode")
 
         }
     }

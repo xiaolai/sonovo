@@ -132,11 +132,11 @@ struct ProjectChipBar: View {
     private func tint(for status: ProjectAttentionStatus) -> Color {
         switch status {
         case .pendingSaveDecision, .offline, .dirtyDocuments:
-            AppTheme.Palette.needsReview
+            AppTheme.Palette.warning
         case .runningTerminal:
-            AppTheme.Palette.approved
+            AppTheme.Palette.success
         case .converting3D, .backgroundChanges:
-            AppTheme.Palette.generating
+            AppTheme.Palette.info
         }
     }
 

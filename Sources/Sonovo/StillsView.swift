@@ -33,11 +33,8 @@ struct StillsView: View {
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
-                HStack(spacing: AppTheme.Spacing.sm) {
-                    Text(asset.name)
-                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                    StatusBadge(status: state.status(for: asset))
-                }
+                Text(asset.name)
+                    .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
 
                 Text("\(asset.shortDetail) · Display P3")
                     .font(.system(size: AppTheme.TypeScale.xs))
@@ -45,20 +42,6 @@ struct StillsView: View {
             }
 
             Spacer(minLength: AppTheme.Spacing.sm)
-
-            if state.status(for: asset) == .approved {
-                Label("Approved", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
-                    .foregroundStyle(AppTheme.Palette.approved)
-            } else {
-                Button {
-                    state.approve(asset)
-                } label: {
-                    Label("Approve Frame", systemImage: "checkmark")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
         }
     }
 
@@ -132,7 +115,7 @@ struct StillsView: View {
     private func stillLabel(index: Int) -> some View {
         HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
-                .fill(selectedAsset.map { state.status(for: $0).color } ?? AppTheme.Palette.needsReview)
+                .fill(Color.accentColor)
                 .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
             Text(String(format: "STILL %02d", index + 1))
                 .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
@@ -191,7 +174,7 @@ struct StillsView: View {
                     .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("Select a frame to review")
+                Text("Select a frame")
                     .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.tertiary)
             }

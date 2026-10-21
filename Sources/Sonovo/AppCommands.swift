@@ -21,11 +21,6 @@ struct DocumentCommands: Commands {
                     || state.terminalPresentation == .full
             )
         }
-        CommandGroup(after: .newItem) {
-            Button("New Take") { state.newTake() }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-                .disabled(!state.canCreateTake)
-        }
         SidebarCommands()
         CommandGroup(after: .sidebar) {
             Button("Toggle Inspector") { state.inspectorVisible.toggle() }

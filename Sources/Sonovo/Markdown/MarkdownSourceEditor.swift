@@ -1226,7 +1226,7 @@ private struct MarkdownHighlighter {
     private let textColor = NSColor(AppTheme.Palette.label)
     private let secondary = NSColor(AppTheme.Palette.secondaryLabel)
     private let tertiary = NSColor(AppTheme.Palette.tertiaryLabel)
-    private let accent = NSColor(AppTheme.Palette.generating)
+    private let accent = NSColor(AppTheme.Palette.info)
     private let codeBackground = NSColor(AppTheme.Palette.card)
     private let baseSize = AppTheme.Reading.sourceSize
 

@@ -50,7 +50,6 @@ final class AppState {
     var columnVisibility: NavigationSplitViewVisibility = .all
     var editorMode: EditorMode = .player
     var inspectorVisible = true
-    var inspectorTab: InspectorTab = .info
     var showTabBar = true
     var showBreadcrumbs = true
 
@@ -66,16 +65,10 @@ final class AppState {
     var showCaptions = true
 
     var selectedTranscriptID: String? = "seg-2"
-    var notes = SampleContent.notes
-    var noteDraft = ""
     var compareSplit: CGFloat = AppTheme.Layout.compareDefaultSplit
     var selectedStillIndex = 3
     var selectedShotIndex = 2
     var previewQuality = "1080p"
-    /// Explicit review decisions, keyed by asset. Reopening an asset that
-    /// shipped as approved must be able to move it back to needs-review;
-    /// removing an "approved" flag cannot do that.
-    var reviewStatusOverrides: [String: ReviewStatus] = [:]
 
     var liveProject: Project { workspace.liveProject }
 
@@ -150,15 +143,30 @@ final class AppState {
     }
 
     init() {
+        let terminalEnvironment = Self.isRunningTests
+            ? TerminalEnvironment.disabled
+            : TerminalEnvironment.live(isEnabled: {
+                UserDefaults.standard.object(
+                    forKey: "sonovo.terminals.tmux"
+                ) as? Bool ?? true
+            })
         let demo = Project.demo(
             production: production,
             markdown: MarkdownWorkspace(),
             subtitles: SubtitleWorkspace(),
             models: Model3DWorkspace(),
-            terminalSessions: TerminalSessionsStore(),
+            terminalSessions: TerminalSessionsStore(
+                workingDirectory: "~",
+                projectKey: "sample",
+                projectName: "Sample",
+                terminalEnvironment: terminalEnvironment
+            ),
             sampleDocuments: SampleProjectDocuments.live()
         )
-        workspace = Workspace(demoProject: demo)
+        workspace = Workspace(
+            demoProject: demo,
+            terminalEnvironment: terminalEnvironment
+        )
         AppStateRegistry.active = self
 
         let environment = ProcessInfo.processInfo.environment
@@ -308,24 +316,13 @@ final class AppState {
         return transcript.last { $0.end <= playhead } ?? transcript.first
     }
 
-    var canUseReviewModes: Bool {
+    var canUseMediaModes: Bool {
         // Compare and Transcript are demo surfaces; folder projects open
         // media in the player. Enabling the controls there changed state
         // without changing the editor.
         guard liveProject.isDemo,
               let kind = selectedTab?.kind else { return false }
         return kind == .audio || kind == .video
-    }
-
-    func status(for asset: ProductionAsset) -> ReviewStatus {
-        reviewStatusOverrides[asset.id] ?? asset.status
-    }
-
-    var needsReviewCount: Int {
-        guard liveProject.isDemo else { return 0 }
-        return production.allAssets.filter {
-            status(for: $0) == .needsReview
-        }.count
     }
 
     var filteredStages: [ProductionStage] {
@@ -338,9 +335,9 @@ final class AppState {
 
     func selectTab(_ id: String) {
         liveProject.selectTab(id)
-        // One eligibility rule for every navigation path: review modes
+        // One eligibility rule for every navigation path: media modes
         // require an audio or video asset.
-        if !canUseReviewModes {
+        if !canUseMediaModes {
             editorMode = .player
         }
     }
@@ -358,31 +355,6 @@ final class AppState {
 
     func togglePlayback() {
         isPlaying.toggle()
-    }
-
-    /// A take exists only in the demo production. A folder project has no
-    /// take model yet; inventing one from the demo would edit unrelated data.
-    var canCreateTake: Bool {
-        liveProject.isDemo && selectedAsset != nil
-    }
-
-    func newTake() {
-        guard canCreateTake, let asset = selectedAsset else { return }
-        requestChange(for: asset)
-    }
-
-    func approve(_ asset: ProductionAsset) {
-        reviewStatusOverrides[asset.id] = .approved
-    }
-
-    func reopen(_ asset: ProductionAsset) {
-        reviewStatusOverrides[asset.id] = .needsReview
-    }
-
-    func requestChange(for asset: ProductionAsset) {
-        insertNote("Requested a change to \(asset.name).")
-        inspectorVisible = true
-        inspectorTab = .notes
     }
 
     /// Brings the Markdown workspace's tab to the front. Menu commands that
@@ -616,32 +588,5 @@ final class AppState {
 
     func closeAllTabs() async {
         await liveProject.closeAllTabs()
-    }
-
-    func addNote() {
-        let trimmed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        insertNote(trimmed)
-        noteDraft = ""
-    }
-
-    private func insertNote(_ text: String) {
-        let timecode = TranscriptSegment.timecode(for: playhead)
-        notes.insert(
-            ReviewNote(
-                id: "note-\(notes.count + 1)-\(Int(playhead * 100))",
-                timecode: timecode,
-                text: text,
-                author: "You",
-                createdAt: "Just now",
-                isResolved: false
-            ),
-            at: 0
-        )
-    }
-
-    func toggleNoteResolved(_ id: String) {
-        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
-        notes[index].isResolved.toggle()
     }
 }

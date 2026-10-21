@@ -338,7 +338,7 @@ struct SubtitleHighlighter {
     func apply(to storage: NSTextStorage) {
         let ns = text as NSString
         let muted = NSColor(AppTheme.Palette.secondaryLabel)
-        let tagColor = NSColor(AppTheme.Palette.generating)
+        let tagColor = NSColor(AppTheme.Palette.info)
             .withAlphaComponent(AppTheme.Opacity.heavy)
 
         for cue in cues(intersecting: affectedRange) {

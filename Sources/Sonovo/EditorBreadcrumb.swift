@@ -27,10 +27,6 @@ struct EditorBreadcrumb: View {
                 Text(content.detail)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
-
-                if let status = content.status {
-                    StatusBadge(status: status)
-                }
             } else {
                 Text("No Editor")
                     .foregroundStyle(.secondary)
@@ -52,8 +48,7 @@ struct EditorBreadcrumb: View {
                 rootTitle: project.name,
                 groupTitle: asset.kind.projectGroup.title,
                 name: asset.name,
-                detail: asset.detail,
-                status: nil
+                detail: asset.detail
             )
         }
         if !project.isDemo,
@@ -64,8 +59,7 @@ struct EditorBreadcrumb: View {
                 rootTitle: project.name,
                 groupTitle: kind.projectGroup.title,
                 name: identity.name,
-                detail: identity.detail,
-                status: nil
+                detail: identity.detail
             )
         }
         if project.isDemo,
@@ -77,8 +71,7 @@ struct EditorBreadcrumb: View {
                 groupTitle: state.production.stage(for: asset.id)?.title
                     ?? "Production",
                 name: state.displayName(for: asset),
-                detail: asset.detail,
-                status: state.status(for: asset)
+                detail: asset.detail
             )
         }
         return nil
@@ -97,5 +90,4 @@ private struct BreadcrumbContent {
     let groupTitle: String
     let name: String
     let detail: String
-    let status: ReviewStatus?
 }

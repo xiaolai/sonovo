@@ -101,7 +101,7 @@ struct ProjectOverviewView: View {
                         Text(entry.attention.summary)
                             .font(.system(size: AppTheme.TypeScale.xxs))
                             .foregroundStyle(
-                                AppTheme.Palette.needsReview
+                                AppTheme.Palette.warning
                             )
                             .lineLimit(2)
                     }

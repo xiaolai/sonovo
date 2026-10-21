@@ -111,7 +111,7 @@ struct SubtitlePreviewView: View {
                 if let error = player.errorMessage {
                     Text(error)
                         .font(.system(size: AppTheme.TypeScale.xxs))
-                        .foregroundStyle(AppTheme.Palette.needsReview)
+                        .foregroundStyle(AppTheme.Palette.warning)
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: AppTheme.Layout.emptyDescriptionMaxWidth)

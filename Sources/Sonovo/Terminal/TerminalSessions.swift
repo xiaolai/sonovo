@@ -9,10 +9,18 @@ final class TerminalSession: Identifiable {
     var title: String
     var workingDirectory: String
     let view: GhosttyTerminalView
+    /// The tmux session this tab is a client of, when tmux is active. The
+    /// client can detach without ending the session or its processes.
+    let tmuxSessionName: String?
 
-    init(title: String, workingDirectory: String = "~") {
+    init(
+        title: String,
+        workingDirectory: String = "~",
+        tmuxSessionName: String? = nil
+    ) {
         self.title = title
         self.workingDirectory = workingDirectory
+        self.tmuxSessionName = tmuxSessionName
         self.view = GhosttyTerminalView(frame: .zero)
         self.view.initialWorkingDirectory = workingDirectory
 
@@ -33,17 +41,43 @@ final class TerminalSessionsStore {
     private(set) var sessions: [TerminalSession] = []
     var selectedID: UUID?
     let workingDirectory: String
+    private let terminalEnvironment: TerminalEnvironment
+    private let tmuxPrefix: String?
     private var nextNumber = 1
+    private var highestTmuxIndex = 0
+    /// Only the first tab created in `init` may skip the server lookup; a
+    /// tab created after every tab was closed must still see the server.
+    private var isInitialAllocation = true
+    private var probeGeneration: UInt64 = 0
+    private var probeInFlight = false
+    private var probeNames: Set<String> = []
+    private var tmuxRunningCount = 0
     /// A foreground process is running in at least one session. The Ghostty
-    /// surface is the source of truth, but it is not observable; the chip
-    /// rail polls this through `refreshProcessStates()`.
+    /// surface is the source of truth for a direct shell; a tmux tab asks the
+    /// server instead, because its client is always a live process.
     private(set) var runningProcessCount = 0
+    /// The last session action that failed in a way the user must see.
+    private(set) var lastError: String?
     @ObservationIgnored
     var processProbe: (TerminalSession) -> Bool = { $0.view.processAlive }
+    /// Test seam for the busy-session confirmation. nil shows the alert.
+    @ObservationIgnored
+    var endConfirmation: ((String) -> Bool)?
+    private var discoveryGeneration: UInt64 = 0
 
-    init(workingDirectory: String = "~") {
+    init(
+        workingDirectory: String = "~",
+        projectKey: String? = nil,
+        projectName: String = "",
+        terminalEnvironment: TerminalEnvironment = .disabled
+    ) {
         self.workingDirectory = workingDirectory
+        self.terminalEnvironment = terminalEnvironment
+        self.tmuxPrefix = projectKey.map {
+            TmuxNaming.prefix(projectKey: $0, projectName: projectName)
+        }
         addSession()
+        restoreTmuxSessions()
     }
 
     var selectedSession: TerminalSession? {
@@ -51,13 +85,134 @@ final class TerminalSessionsStore {
         return sessions.first { $0.id == selectedID }
     }
 
+    private var usesTmux: Bool {
+        guard let tmux = terminalEnvironment.tmux,
+              tmuxPrefix != nil,
+              terminalEnvironment.isEnabled() else {
+            return false
+        }
+        // tmux cannot start in a directory that is currently unavailable.
+        // Checking here lets an offline project come back without a rebuild
+        // of its terminal environment.
+        var isDirectory: ObjCBool = false
+        let path = (workingDirectory as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(
+            atPath: path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            return false
+        }
+        return tmux.isAvailable
+    }
+
     func addSession() {
+        let initial = isInitialAllocation
+        isInitialAllocation = false
+        let tmuxName = nextTmuxName(queryServer: !initial)
         let session = TerminalSession(
             title: "Terminal \(nextNumber)",
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            tmuxSessionName: tmuxName
         )
         nextNumber += 1
+        if let tmuxName {
+            session.view.initialCommand = "/bin/sh"
+            session.view.initialInput = terminalEnvironment.tmux?
+                .launchInput(name: tmuxName, directory: workingDirectory)
+            highestTmuxIndex = max(
+                highestTmuxIndex,
+                indexFromName(tmuxName) ?? 0
+            )
+        }
+        wire(session)
+        sessions.append(session)
+        selectedID = session.id
+        refreshProcessStates()
+    }
 
+    /// Finds tmux sessions left by an earlier run and appends a tab for each
+    /// one that is not already shown. Tab 1 keeps its slot and name; a
+    /// discovered session for it simply means the existing tab will attach
+    /// when its surface starts.
+    func restoreTmuxSessions() {
+        guard usesTmux,
+              let prefix = tmuxPrefix,
+              let tmux = terminalEnvironment.tmux else {
+            return
+        }
+        discoveryGeneration &+= 1
+        let generation = discoveryGeneration
+        Task { @MainActor [weak self] in
+            let names = await Task.detached(priority: .utility) {
+                tmux.sessionNames(prefix: prefix)
+            }.value
+            guard let self,
+                  generation == self.discoveryGeneration else {
+                return
+            }
+            self.applyRestored(names: names, prefix: prefix)
+        }
+    }
+
+    private func applyRestored(names: [String], prefix: String) {
+        let parsed = names.compactMap { name -> (Int, String)? in
+            guard let index = TmuxNaming.index(
+                of: name,
+                prefix: prefix
+            ) else {
+                return nil
+            }
+            return (index, name)
+        }.sorted { $0.0 < $1.0 }
+        guard !parsed.isEmpty else { return }
+
+        for (index, name) in parsed {
+            highestTmuxIndex = max(highestTmuxIndex, index)
+            if sessions.contains(where: { $0.tmuxSessionName == name }) {
+                continue
+            }
+            let session = TerminalSession(
+                title: "Terminal \(index)",
+                workingDirectory: workingDirectory,
+                tmuxSessionName: name
+            )
+            session.view.initialCommand = "/bin/sh"
+            session.view.initialInput = terminalEnvironment.tmux?
+                .launchInput(name: name, directory: workingDirectory)
+            wire(session)
+            sessions.append(session)
+        }
+        nextNumber = max(nextNumber, highestTmuxIndex + 1)
+        refreshProcessStates()
+    }
+
+    private func nextTmuxName(queryServer: Bool) -> String? {
+        guard usesTmux, let prefix = tmuxPrefix else { return nil }
+        // A tab added before the initial discovery finishes must not pick a
+        // name the server already owns: `new-session` would fail and the
+        // tab would attach that existing conversation instead of starting a
+        // fresh one. The first tab skips this only to keep project creation
+        // free of a tmux process.
+        if queryServer, let tmux = terminalEnvironment.tmux {
+            for name in tmux.sessionNames(prefix: prefix) {
+                if let index = TmuxNaming.index(of: name, prefix: prefix) {
+                    highestTmuxIndex = max(highestTmuxIndex, index)
+                }
+            }
+        }
+        let index = max(nextNumber, highestTmuxIndex + 1)
+        // The parser accepts indexes up to this ceiling; allocating beyond
+        // it would create a name that never restores.
+        guard index <= 999_999 else { return nil }
+        return TmuxNaming.sessionName(prefix: prefix, index: index)
+    }
+
+    private func indexFromName(_ name: String) -> Int? {
+        guard let prefix = tmuxPrefix else { return nil }
+        return TmuxNaming.index(of: name, prefix: prefix)
+    }
+
+    private func wire(_ session: TerminalSession) {
         let id = session.id
         session.view.onCloseRequested = { [weak self] in
             self?.closeSession(id)
@@ -65,10 +220,6 @@ final class TerminalSessionsStore {
         session.view.onNewTabRequested = { [weak self] in
             self?.addSession()
         }
-
-        sessions.append(session)
-        selectedID = session.id
-        refreshProcessStates()
     }
 
     func select(_ id: UUID) {
@@ -76,24 +227,86 @@ final class TerminalSessionsStore {
         selectedID = id
     }
 
+    /// Closes the tab. A tmux session is only detached; its agent keeps
+    /// running. Use `endSession` to stop it.
     func closeSession(_ id: UUID) {
         guard let session = sessions.first(where: { $0.id == id }) else {
             return
         }
-        if session.view.processAlive, !confirmClose(session) {
+        if session.tmuxSessionName == nil,
+           session.view.processAlive,
+           !confirmClose(session) {
             return
         }
+        // A discovery result that arrives after this close must not bring
+        // the tab back by itself.
+        discoveryGeneration &+= 1
+        removeSession(session)
+    }
+
+    /// Ends a tmux session and closes its tab. This is the only path that
+    /// stops an agent in a tmux-backed tab.
+    func endSession(_ id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }) else {
+            return
+        }
+        discoveryGeneration &+= 1
+        lastError = nil
+        if let name = session.tmuxSessionName {
+            guard let exists = terminalEnvironment.tmux?
+                .sessionExists(name: name) else {
+                lastError = "Could not reach tmux to end \(name)."
+                return
+            }
+            if exists {
+                // Confirmation is about a live foreground process; an idle
+                // session is still ended, because End Session is explicit.
+                // An unknown probe result is treated as busy, so a failed
+                // probe never kills without confirmation.
+                if tmuxSessionRunning(name) != false {
+                    let confirmed = endConfirmation?(name) ?? confirmEnd(name)
+                    guard confirmed else { return }
+                }
+                guard terminalEnvironment.tmux?.kill(name: name) == true
+                else {
+                    // Keep the tab: the agent may still be running, and the
+                    // UI must not claim it ended.
+                    lastError = "Could not end \(name). "
+                        + "The session may still be running."
+                    return
+                }
+            }
+        } else if session.view.processAlive, !confirmClose(session) {
+            return
+        }
+        removeSession(session)
+    }
+
+    func dismissError() {
+        lastError = nil
+    }
+
+    /// A live process in a tab that is not protected by tmux. Project close
+    /// and quit only need to warn about these.
+    var hasLiveDirectProcess: Bool {
+        sessions.contains {
+            $0.tmuxSessionName == nil && processProbe($0)
+        }
+    }
+
+    private func removeSession(_ session: TerminalSession) {
         // The modal confirmation runs the main loop; a process-exit callback
         // can remove this session or change its position. Resolve it again
         // instead of removing whatever now sits at the captured index.
-        guard let index = sessions.firstIndex(where: { $0.id == id }) else {
+        guard let index = sessions.firstIndex(where: {
+            $0.id == session.id
+        }) else {
             return
         }
-        let closing = sessions[index]
         sessions.remove(at: index)
-        closing.view.shutdown()
+        session.view.shutdown()
 
-        if selectedID == id {
+        if selectedID == session.id {
             selectedID = sessions.isEmpty
                 ? nil
                 : sessions[min(index, sessions.count - 1)].id
@@ -102,14 +315,19 @@ final class TerminalSessionsStore {
     }
 
     /// One termination path for project close, window close, and quit. The
-    /// interactive path confirms a live process; quitting does not block on a
-    /// dialog the user cannot see.
+    /// interactive path confirms a live direct-shell process; quitting does
+    /// not block on a dialog the user cannot see. tmux sessions are never
+    /// killed here: detaching is the contract.
     func shutdownAll(force: Bool = false) {
+        discoveryGeneration &+= 1
         let snapshot = sessions
         sessions.removeAll()
         selectedID = nil
         for session in snapshot {
-            if !force, session.view.processAlive, !confirmClose(session) {
+            if !force,
+               session.tmuxSessionName == nil,
+               session.view.processAlive,
+               !confirmClose(session) {
                 sessions.append(session)
                 if selectedID == nil { selectedID = session.id }
                 continue
@@ -119,20 +337,98 @@ final class TerminalSessionsStore {
         refreshProcessStates()
     }
 
-    /// Recomputes the badge count. Mutating only on change keeps @Observable
-    /// from invalidating every chip on each poll.
+    /// Recomputes the badge count. Direct-shell probes stay synchronous; the
+    /// tmux probe runs off the main actor and applies only its newest result,
+    /// so a stalled tmux server cannot freeze the UI on every poll.
     func refreshProcessStates() {
-        let count = sessions.filter(processProbe).count
+        let directCount = currentDirectCount()
+        let tmuxNames = Set(sessions.compactMap(\.tmuxSessionName))
+        guard !tmuxNames.isEmpty,
+              let tmux = terminalEnvironment.tmux,
+              tmux.isAvailable else {
+            // No tmux work: invalidate any probe and drop its last value.
+            probeGeneration &+= 1
+            probeInFlight = false
+            probeNames = []
+            tmuxRunningCount = 0
+            setRunningCount(directCount)
+            return
+        }
+        // Keep the last known tmux count while a probe is pending; direct
+        // changes are still reflected immediately.
+        setRunningCount(directCount + tmuxRunningCount)
+        // A slow probe must be allowed to finish. Restarting it on every
+        // two-second poll would discard every result forever.
+        if probeInFlight, probeNames == tmuxNames {
+            return
+        }
+        probeGeneration &+= 1
+        let generation = probeGeneration
+        probeInFlight = true
+        probeNames = tmuxNames
+        Task { @MainActor [weak self] in
+            let running = await Task.detached(priority: .utility) {
+                tmux.runningSessions(
+                    candidates: tmuxNames,
+                    shellNames: Self.shellNames
+                )
+            }.value
+            guard let self else { return }
+            // A stale completion must not clear the newer probe's flag or
+            // publish its count.
+            guard generation == self.probeGeneration else { return }
+            self.probeInFlight = false
+            // nil is unknown: keep the previous badge rather than claim idle.
+            if let running {
+                self.tmuxRunningCount = running.count
+            }
+            // A direct process may have started while the probe ran; use the
+            // current count, not the snapshot captured at launch.
+            self.setRunningCount(
+                self.currentDirectCount() + self.tmuxRunningCount
+            )
+        }
+    }
+
+    private func currentDirectCount() -> Int {
+        sessions.filter {
+            $0.tmuxSessionName == nil && processProbe($0)
+        }.count
+    }
+
+    private func setRunningCount(_ count: Int) {
         if count != runningProcessCount {
             runningProcessCount = count
         }
     }
+
+    private func tmuxSessionRunning(_ name: String) -> Bool? {
+        guard let tmux = terminalEnvironment.tmux else { return nil }
+        return tmux.runningSessions(
+            candidates: [name],
+            shellNames: Self.shellNames
+        )?.contains(name)
+    }
+
+    nonisolated private static let shellNames: Set<String> = [
+        "zsh", "bash", "fish", "sh", "login", "tmux"
+    ]
 
     private func confirmClose(_ session: TerminalSession) -> Bool {
         let alert = NSAlert()
         alert.messageText = "Close \(session.title)?"
         alert.informativeText = "A process is still running in this terminal."
         alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func confirmEnd(_ name: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "End \(name)?"
+        alert.informativeText =
+            "The agent and every process in this tmux session will stop."
+        alert.addButton(withTitle: "End Session")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }
@@ -342,6 +638,28 @@ private struct TerminalTabButton: View {
         }
         .onHover { hovering in
             isHovering = hovering
+        }
+        .contextMenu {
+            if let name = session.tmuxSessionName {
+                Button("Copy tmux Attach Command") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        TmuxCommands.attachShellCommand(name: name),
+                        forType: .string
+                    )
+                }
+                Button("Reattach Sessions") {
+                    store.restoreTmuxSessions()
+                }
+                Divider()
+                Button("End Session") {
+                    store.endSession(session.id)
+                }
+            } else {
+                Button("Reattach Sessions") {
+                    store.restoreTmuxSessions()
+                }
+            }
         }
     }
 }

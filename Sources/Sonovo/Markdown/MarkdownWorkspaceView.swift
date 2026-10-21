@@ -41,7 +41,7 @@ struct MarkdownWorkspaceView: View {
                 banner(
                     text: error,
                     systemImage: "exclamationmark.triangle",
-                    tint: AppTheme.Palette.needsReview,
+                    tint: AppTheme.Palette.warning,
                     dismiss: workspace.dismissError
                 )
             }
@@ -50,7 +50,7 @@ struct MarkdownWorkspaceView: View {
                 banner(
                     text: "This file is missing on disk.",
                     systemImage: "questionmark.folder",
-                    tint: AppTheme.Palette.needsReview
+                    tint: AppTheme.Palette.warning
                 )
             }
 
@@ -258,7 +258,7 @@ struct MarkdownWorkspaceView: View {
     private func conflictBanner(_ document: MarkdownDocument) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(Color(AppTheme.Palette.needsReview))
+                .foregroundStyle(Color(AppTheme.Palette.warning))
             Text("This file changed on disk.")
                 .font(.system(size: AppTheme.TypeScale.sm))
             Spacer()
@@ -270,7 +270,7 @@ struct MarkdownWorkspaceView: View {
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.s6)
-        .background(Color(AppTheme.Palette.needsReview).opacity(AppTheme.Opacity.muted))
+        .background(Color(AppTheme.Palette.warning).opacity(AppTheme.Opacity.muted))
     }
 
     // MARK: - File browser

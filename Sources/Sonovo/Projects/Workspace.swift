@@ -19,6 +19,7 @@ final class Workspace {
     private let store: WorkspacePersisting
     private let scanner: ProjectScanner
     private let watchFactory: ProjectWatchFactory
+    private let terminalEnvironment: TerminalEnvironment
     @ObservationIgnored private var mountObserver: NSObjectProtocol?
     @ObservationIgnored private var unmountObserver: NSObjectProtocol?
 
@@ -28,12 +29,14 @@ final class Workspace {
         scanner: ProjectScanner = ProjectScanner(),
         watchFactory: @escaping ProjectWatchFactory = {
             FSEventSource(root: $0, onChange: $1)
-        }
+        },
+        terminalEnvironment: TerminalEnvironment = .disabled
     ) {
         self.demoProject = demoProject
         self.store = store
         self.scanner = scanner
         self.watchFactory = watchFactory
+        self.terminalEnvironment = terminalEnvironment
         self.recentPaths = store.recentPaths
         observeVolumes()
     }
@@ -93,7 +96,8 @@ final class Workspace {
                     reason: "This path now belongs to a different volume.",
                     expectedVolumeIdentifier: storedVolume,
                     scanner: scanner,
-                    watchFactory: watchFactory
+                    watchFactory: watchFactory,
+                    terminalEnvironment: terminalEnvironment
                 )
                 attach(project)
                 restored.append(project)
@@ -105,14 +109,16 @@ final class Workspace {
                     folderURL: canonical,
                     expectedVolumeIdentifier: storedVolume ?? volume,
                     scanner: scanner,
-                    watchFactory: watchFactory
+                    watchFactory: watchFactory,
+                    terminalEnvironment: terminalEnvironment
                 )
                 : Project(
                     offlinePath: canonical.path,
                     reason: "This folder is unavailable.",
                     expectedVolumeIdentifier: storedVolume,
                     scanner: scanner,
-                    watchFactory: watchFactory
+                    watchFactory: watchFactory,
+                    terminalEnvironment: terminalEnvironment
                 )
             attach(project)
             restored.append(project)
@@ -248,7 +254,8 @@ final class Workspace {
             folderURL: canonical,
             expectedVolumeIdentifier: volume,
             scanner: scanner,
-            watchFactory: watchFactory
+            watchFactory: watchFactory,
+            terminalEnvironment: terminalEnvironment
         )
         projects.append(project)
         attach(project)
@@ -385,9 +392,9 @@ final class Workspace {
             lastError = "Save or close “\(project.name)”'s documents first."
             return false
         }
-        if project.terminalSessions.sessions.contains(where: {
-            $0.view.processAlive
-        }) {
+        // tmux-backed terminals detach on close and keep their agents
+        // running. Only a direct shell can lose work, so only it prompts.
+        if project.terminalSessions.hasLiveDirectProcess {
             let alert = NSAlert()
             alert.messageText = "Close “\(project.name)”?"
             alert.informativeText =

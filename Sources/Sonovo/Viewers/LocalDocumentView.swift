@@ -46,7 +46,7 @@ struct LocalDocumentView: View {
                         weight: .ultraLight
                     )
                 )
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text("Could not display this document")
                 .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
             Text(message)

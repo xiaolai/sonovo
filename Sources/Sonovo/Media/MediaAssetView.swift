@@ -192,7 +192,7 @@ struct MediaAssetView: View {
                         weight: .ultraLight
                     )
                 )
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text("Could not play this file")
                 .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
             Text(message)

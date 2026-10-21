@@ -37,7 +37,7 @@ struct DeliveryView: View {
                         .font(.system(size: AppTheme.TypeScale.xl, weight: .semibold))
 
                     Text(isRendering
-                         ? "Encoding 1080p · H.264. You can keep reviewing other assets."
+                         ? "Encoding 1080p · H.264. You can keep working in other tabs."
                          : "This production has no delivery file yet.")
                         .font(.system(size: AppTheme.TypeScale.sm))
                         .foregroundStyle(.secondary)
@@ -95,11 +95,8 @@ struct DeliveryView: View {
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
-                HStack(spacing: AppTheme.Spacing.sm) {
-                    Text(asset.name)
-                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                    StatusBadge(status: isRendering ? .generating : state.status(for: asset))
-                }
+                Text(asset.name)
+                    .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
 
                 Text(asset.shortDetail)
                     .font(.system(size: AppTheme.TypeScale.xs))

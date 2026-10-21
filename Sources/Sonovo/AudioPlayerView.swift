@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct AudioReviewView: View {
+struct AudioPlayerView: View {
     let state: AppState
     let project: Project
 
@@ -33,13 +33,9 @@ struct AudioReviewView: View {
     private func header(_ asset: ProductionAsset) -> some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
-                HStack(spacing: AppTheme.Spacing.sm) {
-                    Text(asset.name)
-                        .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                        .lineLimit(1)
-
-                    StatusBadge(status: state.status(for: asset))
-                }
+                Text(asset.name)
+                    .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
+                    .lineLimit(1)
 
                 Text("Narrator · \(asset.shortDetail) · 24-bit")
                     .font(.system(size: AppTheme.TypeScale.xs))
@@ -53,20 +49,6 @@ struct AudioReviewView: View {
                 help: "Compare takes"
             ) {
                 state.editorMode = .compare
-            }
-
-            if state.status(for: asset) == .approved {
-                Label("Approved", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
-                    .foregroundStyle(AppTheme.Palette.approved)
-            } else {
-                Button {
-                    state.approve(asset)
-                } label: {
-                    Label("Approve", systemImage: "checkmark")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
         }
     }
@@ -156,17 +138,6 @@ struct AudioReviewView: View {
                 }
             }
             .disabled(state.selectedTranscript == nil)
-
-            BarIconButton(systemName: "text.bubble", help: "Add note") {
-                state.inspectorVisible = true
-                state.inspectorTab = .notes
-            }
-
-            if let asset = selectedAsset {
-                BarIconButton(systemName: "arrow.uturn.backward", help: "Request change") {
-                    state.requestChange(for: asset)
-                }
-            }
         }
         .padding(.horizontal, AppTheme.Spacing.md)
         .padding(.vertical, AppTheme.Spacing.sm)
@@ -240,7 +211,7 @@ struct AudioCompareView: View {
                 VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                     Text("Compare Takes")
                         .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                    Text("Take 02 (approved) against \(selectedAsset?.name ?? "the current take")")
+                    Text("Take 02 against \(selectedAsset?.name ?? "the current take")")
                         .font(.system(size: AppTheme.TypeScale.xs))
                         .foregroundStyle(.secondary)
                 }
@@ -262,29 +233,23 @@ struct AudioCompareView: View {
             compareCard(
                 letter: "A",
                 name: "vo-take-02.wav",
-                detail: "Approved · 00:12.8 · Warmer read",
-                status: .approved,
+                detail: "00:12.8 · Warmer read",
                 duration: 12.8,
                 selectedID: nil,
-                tint: AppTheme.Palette.approved
+                tint: Color.accentColor
             )
 
-            let comparisonStatus = selectedAsset.map {
-                state.status(for: $0)
-            } ?? .needsReview
             compareCard(
                 letter: "B",
                 name: selectedAsset?.name ?? "vo-take-03.wav",
-                detail: "\(comparisonStatus.label) · 00:12.4 · Tighter pauses",
-                status: comparisonStatus,
+                detail: "00:12.4 · Tighter pauses",
                 duration: state.duration,
                 selectedID: state.selectedTranscriptID,
-                tint: AppTheme.Palette.needsReview
+                tint: Color.secondary
             )
 
             HStack(spacing: AppTheme.Spacing.lg) {
                 differenceItem(value: "0.4s", label: "shorter")
-                differenceItem(value: "2", label: "open notes")
                 differenceItem(value: "−1.2", label: "LUFS")
                 differenceItem(value: "1", label: "line re-read")
             }
@@ -300,7 +265,6 @@ struct AudioCompareView: View {
         letter: String,
         name: String,
         detail: String,
-        status: ReviewStatus,
         duration: Double,
         selectedID: String?,
         tint: Color
@@ -315,8 +279,6 @@ struct AudioCompareView: View {
 
                 Text(name)
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
-
-                StatusBadge(status: status, compact: true)
 
                 Text(detail)
                     .font(.system(size: AppTheme.TypeScale.xxs))

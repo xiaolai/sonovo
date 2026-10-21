@@ -72,7 +72,7 @@ struct ImageDocumentView: View {
             if model.isDownsampled {
                 Text("Preview (downsampled)")
                     .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
-                    .foregroundStyle(AppTheme.Palette.needsReview)
+                    .foregroundStyle(AppTheme.Palette.warning)
             }
 
             Text(zoomLabel)
@@ -241,7 +241,7 @@ struct ImageDocumentView: View {
                         weight: .ultraLight
                     )
                 )
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text("Could not display this image")
                 .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
             Text(message)

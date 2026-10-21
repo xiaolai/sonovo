@@ -38,7 +38,7 @@ struct Model3DWorkspaceView: View {
                 banner(
                     text: error,
                     systemImage: "exclamationmark.triangle",
-                    tint: AppTheme.Palette.needsReview,
+                    tint: AppTheme.Palette.warning,
                     dismiss: workspace.dismissError
                 )
             }
@@ -51,7 +51,7 @@ struct Model3DWorkspaceView: View {
                 banner(
                     text: warning,
                     systemImage: "exclamationmark.circle",
-                    tint: AppTheme.Palette.needsReview,
+                    tint: AppTheme.Palette.warning,
                     dismiss: document.dismissWarning
                 )
             }
@@ -379,7 +379,7 @@ struct Model3DWorkspaceView: View {
         VStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: AppTheme.IconSize.render, weight: .light))
-                .foregroundStyle(AppTheme.Palette.needsReview)
+                .foregroundStyle(AppTheme.Palette.warning)
             Text("Could not display this model")
                 .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
                 .foregroundStyle(AppTheme.Palette.white)
@@ -590,7 +590,7 @@ struct Model3DWorkspaceView: View {
             VStack(spacing: AppTheme.Spacing.xs) {
                 Text(message)
                     .font(.system(size: AppTheme.TypeScale.sm))
-                    .foregroundStyle(AppTheme.Palette.needsReview)
+                    .foregroundStyle(AppTheme.Palette.warning)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
                 HStack(spacing: AppTheme.Spacing.sm) {
@@ -656,7 +656,7 @@ struct Model3DWorkspaceView: View {
                 systemImage: "questionmark.circle"
             )
             .font(.system(size: AppTheme.TypeScale.xs))
-            .foregroundStyle(AppTheme.Palette.needsReview)
+            .foregroundStyle(AppTheme.Palette.warning)
             .multilineTextAlignment(.center)
             .frame(maxWidth: AppTheme.Model3D.conversionCardMaxWidth)
         }
@@ -709,7 +709,7 @@ struct Model3DWorkspaceView: View {
         HStack(spacing: AppTheme.Spacing.sm) {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .font(.system(size: AppTheme.TypeScale.xs))
-                .foregroundStyle(AppTheme.Palette.generating)
+                .foregroundStyle(AppTheme.Palette.info)
             Text("This file changed on disk.")
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .lineLimit(2)
@@ -734,7 +734,7 @@ struct Model3DWorkspaceView: View {
         }
         .padding(.horizontal, AppTheme.Spacing.md)
         .padding(.vertical, AppTheme.Spacing.sm)
-        .background(AppTheme.Palette.generating.opacity(AppTheme.Opacity.ghostSoft))
+        .background(AppTheme.Palette.info.opacity(AppTheme.Opacity.ghostSoft))
     }
 
     private func banner(
@@ -795,7 +795,7 @@ struct Model3DWorkspaceView: View {
             if let error = workspace.lastError {
                 Text(error)
                     .font(.system(size: AppTheme.TypeScale.xs))
-                    .foregroundStyle(AppTheme.Palette.needsReview)
+                    .foregroundStyle(AppTheme.Palette.warning)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
                     .frame(maxWidth: AppTheme.Layout.emptyDescriptionMaxWidth)

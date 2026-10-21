@@ -17,7 +17,7 @@ struct ProjectSwitcherView: View {
             if let error = state.workspace.lastError {
                 Text(error)
                     .font(.system(size: AppTheme.TypeScale.xs))
-                    .foregroundStyle(AppTheme.Palette.needsReview)
+                    .foregroundStyle(AppTheme.Palette.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, AppTheme.Spacing.md)
                     .onTapGesture {

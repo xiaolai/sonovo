@@ -28,6 +28,23 @@ struct TerminalPane: View {
 
             header
 
+            if let error = store.lastError {
+                Text(error)
+                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .foregroundStyle(AppTheme.Palette.warning)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, AppTheme.Spacing.sm)
+                    .padding(.vertical, AppTheme.Spacing.xxs)
+                    .background(
+                        AppTheme.Palette.warning.opacity(
+                            AppTheme.Opacity.ghostSoft
+                        )
+                    )
+                    .onTapGesture {
+                        store.dismissError()
+                    }
+            }
+
             ZStack {
                 TerminalSessionsHost(
                     sessions: store.sessions,

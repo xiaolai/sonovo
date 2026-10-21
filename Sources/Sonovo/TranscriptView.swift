@@ -47,10 +47,6 @@ struct TranscriptView: View {
             }
 
             Spacer()
-
-            if let asset = selectedAsset {
-                StatusBadge(status: state.status(for: asset))
-            }
         }
     }
 
@@ -87,7 +83,6 @@ struct TranscriptView: View {
 
     private func transcriptRow(_ segment: TranscriptSegment) -> some View {
         let isSelected = state.selectedTranscriptID == segment.id
-        let hasNote = segment.id == "seg-2" || segment.id == "seg-3"
 
         return HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
             Text(segment.timecode)
@@ -102,13 +97,6 @@ struct TranscriptView: View {
                         .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
                         .tracking(AppTheme.Tracking.tight)
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-
-                    if hasNote {
-                        Image(systemName: "text.bubble.fill")
-                            .font(.system(size: AppTheme.TypeScale.xxs))
-                            .foregroundStyle(AppTheme.Palette.needsReview)
-                            .help("Review note attached")
-                    }
                 }
 
                 Text(segment.text)
@@ -151,12 +139,6 @@ struct TranscriptView: View {
             }
 
             Spacer()
-
-            if let asset = selectedAsset {
-                BarIconButton(systemName: "text.bubble", help: "Request change") {
-                    state.requestChange(for: asset)
-                }
-            }
         }
         .padding(.top, AppTheme.Spacing.lg)
     }

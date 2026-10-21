@@ -169,14 +169,16 @@ final class Project: Identifiable {
         scanner: ProjectScanner = ProjectScanner(),
         watchFactory: @escaping ProjectWatchFactory = {
             FSEventSource(root: $0, onChange: $1)
-        }
+        },
+        terminalEnvironment: TerminalEnvironment = .disabled
     ) {
         self.init(
             folderBackedRoot: MarkdownSecurity.canonical(folderURL),
             availability: .scanning,
             expectedVolumeIdentifier: expectedVolumeIdentifier,
             scanner: scanner,
-            watchFactory: watchFactory
+            watchFactory: watchFactory,
+            terminalEnvironment: terminalEnvironment
         )
     }
 
@@ -187,7 +189,8 @@ final class Project: Identifiable {
         scanner: ProjectScanner = ProjectScanner(),
         watchFactory: @escaping ProjectWatchFactory = {
             FSEventSource(root: $0, onChange: $1)
-        }
+        },
+        terminalEnvironment: TerminalEnvironment = .disabled
     ) {
         self.init(
             folderBackedRoot: URL(fileURLWithPath: offlinePath)
@@ -195,7 +198,8 @@ final class Project: Identifiable {
             availability: .offline(reason),
             expectedVolumeIdentifier: expectedVolumeIdentifier,
             scanner: scanner,
-            watchFactory: watchFactory
+            watchFactory: watchFactory,
+            terminalEnvironment: terminalEnvironment
         )
     }
 
@@ -206,7 +210,8 @@ final class Project: Identifiable {
         availability: Availability,
         expectedVolumeIdentifier: String?,
         scanner: ProjectScanner,
-        watchFactory: @escaping ProjectWatchFactory
+        watchFactory: @escaping ProjectWatchFactory,
+        terminalEnvironment: TerminalEnvironment
     ) {
         self.init(
             id: root.path,
@@ -218,7 +223,10 @@ final class Project: Identifiable {
             subtitles: SubtitleWorkspace(readsDemoEnvironment: false),
             models: Model3DWorkspace(opensDemoModel: false),
             terminalSessions: TerminalSessionsStore(
-                workingDirectory: root.path
+                workingDirectory: root.path,
+                projectKey: root.path,
+                projectName: root.lastPathComponent,
+                terminalEnvironment: terminalEnvironment
             ),
             openTabs: [],
             selectedTabID: "",
@@ -422,6 +430,7 @@ final class Project: Identifiable {
             uniqueKeysWithValues: effectiveAssets.map { ($0.id, $0.revision) }
         )
         let changed = previousRevisions != nextRevisions
+        let wasOffline = isOffline
 
         assets = effectiveAssets
         // A complete scan already built groups; only a merged partial or
@@ -432,6 +441,11 @@ final class Project: Identifiable {
         truncated = result.truncated || result.isPartial
         visitedEntries = result.visitedEntries
         availability = .available
+        if wasOffline {
+            // The directory exists again; discover tmux sessions that were
+            // started before the project went offline or in another process.
+            terminalSessions.restoreTmuxSessions()
+        }
         if changed, !isActive {
             hasActivity = true
         }

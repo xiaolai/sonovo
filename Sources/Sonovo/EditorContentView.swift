@@ -25,9 +25,9 @@ struct EditorContentView: View {
         case .script:
             ScriptView(project: project)
         case .audio:
-            reviewContent(for: tab)
+            mediaContent(for: tab)
         case .video:
-            reviewContent(for: tab)
+            mediaContent(for: tab)
         case .stills:
             StillsView(state: state, project: project)
         case .subtitle:
@@ -124,13 +124,13 @@ struct EditorContentView: View {
     }
 
     @ViewBuilder
-    private func reviewContent(for tab: EditorTab) -> some View {
+    private func mediaContent(for tab: EditorTab) -> some View {
         switch state.editorMode {
         case .player:
             if tab.kind == .audio {
-                AudioReviewView(state: state, project: project)
+                AudioPlayerView(state: state, project: project)
             } else {
-                VideoReviewView(state: state, project: project)
+                VideoPlayerView(state: state, project: project)
             }
         case .compare:
             if tab.kind == .audio {
