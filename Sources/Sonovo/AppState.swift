@@ -35,41 +35,28 @@ enum TerminalDockPosition: Sendable {
 }
 
 @MainActor
+enum AppStateRegistry {
+    static weak var active: AppState?
+}
+
+@MainActor
 @Observable
 final class AppState {
     let production = Production.sample
     let transcript = SampleContent.transcript
-    let markdown = MarkdownWorkspace()
-    let subtitles = SubtitleWorkspace()
-    let models = Model3DWorkspace()
-    private let sampleProject = SampleProjectDocuments.live()
-
-    /// Sample assets that name a real document. Selecting one of their tabs
-    /// has to select that document; otherwise the tab says
-    /// `tidewater-script.md` while the workspace shows whichever Markdown file
-    /// happened to be open.
-    private static let sampleDocumentNames: [String: String] = [
-        "script-md": "tidewater-script.md",
-        "outline-md": "outline.md",
-        "captions-srt": "captions.srt"
-    ]
+    let workspace: Workspace
 
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
-    var selectedAssetID: String? = "vo-take-03"
-    var openTabs: [EditorTab]
-    var selectedTabID: String
     var editorMode: EditorMode = .player
     var inspectorVisible = true
     var inspectorTab: InspectorTab = .info
-    var filterText = ""
     var showTabBar = true
     var showBreadcrumbs = true
 
     var terminalPresentation: TerminalPresentation = .hidden
     var terminalDock: TerminalDock = .automatic
     var terminalFraction: CGFloat = AppTheme.Layout.terminalDefaultFraction
-    let terminalSessions = TerminalSessionsStore()
 
     var isPlaying = false
     var playhead: Double = 4.6
@@ -90,99 +77,179 @@ final class AppState {
     /// removing an "approved" flag cannot do that.
     var reviewStatusOverrides: [String: ReviewStatus] = [:]
 
-    var activityText: String {
-        if isPlaying {
-            return "Playing \(selectedAsset?.name ?? "media")"
+    var liveProject: Project { workspace.liveProject }
+
+    /// The one activation path for UI and commands. Leaving the demo must
+    /// stop its transport; a hidden demo host must not keep playing audio.
+    func activateProject(_ project: Project) {
+        if liveProject.isDemo, !project.isDemo {
+            isPlaying = false
         }
-        return production.updated
+        workspace.activate(project)
+    }
+
+    @discardableResult
+    func openProject(at url: URL) -> Project? {
+        let wasDemo = liveProject.isDemo
+        guard let project = workspace.openProject(at: url) else {
+            return nil
+        }
+        if wasDemo, !workspace.liveProject.isDemo {
+            isPlaying = false
+        }
+        return project
+    }
+
+    func activateNextProject() {
+        let wasDemo = liveProject.isDemo
+        guard let next = workspace.activateNext() else { return }
+        if wasDemo, !next.isDemo {
+            isPlaying = false
+        }
+    }
+
+    func activatePreviousProject() {
+        let wasDemo = liveProject.isDemo
+        guard let previous = workspace.activatePrevious() else { return }
+        if wasDemo, !previous.isDemo {
+            isPlaying = false
+        }
+    }
+    var markdown: MarkdownWorkspace { liveProject.markdown }
+    var subtitles: SubtitleWorkspace { liveProject.subtitles }
+    var models: Model3DWorkspace { liveProject.models }
+    var terminalSessions: TerminalSessionsStore {
+        liveProject.terminalSessions
+    }
+    var openTabs: [EditorTab] { liveProject.openTabs }
+    var selectedTabID: String { liveProject.selectedTabID }
+    var selectedAssetID: String? {
+        get { liveProject.selectedAssetID }
+        set { liveProject.selectedAssetID = newValue }
+    }
+    var filterText: String {
+        get { liveProject.filterText }
+        set { liveProject.filterText = newValue }
+    }
+
+    var activityText: String {
+        if liveProject.isDemo {
+            if isPlaying {
+                return "Playing \(selectedAsset?.name ?? "media")"
+            }
+            return production.updated
+        }
+        if let reason = liveProject.offlineReason { return reason }
+        return "\(liveProject.assets.count) files"
+    }
+
+    var windowTitle: String {
+        liveProject.isDemo
+            ? "\(production.title) — \(production.episode)"
+            : liveProject.name
     }
 
     init() {
-        let sample = Production.sample
-        let initialAssets = [
-            "script-md", "captions-srt", "vo-take-03", "take-03", "stills",
-            "storyboard-html"
-        ]
-        openTabs = initialAssets.compactMap { id in
-            sample.asset(id: id).map(EditorTab.init(asset:))
-        }
-        selectedTabID = "vo-take-03"
+        let demo = Project.demo(
+            production: production,
+            markdown: MarkdownWorkspace(),
+            subtitles: SubtitleWorkspace(),
+            models: Model3DWorkspace(),
+            terminalSessions: TerminalSessionsStore(),
+            sampleDocuments: SampleProjectDocuments.live()
+        )
+        workspace = Workspace(demoProject: demo)
+        AppStateRegistry.active = self
 
-        if let demoAssetID = ProcessInfo.processInfo.environment["SONOVO_DEMO_TAB"],
-           let asset = sample.asset(id: demoAssetID) {
-            if !openTabs.contains(where: { $0.assetID == demoAssetID }) {
-                openTabs.append(EditorTab(asset: asset))
-            }
-            selectedTabID = demoAssetID
-            selectedAssetID = demoAssetID
+        let environment = ProcessInfo.processInfo.environment
+        let demoMode = environment["SONOVO_DEMO_TAB"] != nil
+            || environment["SONOVO_DEMO_MODEL"] != nil
+            || environment["SONOVO_DEMO_MARKDOWN"] != nil
+            || environment["SONOVO_DEMO_SUBTITLE"] != nil
+        if !Self.isRunningTests, !demoMode {
+            workspace.restore()
         }
 
-        if let rawMode = ProcessInfo.processInfo.environment["SONOVO_DEMO_MODE"],
+        if demoMode {
+            workspace.activateDemo()
+        }
+        if let demoAssetID = environment["SONOVO_DEMO_TAB"],
+           production.asset(id: demoAssetID) != nil {
+            demo.openAsset(id: demoAssetID)
+        }
+
+        if let rawMode = environment["SONOVO_DEMO_MODE"],
            let mode = EditorMode(rawValue: rawMode) {
             editorMode = mode
         }
 
-        if let rawTerminal = ProcessInfo.processInfo.environment["SONOVO_DEMO_TERMINAL"] {
+        if let rawTerminal = environment["SONOVO_DEMO_TERMINAL"] {
             let normalized = rawTerminal == "half" ? "split" : rawTerminal
             if let presentation = TerminalPresentation(rawValue: normalized) {
                 terminalPresentation = presentation
             }
         }
 
-        if ProcessInfo.processInfo.environment["SONOVO_DEMO_MODEL"] != nil {
+        if environment["SONOVO_DEMO_MODEL"] != nil {
             showModel3DWorkspace()
         }
     }
 
+    private static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"]
+            != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
     var selectedAsset: ProductionAsset? {
-        selectedAssetID.flatMap(production.asset(id:))
+        selectedAsset(in: liveProject)
+    }
+
+    /// Resolve a demo asset against a specific project. A hidden demo host
+    /// must not read the active project's selection.
+    func selectedAsset(in project: Project) -> ProductionAsset? {
+        guard project.isDemo, let id = project.selectedAssetID else {
+            return nil
+        }
+        return production.asset(id: id)
     }
 
     var selectedTab: EditorTab? {
-        openTabs.first { $0.id == selectedTabID }
+        liveProject.selectedTab
     }
 
     /// The name the top chrome should show for a tab. A script or subtitle
     /// tab hosts a file workspace, whose open document is the file actually
     /// being edited; the production asset name would describe the demo slot.
     func displayName(for tab: EditorTab) -> String {
-        guard tab.id == selectedTabID else { return tab.title }
-        switch tab.kind {
-        case .script:
-            guard let document = markdown.selectedDocument else {
-                return tab.title
-            }
-            return document.fileURL?.lastPathComponent ?? "Untitled"
-        case .subtitle:
-            guard let document = subtitles.selectedDocument else {
-                return tab.title
-            }
-            return document.fileURL.lastPathComponent
-        case .model3d:
-            guard let document = models.selectedDocument else {
-                return tab.title
-            }
-            return document.displayName
-        default:
-            return tab.title
-        }
+        liveProject.displayName(for: tab)
     }
 
     func displayName(for asset: ProductionAsset) -> String {
-        guard selectedTab?.assetID == asset.id else { return asset.name }
+        displayName(for: asset, in: liveProject)
+    }
+
+    func displayName(
+        for asset: ProductionAsset,
+        in project: Project
+    ) -> String {
+        guard project.isDemo,
+              project.selectedTab?.assetID == asset.id else {
+            return asset.name
+        }
         switch asset.kind {
         case .script:
-            guard let document = markdown.selectedDocument else {
+            guard let document = project.markdown.selectedDocument else {
                 return asset.name
             }
             return document.fileURL?.lastPathComponent ?? "Untitled"
         case .subtitle:
-            guard let document = subtitles.selectedDocument else {
+            guard let document = project.subtitles.selectedDocument else {
                 return asset.name
             }
             return document.fileURL.lastPathComponent
         case .model3d:
-            guard let document = models.selectedDocument else {
+            guard let document = project.models.selectedDocument else {
                 return asset.name
             }
             return document.displayName
@@ -242,7 +309,11 @@ final class AppState {
     }
 
     var canUseReviewModes: Bool {
-        guard let kind = selectedTab?.kind else { return false }
+        // Compare and Transcript are demo surfaces; folder projects open
+        // media in the player. Enabling the controls there changed state
+        // without changing the editor.
+        guard liveProject.isDemo,
+              let kind = selectedTab?.kind else { return false }
         return kind == .audio || kind == .video
     }
 
@@ -251,36 +322,22 @@ final class AppState {
     }
 
     var needsReviewCount: Int {
-        production.allAssets.filter { status(for: $0) == .needsReview }.count
+        guard liveProject.isDemo else { return 0 }
+        return production.allAssets.filter {
+            status(for: $0) == .needsReview
+        }.count
     }
 
     var filteredStages: [ProductionStage] {
-        guard !filterText.isEmpty else { return production.stages }
-        return production.stages.compactMap { stage in
-            let matches = stage.assets.filter {
-                $0.name.localizedCaseInsensitiveContains(filterText)
-                    || $0.detail.localizedCaseInsensitiveContains(filterText)
-            }
-            return matches.isEmpty ? nil : ProductionStage(id: stage.id, title: stage.title, assets: matches)
-        }
+        liveProject.filteredStages
     }
 
     func openAsset(_ id: String?) {
-        guard let id, let asset = production.asset(id: id) else { return }
-        if let existing = openTabs.first(where: { $0.assetID == id }) {
-            selectTab(existing.id)
-        } else {
-            let tab = EditorTab(asset: asset)
-            openTabs.append(tab)
-            selectTab(tab.id)
-        }
+        liveProject.openAsset(id: id)
     }
 
     func selectTab(_ id: String) {
-        guard let tab = openTabs.first(where: { $0.id == id }) else { return }
-        selectedTabID = id
-        selectedAssetID = tab.assetID
-        selectSampleDocument(for: tab.assetID)
+        liveProject.selectTab(id)
         // One eligibility rule for every navigation path: review modes
         // require an audio or video asset.
         if !canUseReviewModes {
@@ -288,34 +345,8 @@ final class AppState {
         }
     }
 
-    private func selectSampleDocument(for assetID: String) {
-        guard let name = Self.sampleDocumentNames[assetID],
-              let url = sampleProject?.documentURL(named: name),
-              let kind = production.asset(id: assetID)?.kind else {
-            return
-        }
-        switch kind {
-        case .script:
-            markdown.open(url: url)
-        case .subtitle:
-            subtitles.open(url: url)
-        default:
-            break
-        }
-    }
-
-    func closeTab(_ id: String) {
-        guard let index = openTabs.firstIndex(where: { $0.id == id }) else { return }
-        let wasSelected = selectedTabID == id
-        openTabs.remove(at: index)
-        guard wasSelected else { return }
-        if openTabs.isEmpty {
-            selectedTabID = ""
-            selectedAssetID = nil
-        } else {
-            let nextIndex = min(index, openTabs.count - 1)
-            selectTab(openTabs[nextIndex].id)
-        }
+    func closeTab(_ id: String) async {
+        await liveProject.closeTab(id)
     }
 
     func selectTranscript(_ id: String) {
@@ -329,10 +360,15 @@ final class AppState {
         isPlaying.toggle()
     }
 
+    /// A take exists only in the demo production. A folder project has no
+    /// take model yet; inventing one from the demo would edit unrelated data.
+    var canCreateTake: Bool {
+        liveProject.isDemo && selectedAsset != nil
+    }
+
     func newTake() {
-        if let asset = selectedAsset ?? production.asset(id: "vo-take-03") {
-            requestChange(for: asset)
-        }
+        guard canCreateTake, let asset = selectedAsset else { return }
+        requestChange(for: asset)
     }
 
     func approve(_ asset: ProductionAsset) {
@@ -353,40 +389,47 @@ final class AppState {
     /// create or open a document must not leave it hidden behind an audio or
     /// delivery tab.
     func showMarkdownWorkspace() {
-        if let tab = openTabs.first(where: { $0.assetID == "script-md" }) {
-            selectTab(tab.id)
-        } else if production.asset(id: "script-md") != nil {
-            openAsset("script-md")
-        }
+        showWorkspace(.script, demoAssetID: "script-md")
     }
 
     func showSubtitleWorkspace() {
-        if let tab = openTabs.first(where: { $0.assetID == "captions-srt" }) {
-            selectTab(tab.id)
-        } else if production.asset(id: "captions-srt") != nil {
-            openAsset("captions-srt")
-        }
+        showWorkspace(.subtitle, demoAssetID: "captions-srt")
     }
 
     func showModel3DWorkspace() {
+        showWorkspace(.model3d, demoAssetID: "model-3d")
+    }
+
+    private func showWorkspace(_ kind: AssetKind, demoAssetID: String) {
         if terminalPresentation == .full {
             terminalPresentation = .hidden
         }
-        if let tab = openTabs.first(where: { $0.assetID == "model-3d" }) {
-            selectTab(tab.id)
-        } else if production.asset(id: "model-3d") != nil {
-            openAsset("model-3d")
+        if liveProject.isDemo {
+            if let tab = openTabs.first(where: {
+                $0.assetID == demoAssetID
+            }) {
+                selectTab(tab.id)
+            } else if production.asset(id: demoAssetID) != nil {
+                openAsset(demoAssetID)
+            }
+        } else {
+            liveProject.showWorkspace(kind)
         }
     }
 
     /// Brings a subtitle document to the front so a save started from another
     /// tab fails where the document and its error are visible.
     func revealSubtitleDocument(_ document: SubtitleDocument) {
-        showSubtitleWorkspace()
-        if terminalPresentation == .full {
-            terminalPresentation = .hidden
+        let owner = workspace.allProjects.first { project in
+            project.subtitles.documents.contains { $0 === document }
         }
-        subtitles.select(document)
+        revealDocument(
+            kind: .subtitle,
+            url: document.fileURL,
+            owner: owner
+        ) { project in
+            project.subtitles.select(document)
+        }
     }
 
     /// ⌘S dispatches on the visible editor. Saving a hidden workspace would
@@ -414,43 +457,165 @@ final class AppState {
         }
     }
 
-    /// Saves both workspaces before the window closes. Subtitle files always
-    /// have a path, so they never ask for a save/discard decision; a failed
-    /// subtitle save cancels the close and leaves the error visible.
+    /// Saves every project's workspaces before the window closes. Subtitle
+    /// files always have a path, so they never ask for a save/discard
+    /// decision; a failed subtitle save cancels the close and leaves the
+    /// failing project active and visible.
     func flushAllBeforeClose() async -> Bool {
-        if subtitles.hasDirtyDocuments {
-            let saved = await subtitles.flushAllForTermination()
-            guard saved else {
-                // The workspace leaves the failing document selected. Make
-                // that document visible so its error is not hidden behind
-                // another tab.
-                if let document = subtitles.selectedDocument {
-                    revealSubtitleDocument(document)
+        let ordered = [liveProject] + workspace.allProjects.filter {
+            $0 !== liveProject
+        }
+        // A document saved early can become dirty again while later saves
+        // run. Recheck the whole set and make another pass before allowing
+        // the window to close.
+        for _ in 0..<3 {
+            for project in ordered {
+                if project.subtitles.hasDirtyDocuments {
+                    let saved = await project.subtitles.flushAllForTermination()
+                    guard saved else {
+                        activateProject(project)
+                        if let document = project.subtitles.selectedDocument {
+                            revealSubtitleDocument(document)
+                        }
+                        return false
+                    }
                 }
-                return false
+                if project.markdown.hasDirtyDocuments {
+                    let saved = await project.markdown.flushAllForTermination()
+                    guard saved else {
+                        activateProject(project)
+                        if let document = project.markdown.pendingClose
+                            ?? project.markdown.selectedDocument {
+                            revealMarkdownDocument(document)
+                        }
+                        return false
+                    }
+                }
+            }
+            if !workspace.hasDirtyDocuments {
+                return true
             }
         }
-        if markdown.hasDirtyDocuments,
-           !(await markdown.flushAllForTermination()) {
-            return false
-        }
-        return true
+        return false
+    }
+
+    /// The workspace that owns a pending Markdown save decision. It need not
+    /// be the active project; switching projects must not hide the alert or
+    /// send its buttons to the wrong workspace.
+    var pendingCloseOwner: Project? {
+        workspace.allProjects.first { $0.markdown.pendingClose != nil }
+    }
+
+    var pendingCloseDocument: MarkdownDocument? {
+        pendingCloseOwner?.markdown.pendingClose
+    }
+
+    func savePendingClose() {
+        guard let owner = pendingCloseOwner,
+              let document = owner.markdown.pendingClose else { return }
+        revealMarkdownDocument(document)
+        Task { await owner.markdown.saveAndClose(document) }
+    }
+
+    func discardPendingClose() {
+        guard let owner = pendingCloseOwner,
+              let document = owner.markdown.pendingClose else { return }
+        owner.markdown.discardAndClose(document)
+    }
+
+    func cancelPendingClose() {
+        guard let owner = pendingCloseOwner else { return }
+        owner.markdown.cancelPendingClose()
+        // A bulk close that stopped at this decision stays stopped; its
+        // remaining tabs must not close later when this document is closed
+        // for some other reason.
+        owner.cancelBulkClose()
+    }
+
+    var hasDirtyDocuments: Bool {
+        workspace.hasDirtyDocuments
+    }
+
+    func prepareForTermination() {
+        workspace.prepareForTermination()
     }
 
     /// Brings a Markdown document to the front so a save started from another
     /// tab fails where the document and its error are visible.
     func revealMarkdownDocument(_ document: MarkdownDocument) {
-        showMarkdownWorkspace()
+        let owner = workspace.allProjects.first { project in
+            project.markdown.documents.contains { $0 === document }
+        }
+        revealDocument(
+            kind: .script,
+            url: document.fileURL,
+            owner: owner
+        ) { project in
+            project.markdown.select(document)
+        }
+    }
+
+    /// The shared path for revealing a document: leave full-screen terminal,
+    /// activate its owning project when known, select the tab that names it,
+    /// and fall back to the workspace when the document has no owner tab.
+    private func revealDocument(
+        kind: AssetKind,
+        url: URL?,
+        owner: Project?,
+        select: (Project) -> Void
+    ) {
         if terminalPresentation == .full {
             terminalPresentation = .hidden
         }
-        markdown.select(document)
+        if let owner {
+            activateProject(owner)
+            revealTab(in: owner, kind: kind, url: url)
+            select(owner)
+            return
+        }
+        switch kind {
+        case .script:
+            showMarkdownWorkspace()
+        case .subtitle:
+            showSubtitleWorkspace()
+        case .model3d:
+            showModel3DWorkspace()
+        default:
+            break
+        }
+        select(liveProject)
     }
 
-    func closeAllTabs() {
-        openTabs.removeAll()
-        selectedTabID = ""
-        selectedAssetID = nil
+    /// Select the tab that shows this document, or a workspace tab that
+    /// follows the selected document. Selecting the first tab of the kind
+    /// could point the breadcrumb and inspector at a different file.
+    private func revealTab(in project: Project, kind: AssetKind, url: URL?) {
+        let canonical = url.map { MarkdownSecurity.canonical($0).path }
+        if let canonical,
+           let tab = project.openTabs.first(where: { tab in
+               guard tab.kind == kind, let tabURL = tab.url else {
+                   return false
+               }
+               return MarkdownSecurity.canonical(tabURL).path == canonical
+           }) {
+            project.selectTab(tab.id)
+            return
+        }
+        if let tab = project.openTabs.first(where: { tab in
+            guard tab.kind == kind else { return false }
+            if case .workspace(let tabKind) = tab.content {
+                return tabKind == kind
+            }
+            return false
+        }) {
+            project.selectTab(tab.id)
+            return
+        }
+        project.selectWorkspaceTab(kind)
+    }
+
+    func closeAllTabs() async {
+        await liveProject.closeAllTabs()
     }
 
     func addNote() {

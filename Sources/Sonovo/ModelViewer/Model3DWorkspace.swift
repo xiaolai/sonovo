@@ -4,11 +4,6 @@ import Observation
 import SonovoCore
 import UniformTypeIdentifiers
 
-@MainActor
-enum Model3DWorkspaceRegistry {
-    static weak var active: Model3DWorkspace?
-}
-
 /// Owns the open models, their file watches, and the explicit Blender
 /// conversions. There is no save path: closing a model only stops work and
 /// removes temporary output.
@@ -25,21 +20,28 @@ final class Model3DWorkspace {
     private var watchTasks: [UUID: Task<Void, Never>] = [:]
     private var conversions: [UUID: Task<Void, Never>] = [:]
     private var closingDocuments: Set<UUID> = []
+    /// Fires when a document becomes selected. `Project` uses it to keep the
+    /// owning tab, breadcrumb, and persisted selection on the same model.
+    var onDocumentActivated: ((URL) -> Void)?
+    /// Fires after a document is removed. Without it, closing through the
+    /// application menu leaves an asset tab that reopens the model.
+    var onDocumentClosed: ((URL) -> Void)?
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         converter: (any BlendConverting)? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        opensDemoModel: Bool = true
     ) {
         self.fileManager = fileManager
         self.converter = converter ?? BlenderConverter(
             environment: environment,
             fileManager: fileManager
         )
-        Model3DWorkspaceRegistry.active = self
         removeStaleTemporaryFiles()
 
-        if let path = environment["SONOVO_DEMO_MODEL"], !path.isEmpty {
+        if opensDemoModel,
+           let path = environment["SONOVO_DEMO_MODEL"], !path.isEmpty {
             _ = open(url: URL(fileURLWithPath: path))
         }
     }
@@ -53,16 +55,9 @@ final class Model3DWorkspace {
         converter.locateBlender()
     }
 
-    var canConvertSelected: Bool {
-        guard let document = selectedDocument else { return false }
-        return document.format.canConvertWithBlender
-            && conversions[document.id] == nil
-            && !closingDocuments.contains(document.id)
-    }
-
-    var isConvertingSelected: Bool {
-        guard let document = selectedDocument else { return false }
-        return conversions[document.id] != nil || document.state.isConverting
+    /// Any open model converting in the background, selected or not.
+    var hasRunningConversion: Bool {
+        documents.contains { $0.state.isConverting }
     }
 
     func dismissError() {
@@ -102,6 +97,13 @@ final class Model3DWorkspace {
         }
 
         let document = Model3DDocument(url: target, format: format)
+        // The initializer only sets the state. Beginning the load here also
+        // schedules the off-main OBJ material scan; without it the first
+        // page load had no material libraries. A .blend waits for the
+        // explicit conversion instead.
+        if !format.isConvertible {
+            document.beginLoading()
+        }
         documents.append(document)
         startWatcher(for: document)
         select(document)
@@ -111,6 +113,7 @@ final class Model3DWorkspace {
 
     func select(_ document: Model3DDocument) {
         selectedDocumentID = document.id
+        onDocumentActivated?(document.sourceURL)
     }
 
     func presentOpenPanel() {
@@ -142,13 +145,9 @@ final class Model3DWorkspace {
         reload(document)
     }
 
-    func revealSelectedInFinder() {
-        guard let document = selectedDocument else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([document.sourceURL])
-    }
-
-    func close(_ document: Model3DDocument) async {
-        guard !closingDocuments.contains(document.id) else { return }
+    @discardableResult
+    func close(_ document: Model3DDocument) async -> Bool {
+        guard !closingDocuments.contains(document.id) else { return false }
         closingDocuments.insert(document.id)
         defer { closingDocuments.remove(document.id) }
 
@@ -162,10 +161,13 @@ final class Model3DWorkspace {
         watchTasks.removeValue(forKey: document.id)?.cancel()
         watchers.removeValue(forKey: document.id)?.stop()
         document.cleanUpTemporaryOutput()
+        let sourceURL = document.sourceURL
         documents.removeAll { $0.id == document.id }
         if selectedDocumentID == document.id {
             selectedDocumentID = documents.last?.id
         }
+        onDocumentClosed?(sourceURL)
+        return true
     }
 
     func closeSelected() async {
@@ -284,6 +286,11 @@ final class Model3DWorkspace {
             return
         }
         for child in children {
+            // Another project in this process may still be showing this
+            // conversion. Age alone is not ownership.
+            guard !Model3DTemporaryFiles.isProtected(child) else {
+                continue
+            }
             let values = try? child.resourceValues(
                 forKeys: [.contentModificationDateKey]
             )

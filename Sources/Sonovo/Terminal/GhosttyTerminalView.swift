@@ -5,7 +5,6 @@
 
 @preconcurrency import AppKit
 import GhosttyKit
-import SwiftUI
 import os
 
 private let logger = Logger(subsystem: "com.sonovo.Sonovo", category: "Terminal")
@@ -15,6 +14,20 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     private(set) var surface: ghostty_surface_t?
     private(set) var title = ""
     private(set) var workingDirectory: String?
+    private var reportedProcessAlive = false
+
+    /// Ask the live surface, not a callback-populated flag. Before the first
+    /// close request that flag was always false, so closing a tab or project
+    /// skipped the running-process confirmation.
+    var processAlive: Bool {
+        guard let surface else { return reportedProcessAlive }
+        return GhosttyFFI.surfaceNeedsConfirmQuit(surface)
+            && !GhosttyFFI.surfaceProcessExited(surface)
+    }
+
+    /// Set before the surface starts. Project terminals open at the project
+    /// root; the demo terminal keeps the shell's default.
+    var initialWorkingDirectory: String?
 
     var onCloseRequested: (() -> Void)?
     var onNewTabRequested: (() -> Void)?
@@ -23,6 +36,13 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     private var didInitialize = false
     private var wantsInitialization = false
+    /// Physical modifier key state, so releasing one Shift while the other
+    /// remains held emits the release for the key that changed.
+    private var modifierKeyStates: [UInt16: Bool] = [:]
+    /// Aggregate modifier flags carried by the previous modifier event.
+    /// Event-time snapshots are used, never live hardware state, so a
+    /// queued event is not pre-empted by the key's next transition.
+    private var lastModifierFlags: NSEvent.ModifierFlags = []
     private var needsInitialRefresh = true
     private var markedText = NSMutableAttributedString()
     private var keyTextAccumulator: [String]?
@@ -87,6 +107,20 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         config.font_size = 13
         config.context = GHOSTTY_SURFACE_CONTEXT_TAB
 
+        // surfaceNew copies the configuration during the call; the C string
+        // only has to outlive that call.
+        let workingDirectoryPointer = initialWorkingDirectory.flatMap {
+            strdup($0)
+        }
+        defer {
+            if let workingDirectoryPointer {
+                free(workingDirectoryPointer)
+            }
+        }
+        config.working_directory = workingDirectoryPointer.map {
+            UnsafePointer($0)
+        }
+
         guard let newSurface = GhosttyFFI.surfaceNew(app, config: &config) else {
             logger.error("ghostty_surface_new failed")
             didInitialize = false
@@ -104,6 +138,7 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     func shutdown() {
         onCloseRequested = nil
+        reportedProcessAlive = false
         if let surface {
             GhosttyFFI.surfaceFree(surface)
         }
@@ -113,6 +148,11 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func restart() {
+        // An in-progress composition belongs to the surface being replaced.
+        // Discard it before teardown so it cannot be sent to the new one.
+        inputContext?.discardMarkedText()
+        markedText = NSMutableAttributedString()
+        keyTextAccumulator = nil
         if let surface {
             GhosttyFFI.surfaceFree(surface)
         }
@@ -247,6 +287,7 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func handleCloseRequest(processAlive: Bool) {
+        reportedProcessAlive = processAlive
         onCloseRequested?()
     }
 
@@ -267,6 +308,12 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         if accepted, let surface {
             GhosttyFFI.surfaceSetFocus(surface, focused: true)
         }
+        if accepted {
+            // Resign cleared every key because events were unreachable.
+            // Seed from the hardware once, at this boundary, so a modifier
+            // held across the focus change reports its real transition.
+            seedModifierStatesFromHardware()
+        }
         return accepted
     }
 
@@ -274,6 +321,12 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         let resigned = super.resignFirstResponder()
         if resigned, let surface {
             GhosttyFFI.surfaceSetFocus(surface, focused: false)
+        }
+        if resigned {
+            // Events cannot reach a view without focus. Forget every key;
+            // becomeFirstResponder reads the hardware state back.
+            modifierKeyStates.removeAll()
+            lastModifierFlags = []
         }
         return resigned
     }
@@ -319,23 +372,79 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        guard surface != nil, !hasMarkedText() else { return }
-
-        let modifier: UInt32
-        switch event.keyCode {
-        case 0x39: modifier = GHOSTTY_MODS_CAPS.rawValue
-        case 0x38, 0x3C: modifier = GHOSTTY_MODS_SHIFT.rawValue
-        case 0x3B, 0x3E: modifier = GHOSTTY_MODS_CTRL.rawValue
-        case 0x3A, 0x3D: modifier = GHOSTTY_MODS_ALT.rawValue
-        case 0x37, 0x36: modifier = GHOSTTY_MODS_SUPER.rawValue
-        default: return
+        guard surface != nil else { return }
+        guard let bit = Self.modifierFlag(for: event.keyCode) else {
+            lastModifierFlags = event.modifierFlags
+            return
         }
 
-        let mods = EventTranslator.translateModifiers(event.modifierFlags)
-        let action: ghostty_input_action_e = (mods.rawValue & modifier) != 0
+        let wasDown = modifierKeyStates[event.keyCode] ?? false
+        let aggregateNow = event.modifierFlags.contains(bit)
+        let aggregateBefore = lastModifierFlags.contains(bit)
+        let isDown: Bool
+        if !aggregateNow {
+            isDown = false
+        } else if !aggregateBefore {
+            isDown = true
+        } else {
+            // The class remains held: the other key of the pair may be the
+            // one keeping it on, so this key's own state decides.
+            isDown = !wasDown
+        }
+        modifierKeyStates[event.keyCode] = isDown
+        lastModifierFlags = event.modifierFlags
+        guard isDown != wasDown else { return }
+
+        // Modifier state is still tracked during marked text; only the
+        // terminal event is suppressed while the IME owns the keys.
+        guard !hasMarkedText() else { return }
+        let action: ghostty_input_action_e = isDown
             ? GHOSTTY_ACTION_PRESS
             : GHOSTTY_ACTION_RELEASE
         _ = sendKey(action, event: event)
+    }
+
+    private static func modifierFlag(
+        for keyCode: UInt16
+    ) -> NSEvent.ModifierFlags? {
+        switch keyCode {
+        case 0x39: .capsLock
+        case 0x38, 0x3C: .shift
+        case 0x3B, 0x3E: .control
+        case 0x3A, 0x3D: .option
+        case 0x37, 0x36: .command
+        default: nil
+        }
+    }
+
+    private static let modifierPairs: [(NSEvent.ModifierFlags, [UInt16])] = [
+        (.capsLock, [0x39]),
+        (.shift, [0x38, 0x3C]),
+        (.control, [0x3B, 0x3E]),
+        (.option, [0x3A, 0x3D]),
+        (.command, [0x37, 0x36])
+    ]
+
+    /// Seeds per-key state from the hardware at a focus boundary, where no
+    /// queued key event of this view can be pending. Later transitions are
+    /// derived from event flags alone.
+    private func seedModifierStatesFromHardware() {
+        var flags: NSEvent.ModifierFlags = []
+        for (bit, keys) in Self.modifierPairs {
+            var anyDown = false
+            for key in keys {
+                let down = CGEventSource.keyState(
+                    .combinedSessionState,
+                    key: key
+                )
+                modifierKeyStates[key] = down
+                anyDown = anyDown || down
+            }
+            if anyDown {
+                flags.insert(bit)
+            }
+        }
+        lastModifierFlags = flags
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -527,33 +636,41 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        guard let surface else { return }
-        let mods = EventTranslator.translateModifiers(event.modifierFlags)
-        _ = GhosttyFFI.surfaceMouseButton(surface, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT, mods: mods)
+        _ = sendMouseButton(
+            event,
+            state: GHOSTTY_MOUSE_PRESS,
+            button: GHOSTTY_MOUSE_LEFT
+        )
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard let surface else { return }
-        let mods = EventTranslator.translateModifiers(event.modifierFlags)
-        _ = GhosttyFFI.surfaceMouseButton(surface, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT, mods: mods)
+        _ = sendMouseButton(
+            event,
+            state: GHOSTTY_MOUSE_RELEASE,
+            button: GHOSTTY_MOUSE_LEFT
+        )
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        guard let surface else { return }
-        let mods = EventTranslator.translateModifiers(event.modifierFlags)
-        if GhosttyFFI.surfaceMouseButton(surface, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT, mods: mods) {
+        guard sendMouseButton(
+            event,
+            state: GHOSTTY_MOUSE_PRESS,
+            button: GHOSTTY_MOUSE_RIGHT
+        ) else {
+            super.rightMouseDown(with: event)
             return
         }
-        super.rightMouseDown(with: event)
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        guard let surface else { return }
-        let mods = EventTranslator.translateModifiers(event.modifierFlags)
-        if GhosttyFFI.surfaceMouseButton(surface, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT, mods: mods) {
+        guard sendMouseButton(
+            event,
+            state: GHOSTTY_MOUSE_RELEASE,
+            button: GHOSTTY_MOUSE_RIGHT
+        ) else {
+            super.rightMouseUp(with: event)
             return
         }
-        super.rightMouseUp(with: event)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -601,6 +718,26 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         )
     }
 
+    /// Position, modifiers, and dispatch are identical for every button;
+    /// only the state and button differ. Returns false when the surface is
+    /// gone, so AppKit callers can fall back to super.
+    @discardableResult
+    private func sendMouseButton(
+        _ event: NSEvent,
+        state: ghostty_input_mouse_state_e,
+        button: ghostty_input_mouse_button_e
+    ) -> Bool {
+        guard let surface else { return false }
+        sendMousePosition(event)
+        let mods = EventTranslator.translateModifiers(event.modifierFlags)
+        return GhosttyFFI.surfaceMouseButton(
+            surface,
+            state: state,
+            button: button,
+            mods: mods
+        )
+    }
+
     override func updateTrackingAreas() {
         trackingAreas.forEach { removeTrackingArea($0) }
         addTrackingArea(
@@ -628,49 +765,3 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 }
 
-@MainActor
-struct GhosttyTerminalViewRepresentable: NSViewRepresentable {
-    let isActive: Bool
-    let restartToken: Int
-    let focusToken: Int
-    let onClose: () -> Void
-    let onTitleChanged: (String) -> Void
-    let onWorkingDirectoryChanged: (String) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> GhosttyTerminalView {
-        let view = GhosttyTerminalView(frame: .zero)
-        view.onCloseRequested = onClose
-        view.onTitleChanged = onTitleChanged
-        view.onWorkingDirectoryChanged = onWorkingDirectoryChanged
-        return view
-    }
-
-    func updateNSView(_ view: GhosttyTerminalView, context: Context) {
-        view.onCloseRequested = onClose
-        view.onTitleChanged = onTitleChanged
-        view.onWorkingDirectoryChanged = onWorkingDirectoryChanged
-
-        if isActive {
-            view.initializeIfNeeded()
-        }
-
-        if context.coordinator.lastRestartToken != restartToken {
-            context.coordinator.lastRestartToken = restartToken
-            view.restart()
-        }
-
-        if context.coordinator.lastFocusToken != focusToken {
-            context.coordinator.lastFocusToken = focusToken
-            view.focus()
-        }
-    }
-
-    final class Coordinator {
-        var lastRestartToken = 0
-        var lastFocusToken = 0
-    }
-}

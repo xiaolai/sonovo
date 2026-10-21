@@ -2,11 +2,16 @@ import SwiftUI
 
 struct StillsView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     private var palettes: [CoastalPalette] { CoastalPalette.stills }
 
     var body: some View {
-        if let asset = state.selectedAsset {
+        if let asset = selectedAsset {
             content(asset)
         } else {
             EmptyEditorView()
@@ -127,7 +132,7 @@ struct StillsView: View {
     private func stillLabel(index: Int) -> some View {
         HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
-                .fill(state.selectedAsset.map { state.status(for: $0).color } ?? AppTheme.Palette.needsReview)
+                .fill(selectedAsset.map { state.status(for: $0).color } ?? AppTheme.Palette.needsReview)
                 .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
             Text(String(format: "STILL %02d", index + 1))
                 .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
@@ -143,33 +148,38 @@ struct StillsView: View {
     }
 
     private var previousButton: some View {
-        Button {
+        stillNavigationButton(
+            systemName: "chevron.left",
+            help: "Previous frame"
+        ) {
             state.selectedStillIndex = (state.selectedStillIndex - 1 + palettes.count) % palettes.count
-        } label: {
-            Image(systemName: "chevron.left")
-                .font(.system(size: AppTheme.TypeScale.body, weight: .semibold))
-                .foregroundStyle(AppTheme.Palette.white)
-                .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
-                .background(Circle().fill(AppTheme.Surface.mediaOverlay))
         }
-        .buttonStyle(.plain)
-        .help("Previous frame")
-        .accessibilityLabel("Previous frame")
     }
 
     private var nextButton: some View {
-        Button {
+        stillNavigationButton(
+            systemName: "chevron.right",
+            help: "Next frame"
+        ) {
             state.selectedStillIndex = (state.selectedStillIndex + 1) % palettes.count
-        } label: {
-            Image(systemName: "chevron.right")
+        }
+    }
+
+    private func stillNavigationButton(
+        systemName: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
                 .font(.system(size: AppTheme.TypeScale.body, weight: .semibold))
                 .foregroundStyle(AppTheme.Palette.white)
                 .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
                 .background(Circle().fill(AppTheme.Surface.mediaOverlay))
         }
         .buttonStyle(.plain)
-        .help("Next frame")
-        .accessibilityLabel("Next frame")
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     private var contactSheet: some View {

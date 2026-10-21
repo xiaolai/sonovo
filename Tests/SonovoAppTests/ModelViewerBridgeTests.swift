@@ -229,7 +229,8 @@ final class ModelViewerBridgeTests: XCTestCase {
             upAxis: "y",
             playing: true,
             clip: 0,
-            scene: 1
+            scene: 1,
+            active: true
         )
         let json = try XCTUnwrap(
             ModelViewerBridge.configurationJSON(configuration)
@@ -241,6 +242,7 @@ final class ModelViewerBridgeTests: XCTestCase {
         ) as? [String: Any]
         XCTAssertEqual(object?["format"] as? String, "glb")
         XCTAssertEqual(object?["grid"] as? Bool, true)
+        XCTAssertEqual(object?["active"] as? Bool, true)
         XCTAssertEqual(
             object?["mtlURLs"] as? [String],
             [

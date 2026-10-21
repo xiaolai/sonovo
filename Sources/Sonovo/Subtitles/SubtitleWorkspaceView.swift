@@ -4,24 +4,25 @@ import SwiftUI
 /// The subtitle workspace: one document card on the canvas, with a preview,
 /// cue cards, and a raw source editor.
 struct SubtitleWorkspaceView: View {
-    @Bindable var state: AppState
+    let project: Project
 
-    @State private var selectedOrdinal: Int?
-    @State private var editingOrdinal: Int?
-    @State private var draftText = ""
-    @State private var draftBaseText = ""
-    @FocusState private var focusedCue: Int?
+    @Environment(\.projectIsVisible) private var projectIsVisible
 
-    private var workspace: SubtitleWorkspace { state.subtitles }
+    private var workspace: SubtitleWorkspace { project.subtitles }
 
     var body: some View {
         Group {
             if let document = workspace.selectedDocument {
-                page(document)
-                    .padding(AppTheme.Spacing.lg)
-                    // Draft, selection, and focus are per document. Keep
-                    // them from following an ordinal into another file.
-                    .id(document.id)
+                // The page owns draft, selection, and focus state. A new
+                // identity per document keeps an unfinished draft from
+                // following its ordinal into another file.
+                SubtitleDocumentPage(
+                    workspace: workspace,
+                    document: document,
+                    projectIsVisible: projectIsVisible
+                )
+                .id(document.id)
+                .padding(AppTheme.Spacing.lg)
             } else {
                 emptyState
                     .padding(AppTheme.Spacing.lg)
@@ -29,6 +30,111 @@ struct SubtitleWorkspaceView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appCanvas)
+    }
+
+    // MARK: - Empty state
+
+    private var emptyState: some View {
+        VStack(spacing: AppTheme.Spacing.md) {
+            Image(systemName: "captions.bubble")
+                .font(
+                    .system(
+                        size: AppTheme.IconSize.render,
+                        weight: .ultraLight
+                    )
+                )
+                .foregroundStyle(.tertiary)
+
+            Text("No Subtitle Open")
+                .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
+
+            Text(
+                "Open an SRT, WebVTT, ASS, or SSA file to edit cue text "
+                    + "and timing beside a real media preview."
+            )
+            .font(.system(size: AppTheme.TypeScale.sm))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: AppTheme.Layout.emptyDescriptionMaxWidth)
+
+            HStack(spacing: AppTheme.Spacing.sm) {
+                Button("Open Subtitle…") {
+                    workspace.presentOpenPanel()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+
+            Text("Text and timing edits preserve every other byte of the file.")
+                .font(.system(size: AppTheme.TypeScale.xxs))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.surface,
+                style: .continuous
+            )
+            .fill(Color.appCard)
+        )
+        .overlay(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.surface,
+                style: .continuous
+            )
+            .strokeBorder(
+                Color.appSeparator,
+                lineWidth: AppTheme.BorderWidth.hairline
+            )
+        )
+    }
+}
+
+/// One document page. Every piece of state here belongs to exactly one
+/// document; the parent keys the page by document ID so a switch starts
+/// clean.
+private struct SubtitleDocumentPage: View {
+    let workspace: SubtitleWorkspace
+    let document: SubtitleDocument
+    let projectIsVisible: Bool
+
+    @State private var editingOrdinal: Int?
+    @State private var draftText = ""
+    @State private var draftBaseText = ""
+    @FocusState private var focusedCue: Int?
+    /// A queued focus request must not land after the project is hidden.
+    @State private var canFocus = true
+
+    var body: some View {
+        page(document)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear {
+                canFocus = projectIsVisible
+            }
+            .onChange(of: projectIsVisible) { _, visible in
+                canFocus = visible
+                if !visible {
+                    focusedCue = nil
+                }
+            }
+            .onDisappear {
+                // The page is leaving (another document, tab, or project).
+                // Commit the draft to the document it was typed into, never
+                // to whatever ordinal the next document happens to have.
+                guard let ordinal = editingOrdinal else { return }
+                editingOrdinal = nil
+                focusedCue = nil
+                let text = draftText
+                Task { @MainActor in
+                    guard !document.isClosed, !document.isReadOnly else {
+                        return
+                    }
+                    _ = await workspace.apply(
+                        .setText(ordinal: ordinal, text: text),
+                        to: document
+                    )
+                }
+            }
     }
 
     // MARK: - Page
@@ -267,7 +373,6 @@ struct SubtitleWorkspaceView: View {
                                 draftText: $draftText,
                                 focusedCue: $focusedCue,
                                 onSelect: {
-                                    selectedOrdinal = cue.ordinal
                                     workspace.seek(
                                         toMilliseconds: cue.startMilliseconds
                                     )
@@ -280,9 +385,6 @@ struct SubtitleWorkspaceView: View {
                                 },
                                 onCommitText: {
                                     Task { await commitDraft(document) }
-                                },
-                                onApplied: { result in
-                                    handle(result)
                                 }
                             )
                             .id(cue.ordinal)
@@ -368,6 +470,8 @@ struct SubtitleWorkspaceView: View {
         draftBaseText = cue.rawText
         editingOrdinal = cue.ordinal
         DispatchQueue.main.async {
+            // The project can switch while the focus hop is queued.
+            guard canFocus else { return }
             focusedCue = cue.ordinal
         }
     }
@@ -383,16 +487,17 @@ struct SubtitleWorkspaceView: View {
         let text = draftText
         editingOrdinal = nil
         focusedCue = nil
-        if let result = await workspace.apply(
+        if await workspace.apply(
             .setText(ordinal: ordinal, text: text),
             to: document
-        ) {
-            selectedOrdinal = result.affectedCueOrdinal
+        ) != nil {
             return true
         }
         // Keep the words on screen so a failed save is not silently lost.
         editingOrdinal = ordinal
-        focusedCue = ordinal
+        if canFocus {
+            focusedCue = ordinal
+        }
         return false
     }
 
@@ -401,15 +506,7 @@ struct SubtitleWorkspaceView: View {
         focusedCue = nil
     }
 
-    private func handle(_ result: SubtitleEditResult) {
-        selectedOrdinal = result.affectedCueOrdinal
-    }
-
     private func reconcileState(_ document: SubtitleDocument) {
-        if let selected = selectedOrdinal,
-           document.parsed.cue(ordinal: selected) == nil {
-            selectedOrdinal = nil
-        }
         guard let editing = editingOrdinal else { return }
         guard let cue = document.parsed.cue(ordinal: editing),
               cue.rawText == draftBaseText else {
@@ -505,63 +602,6 @@ struct SubtitleWorkspaceView: View {
         .padding(.vertical, AppTheme.Spacing.sm)
         .background(
             AppTheme.Palette.needsReview.opacity(AppTheme.Opacity.ghostSoft)
-        )
-    }
-
-    // MARK: - Empty state
-
-    private var emptyState: some View {
-        VStack(spacing: AppTheme.Spacing.md) {
-            Image(systemName: "captions.bubble")
-                .font(
-                    .system(
-                        size: AppTheme.IconSize.render,
-                        weight: .ultraLight
-                    )
-                )
-                .foregroundStyle(.tertiary)
-
-            Text("No Subtitle Open")
-                .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
-
-            Text(
-                "Open an SRT, WebVTT, ASS, or SSA file to edit cue text "
-                    + "and timing beside a real media preview."
-            )
-            .font(.system(size: AppTheme.TypeScale.sm))
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: AppTheme.Layout.emptyDescriptionMaxWidth)
-
-            HStack(spacing: AppTheme.Spacing.sm) {
-                Button("Open Subtitle…") {
-                    workspace.presentOpenPanel()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            }
-
-            Text("Text and timing edits preserve every other byte of the file.")
-                .font(.system(size: AppTheme.TypeScale.xxs))
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            RoundedRectangle(
-                cornerRadius: AppTheme.Radius.surface,
-                style: .continuous
-            )
-            .fill(Color.appCard)
-        )
-        .overlay(
-            RoundedRectangle(
-                cornerRadius: AppTheme.Radius.surface,
-                style: .continuous
-            )
-            .strokeBorder(
-                Color.appSeparator,
-                lineWidth: AppTheme.BorderWidth.hairline
-            )
         )
     }
 }

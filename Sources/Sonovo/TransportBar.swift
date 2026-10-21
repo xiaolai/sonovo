@@ -4,7 +4,10 @@ struct TransportBar: View {
     @Bindable var state: AppState
 
     private var isMediaTab: Bool {
-        guard let kind = state.selectedTab?.kind else { return false }
+        guard state.liveProject.isDemo,
+              let kind = state.selectedTab?.kind else {
+            return false
+        }
         return kind == .audio || kind == .video
     }
 
@@ -136,25 +139,63 @@ struct TransportBar: View {
         .padding(.horizontal, AppTheme.Spacing.lg)
     }
 
+    private struct Context {
+        let icon: String
+        let name: String
+        let detail: String
+        let right: String
+    }
+
+    private var currentContext: Context? {
+        if !state.liveProject.isDemo,
+           let asset = state.liveProject.selectedAsset {
+            return Context(
+                icon: asset.kind.icon,
+                name: asset.name,
+                detail: realDetail(for: asset),
+                right: realRight(for: asset)
+            )
+        }
+        if !state.liveProject.isDemo,
+           let kind = state.selectedTab?.workspaceKind,
+           let identity = state.liveProject.workspaceDocumentIdentity(for: kind) {
+            return Context(
+                icon: kind.icon,
+                name: identity.name,
+                detail: identity.detail,
+                right: kind.rawValue.capitalized
+            )
+        }
+        if let tab = state.selectedTab,
+           let asset = state.production.asset(id: tab.assetID) {
+            return Context(
+                icon: tab.kind.icon,
+                name: state.displayName(for: asset),
+                detail: contextDetail(for: tab),
+                right: contextRight(for: tab)
+            )
+        }
+        return nil
+    }
+
     private var contextBar: some View {
         HStack(spacing: AppTheme.Spacing.sm) {
-            if let tab = state.selectedTab,
-               let asset = state.production.asset(id: tab.assetID) {
-                Image(systemName: tab.kind.icon)
+            if let context = currentContext {
+                Image(systemName: context.icon)
                     .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
 
-                Text(state.displayName(for: asset))
+                Text(context.name)
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                     .lineLimit(1)
 
-                Text(contextDetail(for: tab))
+                Text(context.detail)
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
 
                 Spacer(minLength: AppTheme.Spacing.sm)
 
-                Text(contextRight(for: tab))
+                Text(context.right)
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.tertiary)
             } else {
@@ -165,6 +206,33 @@ struct TransportBar: View {
             }
         }
         .padding(.horizontal, AppTheme.Spacing.lg)
+    }
+
+    private func realDetail(for asset: ProjectAsset) -> String {
+        guard let tab = state.selectedTab else {
+            return asset.fileExtension.uppercased()
+        }
+        switch asset.kind {
+        case .script, .subtitle, .model3d:
+            return contextDetail(for: tab)
+        default:
+            return asset.fileExtension.uppercased()
+        }
+    }
+
+    private func realRight(for asset: ProjectAsset) -> String {
+        if let tab = state.selectedTab {
+            switch asset.kind {
+            case .script, .subtitle, .model3d:
+                return contextRight(for: tab)
+            default:
+                break
+            }
+        }
+        return ByteCountFormatter.string(
+            fromByteCount: asset.size,
+            countStyle: .file
+        )
     }
 
     private func contextDetail(for tab: EditorTab) -> String {
@@ -199,6 +267,10 @@ struct TransportBar: View {
         case .model3d: "No model open"
         case .html: "Local preview"
         case .delivery: "Not rendered"
+        case .document: "Document"
+        case .image: "Image"
+        case .archive: "Archive"
+        case .other: "File"
         }
     }
 
@@ -226,6 +298,10 @@ struct TransportBar: View {
         case .model3d: "GLB · STL · 3MF · USDZ"
         case .html: "No network"
         case .delivery: "1920×1080 · H.264"
+        case .document: "Preview"
+        case .image: "Local file"
+        case .archive: "Metadata"
+        case .other: "Local file"
         }
     }
 }

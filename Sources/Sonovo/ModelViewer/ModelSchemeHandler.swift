@@ -7,10 +7,15 @@ import WebKit
 @MainActor
 final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
     private let resolver: ModelResourceResolver
+    private let onResourceServed: ((URL) -> Void)?
     private var activeTasks: Set<ObjectIdentifier> = []
 
-    init(resolver: ModelResourceResolver) {
+    init(
+        resolver: ModelResourceResolver,
+        onResourceServed: ((URL) -> Void)? = nil
+    ) {
         self.resolver = resolver
+        self.onResourceServed = onResourceServed
         super.init()
     }
 
@@ -40,9 +45,18 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             // Do not distinguish "outside the root" from "absent": both look
             // identical to the page.
             respond(task, identifier: identifier, status: 404, body: Data())
+        case .missingAsset(let url):
+            // The model declared this sidecar even though it is absent.
+            // Recording the absent revision makes a later creation reload
+            // the model.
+            onResourceServed?(url)
+            respond(task, identifier: identifier, status: 404, body: Data())
         case .unsupportedType:
             respond(task, identifier: identifier, status: 415, body: Data())
         case .file(let resource):
+            if resource.route == .asset {
+                onResourceServed?(resource.url)
+            }
             read(resource, for: task, identifier: identifier)
         }
     }

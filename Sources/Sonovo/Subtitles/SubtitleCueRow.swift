@@ -15,7 +15,6 @@ struct SubtitleCueRow: View {
     let onSelect: () -> Void
     let onBeginEditing: () -> Void
     let onCommitText: () -> Void
-    let onApplied: (SubtitleEditResult) -> Void
 
     private enum TimingField: Hashable {
         case start
@@ -343,16 +342,14 @@ struct SubtitleCueRow: View {
             return
         }
         Task {
-            if let result = await workspace.apply(
+            _ = await workspace.apply(
                 .setTiming(
                     ordinal: cue.ordinal,
                     startMilliseconds: start,
                     endMilliseconds: end
                 ),
                 to: document
-            ) {
-                onApplied(result)
-            }
+            )
         }
     }
 }

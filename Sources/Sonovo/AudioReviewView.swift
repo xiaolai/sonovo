@@ -2,9 +2,14 @@ import SwiftUI
 
 struct AudioReviewView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     var body: some View {
-        if let asset = state.selectedAsset {
+        if let asset = selectedAsset {
             content(asset)
         } else {
             EmptyEditorView()
@@ -157,7 +162,7 @@ struct AudioReviewView: View {
                 state.inspectorTab = .notes
             }
 
-            if let asset = state.selectedAsset {
+            if let asset = selectedAsset {
                 BarIconButton(systemName: "arrow.uturn.backward", help: "Request change") {
                     state.requestChange(for: asset)
                 }
@@ -223,6 +228,11 @@ private struct TranscriptRow: View {
 
 struct AudioCompareView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     var body: some View {
         VStack(spacing: AppTheme.Spacing.md) {
@@ -230,7 +240,7 @@ struct AudioCompareView: View {
                 VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                     Text("Compare Takes")
                         .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                    Text("Take 02 (approved) against \(state.selectedAsset?.name ?? "the current take")")
+                    Text("Take 02 (approved) against \(selectedAsset?.name ?? "the current take")")
                         .font(.system(size: AppTheme.TypeScale.xs))
                         .foregroundStyle(.secondary)
                 }
@@ -259,11 +269,14 @@ struct AudioCompareView: View {
                 tint: AppTheme.Palette.approved
             )
 
+            let comparisonStatus = selectedAsset.map {
+                state.status(for: $0)
+            } ?? .needsReview
             compareCard(
                 letter: "B",
-                name: state.selectedAsset?.name ?? "vo-take-03.wav",
-                detail: "Needs review · 00:12.4 · Tighter pauses",
-                status: state.selectedAsset.map { state.status(for: $0) } ?? .needsReview,
+                name: selectedAsset?.name ?? "vo-take-03.wav",
+                detail: "\(comparisonStatus.label) · 00:12.4 · Tighter pauses",
+                status: comparisonStatus,
                 duration: state.duration,
                 selectedID: state.selectedTranscriptID,
                 tint: AppTheme.Palette.needsReview

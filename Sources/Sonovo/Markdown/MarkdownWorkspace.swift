@@ -10,12 +10,6 @@ extension Notification.Name {
     )
 }
 
-/// The active workspace, reachable by the app delegate for quit flushing.
-@MainActor
-enum MarkdownWorkspaceRegistry {
-    static weak var active: MarkdownWorkspace?
-}
-
 /// Owns the open Markdown documents, their tabs, autosave, and watchers.
 @MainActor
 @Observable
@@ -32,18 +26,30 @@ final class MarkdownWorkspace {
 
     var lastError: String?
     var pendingClose: MarkdownDocument?
+    /// Called after a document is removed, including a close resolved later
+    /// through the save/discard prompt. The owning project uses it to remove
+    /// the matching tab.
+    /// Reports the document that closed. The object carries its stable ID,
+    /// which survives a Save As and identifies an untitled document that
+    /// has no URL yet.
+    var onDocumentClosed: ((MarkdownDocument) -> Void)?
+    /// Called when the workspace's selected document changes, including
+    /// navigation to a linked file. The owning project keeps its tabs in
+    /// step so the tab title never names a different document than the one
+    /// on screen.
+    var onDocumentActivated: ((URL?) -> Void)?
+    /// A Save As changed a document's file identity. Tabs naming the old
+    /// path must follow it rather than keep pointing at a stale file.
+    var onDocumentMoved: ((URL, URL) -> Void)?
 
     func dismissError() {
         lastError = nil
     }
-    /// Called exactly once when a quit waiting on a close decision resolves.
-    var onTerminationResolved: (@MainActor (Bool) -> Void)?
     var scrollTargets: [UUID: String] = [:]
 
     private var watchers: [UUID: MarkdownFileWatcher] = [:]
-    private var autosaveTask: Task<Void, Never>?
-    private var autosaveRetryAfter: [UUID: Date] = [:]
-    private var autosaveFailures: [UUID: Int] = [:]
+    @ObservationIgnored
+    private var autosave: AutosaveDriver<MarkdownDocument>!
     private var reservedDestinations: Set<String> = []
     nonisolated(unsafe) private var workspaceWatcher: WorkspaceDirectoryWatcher?
     private var workspaceScanTask: Task<Void, Never>?
@@ -69,12 +75,12 @@ final class MarkdownWorkspace {
     init(
         store: MarkdownFileStore = MarkdownFileStore(),
         parseService: MarkdownParseService = MarkdownParseService(),
-        editorCache: MarkdownEditorCache = .shared
+        editorCache: MarkdownEditorCache = .shared,
+        readsDemoEnvironment: Bool = true
     ) {
         self.store = store
         self.parseService = parseService
         self.editorCache = editorCache
-        MarkdownWorkspaceRegistry.active = self
 
         fileChangeObserver = NotificationCenter.default.addObserver(
             forName: .sonovoMarkdownFileChanged,
@@ -87,9 +93,16 @@ final class MarkdownWorkspace {
             }
         }
 
+        autosave = AutosaveDriver(
+            documents: { [weak self] in self?.documents ?? [] },
+            reportsError: { [weak self] message in
+                self?.lastError = message
+            }
+        )
         startAutosaveLoop()
 
-        if let path = ProcessInfo.processInfo.environment["SONOVO_DEMO_MARKDOWN"] {
+        if readsDemoEnvironment,
+           let path = ProcessInfo.processInfo.environment["SONOVO_DEMO_MARKDOWN"] {
             open(url: URL(fileURLWithPath: path))
         }
     }
@@ -101,14 +114,14 @@ final class MarkdownWorkspace {
         if let existing = documents.first(where: {
             $0.fileURL == nil && !$0.isDirty
         }) {
-            selectedDocumentID = existing.id
+            setSelectedDocument(existing)
             return existing
         }
 
         let document = MarkdownDocument(untitledWith: store)
         document.mode = .source
         documents.append(document)
-        selectedDocumentID = document.id
+        setSelectedDocument(document)
         return document
     }
 
@@ -124,7 +137,7 @@ final class MarkdownWorkspace {
             guard let fileURL = candidate.fileURL else { return false }
             return MarkdownSecurity.canonical(fileURL).path == key
         }) {
-            selectedDocumentID = existing.id
+            setSelectedDocument(existing)
             return existing
         }
         guard !reservedDestinations.contains(key) else {
@@ -138,7 +151,7 @@ final class MarkdownWorkspace {
             let document = try MarkdownDocument(loading: target, store: store)
             document.mode = Self.defaultOpenMode
             documents.append(document)
-            selectedDocumentID = document.id
+            setSelectedDocument(document)
             startWatcher(for: document)
             if workspaceRoot == nil {
                 workspaceFiles = Array(Set(workspaceFiles + [target]))
@@ -152,16 +165,33 @@ final class MarkdownWorkspace {
     }
 
     func select(_ document: MarkdownDocument) {
-        selectedDocumentID = document.id
+        setSelectedDocument(document)
     }
 
-    func close(_ document: MarkdownDocument) async {
+    private func setSelectedDocument(_ document: MarkdownDocument) {
+        selectedDocumentID = document.id
+        // An untitled document still changes the identity on screen; the
+        // owning tab must stop naming the previously selected file.
+        onDocumentActivated?(document.fileURL)
+    }
+
+    /// Returns true only when the document was actually closed. A document
+    /// waiting for a save decision stays open, so its project tab must stay
+    /// open too.
+    @discardableResult
+    func close(_ document: MarkdownDocument) async -> Bool {
         let outcome = await document.flushForClose()
         switch outcome {
         case .closed:
             remove(document)
+            return true
         case .needsDecision:
-            pendingClose = document
+            // One decision at a time. A second unresolved close must not
+            // replace the first document's alert.
+            if pendingClose == nil || pendingClose === document {
+                pendingClose = document
+            }
+            return false
         }
     }
 
@@ -169,11 +199,9 @@ final class MarkdownWorkspace {
     func saveAndClose(_ document: MarkdownDocument) async {
         if document.fileURL == nil {
             guard let url = presentSavePanel(for: document) else {
-                resolveTerminationIfPending()
                 return
             }
             guard await saveAs(document, to: url) else {
-                resolveTerminationIfPending()
                 return
             }
         } else {
@@ -181,7 +209,6 @@ final class MarkdownWorkspace {
                 try await document.save()
             } catch {
                 lastError = "Save failed: \(error)"
-                resolveTerminationIfPending()
                 return
             }
         }
@@ -194,18 +221,15 @@ final class MarkdownWorkspace {
         }
         pendingClose = nil
         remove(document)
-        resolveTerminationIfPending()
     }
 
     func discardAndClose(_ document: MarkdownDocument) {
         pendingClose = nil
         remove(document)
-        resolveTerminationIfPending()
     }
 
     func cancelPendingClose() {
         pendingClose = nil
-        resolveTerminationIfPending()
     }
 
     /// The close alert dismissed itself. Its button action owns the actual
@@ -215,28 +239,22 @@ final class MarkdownWorkspace {
         pendingClose = nil
     }
 
-    /// Finishes a quit that was waiting for the close alert. A failure to
-    /// clear every dirty document resolves to "do not quit" rather than
-    /// leaving the application waiting forever.
-    private func resolveTerminationIfPending() {
-        guard let completion = onTerminationResolved, pendingClose == nil else {
-            return
-        }
-        let allowed = !hasDirtyDocuments
-        onTerminationResolved = nil
-        completion(allowed)
-    }
-
     private func remove(_ document: MarkdownDocument) {
         let id = document.id
         document.markClosed()
+        // A pending decision whose document closed through another path is
+        // no longer pending. Keeping it would make the next close report a
+        // document that already fired its callback, so no later decision
+        // could ever resume the operation waiting on it.
+        if pendingClose === document {
+            pendingClose = nil
+        }
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
         editorCache.remove(for: id)
         documents.removeAll { $0.id == id }
         scrollTargets.removeValue(forKey: id)
-        autosaveRetryAfter.removeValue(forKey: id)
-        autosaveFailures.removeValue(forKey: id)
+        autosave.forget(id)
         // The parse service otherwise retains this document's AST, heading
         // index, and source for the life of the process.
         Task { await parseService.release(documentID: id) }
@@ -244,6 +262,10 @@ final class MarkdownWorkspace {
         if selectedDocumentID == id {
             selectedDocumentID = documents.first?.id
         }
+        // An untitled document has no file to remove tabs for, but its
+        // removal still completes a deferred close (and must resume a bulk
+        // close waiting on it).
+        onDocumentClosed?(document)
     }
 
     // MARK: - Saving
@@ -257,8 +279,7 @@ final class MarkdownWorkspace {
         }
         do {
             try await document.save()
-            autosaveRetryAfter.removeValue(forKey: document.id)
-            autosaveFailures.removeValue(forKey: document.id)
+            autosave.didSave(document.id)
             lastError = nil
         } catch {
             lastError = "Save failed: \(error)"
@@ -293,11 +314,24 @@ final class MarkdownWorkspace {
             return false
         }
         defer { releaseDestination(reservation) }
+        let previousURL = document.fileURL
         do {
             try await document.saveAs(to: target)
+            // The write can outrun a close. A document that left the
+            // workspace must not get its watcher reinstalled or report a
+            // move after its removal.
+            guard documents.contains(where: { $0 === document }),
+                  !document.isClosed else {
+                return false
+            }
             startWatcher(for: document)
             registerWorkspaceFile(target)
             lastError = nil
+            if let previousURL {
+                onDocumentMoved?(previousURL, target)
+            } else if document === selectedDocument {
+                onDocumentActivated?(target)
+            }
             return true
         } catch {
             lastError = "Save As failed: \(error)"
@@ -338,7 +372,7 @@ final class MarkdownWorkspace {
                 fileURL.standardizedFileURL
             ).path == key
         }) {
-            selectedDocumentID = existing.id
+            setSelectedDocument(existing)
             lastError = "That file is already open in another tab."
             return nil
         }
@@ -572,6 +606,10 @@ final class MarkdownWorkspace {
 
     func openFolder(_ url: URL) async {
         let root = MarkdownSecurity.canonical(url)
+        // A debounced rescan from the previous folder must not survive the
+        // switch and invalidate the new folder's scan generation.
+        workspaceScanTask?.cancel()
+        workspaceScanTask = nil
         workspaceRoot = root
         workspaceWatcher?.stop()
 
@@ -591,6 +629,10 @@ final class MarkdownWorkspace {
     /// Rebuilds the index off the main actor. A scan that finishes after a
     /// newer one has started is discarded.
     private func rescanWorkspaceIndex(root: URL) async {
+        // Reject a scan for an old root before touching the generation;
+        // otherwise it invalidates the new root's scan and then discards
+        // itself, leaving no index at all.
+        guard workspaceRoot == root else { return }
         workspaceScanGeneration += 1
         let generation = workspaceScanGeneration
         let files = await Task.detached(priority: .userInitiated) {
@@ -634,7 +676,7 @@ final class MarkdownWorkspace {
             for document in documents where document.isDirty {
                 let outcome = await document.flushForClose()
                 if case .needsDecision = outcome {
-                    selectedDocumentID = document.id
+                    setSelectedDocument(document)
                     pendingClose = document
                     return false
                 }
@@ -650,53 +692,7 @@ final class MarkdownWorkspace {
     // MARK: - Autosave
 
     private func startAutosaveLoop() {
-        autosaveTask?.cancel()
-        autosaveTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard let self else { return }
-                let now = Date()
-                let due = self.documents.filter {
-                    if let retry = self.autosaveRetryAfter[$0.id], retry > now {
-                        return false
-                    }
-                    guard let delay = $0.autosaveDelay(now: now) else {
-                        return false
-                    }
-                    return delay <= 0
-                }
-                for document in due {
-                    // A conflict must never be overwritten by autosave.
-                    guard document.conflict == nil else { continue }
-                    // The document may have been closed while an earlier
-                    // await in this batch was running.
-                    guard self.documents.contains(where: {
-                        $0.id == document.id
-                    }) else {
-                        continue
-                    }
-                    do {
-                        try await document.save()
-                        self.autosaveRetryAfter.removeValue(forKey: document.id)
-                        self.autosaveFailures.removeValue(forKey: document.id)
-                    } catch let error as DocumentError where error == .closed {
-                        continue
-                    } catch {
-                        // Surface the failure and back off instead of
-                        // retrying the same failing write every 500 ms.
-                        let failures = (self.autosaveFailures[document.id] ?? 0) + 1
-                        self.autosaveFailures[document.id] = failures
-                        let delay = min(
-                            30.0,
-                            pow(2.0, Double(min(failures, 5)))
-                        )
-                        self.autosaveRetryAfter[document.id] = Date()
-                            .addingTimeInterval(delay)
-                        self.lastError = "Autosave failed: \(error)"
-                    }
-                }
-            }
-        }
+        autosave.start()
     }
 
     // MARK: - Utilities

@@ -7,6 +7,34 @@ enum Model3DTemporaryFiles {
             .appendingPathComponent("Sonovo", isDirectory: true)
             .appendingPathComponent("Models", isDirectory: true)
     }
+
+    private static let lock = NSLock()
+    // Every read and write is under `lock`.
+    nonisolated(unsafe) private static var protectedPaths: Set<String> = []
+
+    private static func canonicalPath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    /// A live document owns its conversion output. Workspace initialization
+    /// prunes old directories, and must not delete another project's output.
+    static func protect(_ url: URL) {
+        lock.lock()
+        protectedPaths.insert(canonicalPath(url))
+        lock.unlock()
+    }
+
+    static func unprotect(_ url: URL) {
+        lock.lock()
+        protectedPaths.remove(canonicalPath(url))
+        lock.unlock()
+    }
+
+    static func isProtected(_ url: URL) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return protectedPaths.contains(canonicalPath(url))
+    }
 }
 
 struct BlenderInstallation: Equatable, Sendable {
@@ -401,14 +429,21 @@ final class BlenderConverter: BlendConverting {
                 "the file is smaller than a GLB header"
             )
         }
-        guard let handle = try? FileHandle(forReadingFrom: url),
-              let header = try? handle.read(upToCount: 12),
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: url)
+        } catch {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB header could not be read"
+            )
+        }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 12),
               header.count == 12 else {
             throw BlenderConversionError.invalidOutput(
                 "the GLB header could not be read"
             )
         }
-        try? handle.close()
 
         guard header.prefix(4) == Data("glTF".utf8) else {
             throw BlenderConversionError.invalidOutput("the magic is not glTF")
@@ -427,6 +462,176 @@ final class BlenderConverter: BlendConverting {
         guard Int64(declared) == size else {
             throw BlenderConversionError.invalidOutput(
                 "the header length does not match the file size"
+            )
+        }
+
+        // A header alone is not a model. Parse the JSON chunk and walk every
+        // remaining chunk boundary; a truncated export must not be published
+        // as a successful conversion.
+        let (root, jsonLength) = try readJSONChunk(
+            handle: handle,
+            size: size
+        )
+        let binary = try validateChunks(
+            handle: handle,
+            size: size,
+            start: 20 + jsonLength
+        )
+        try validateBinaryPayload(root: root, binary: binary)
+    }
+
+    private struct GLBChunkHeader {
+        let length: Int64
+        let type: UInt32
+    }
+
+    private struct GLBBinaryChunk {
+        let isPresent: Bool
+        let length: Int
+    }
+
+    private static let glbJSONChunkType: UInt32 = 0x4E4F534A
+    private static let glbBINChunkType: UInt32 = 0x004E4942
+    private static let maximumGLBJSONBytes: Int64 = 64 * 1024 * 1024
+
+    private func readChunkHeader(
+        _ handle: FileHandle
+    ) throws -> GLBChunkHeader {
+        guard let data = try handle.read(upToCount: 8),
+              data.count == 8 else {
+            throw BlenderConversionError.invalidOutput(
+                "a GLB chunk header could not be read"
+            )
+        }
+        let (length, type) = data.withUnsafeBytes { bytes in
+            (
+                UInt32(littleEndian: bytes.loadUnaligned(
+                    fromByteOffset: 0,
+                    as: UInt32.self
+                )),
+                UInt32(littleEndian: bytes.loadUnaligned(
+                    fromByteOffset: 4,
+                    as: UInt32.self
+                ))
+            )
+        }
+        return GLBChunkHeader(length: Int64(length), type: type)
+    }
+
+    /// Reads and parses the mandatory first JSON chunk.
+    private func readJSONChunk(
+        handle: FileHandle,
+        size: Int64
+    ) throws -> ([String: Any], Int64) {
+        try handle.seek(toOffset: 12)
+        let header = try readChunkHeader(handle)
+        guard header.type == Self.glbJSONChunkType, header.length > 0 else {
+            throw BlenderConversionError.invalidOutput(
+                "the first GLB chunk is not JSON"
+            )
+        }
+        guard header.length % 4 == 0 else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB JSON chunk is not four-byte aligned"
+            )
+        }
+        // A larger JSON chunk is not a Blender export of a real scene; this
+        // also bounds the read below.
+        guard header.length <= Self.maximumGLBJSONBytes else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB JSON chunk is implausibly large"
+            )
+        }
+        guard 20 + header.length <= size else {
+            throw BlenderConversionError.invalidOutput(
+                "the JSON chunk extends past the file"
+            )
+        }
+        try handle.seek(toOffset: 20)
+        guard let data = try handle.read(upToCount: Int(header.length)),
+              Int64(data.count) == header.length else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB JSON chunk could not be read"
+            )
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let root = object as? [String: Any],
+              let asset = root["asset"] as? [String: Any],
+              let version = asset["version"] as? String,
+              version.hasPrefix("2") else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB JSON chunk is not a glTF 2.0 asset"
+            )
+        }
+        return (root, header.length)
+    }
+
+    /// Every chunk, including unknown types glTF allows readers to skip,
+    /// must have a complete header and a body that fits in the file.
+    private func validateChunks(
+        handle: FileHandle,
+        size: Int64,
+        start: Int64
+    ) throws -> GLBBinaryChunk {
+        var offset = start
+        var binary = GLBBinaryChunk(isPresent: false, length: 0)
+        while offset < size {
+            guard size - offset >= 8 else {
+                throw BlenderConversionError.invalidOutput(
+                    "the GLB ends inside a chunk header"
+                )
+            }
+            try handle.seek(toOffset: UInt64(offset))
+            let header = try readChunkHeader(handle)
+            guard header.length % 4 == 0 else {
+                throw BlenderConversionError.invalidOutput(
+                    "a GLB chunk is not four-byte aligned"
+                )
+            }
+            guard offset + 8 + header.length <= size else {
+                throw BlenderConversionError.invalidOutput(
+                    "a GLB chunk extends past the file"
+                )
+            }
+            if header.type == Self.glbBINChunkType {
+                binary = GLBBinaryChunk(
+                    isPresent: true,
+                    length: Int(header.length)
+                )
+            }
+            offset += 8 + header.length
+        }
+        guard offset == size else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB chunks do not end at the file boundary"
+            )
+        }
+        return binary
+    }
+
+    /// A buffer without a URI is stored in the BIN chunk. If the JSON
+    /// declares one, a BIN chunk must exist and be long enough.
+    private func validateBinaryPayload(
+        root: [String: Any],
+        binary: GLBBinaryChunk
+    ) throws {
+        let buffers = root["buffers"] as? [[String: Any]] ?? []
+        let embeddedLengths = buffers.compactMap { buffer -> Int? in
+            guard buffer["uri"] == nil else { return nil }
+            return buffer["byteLength"] as? Int
+        }
+        let needsBinaryChunk = buffers.contains { $0["uri"] == nil }
+        guard !needsBinaryChunk || binary.isPresent else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB declares an embedded buffer but has no BIN chunk"
+            )
+        }
+        let declaredBinaryBytes = embeddedLengths.max() ?? 0
+        guard !needsBinaryChunk
+                || (declaredBinaryBytes > 0
+                    && binary.length >= declaredBinaryBytes) else {
+            throw BlenderConversionError.invalidOutput(
+                "the GLB BIN chunk is shorter than its declared buffer"
             )
         }
     }

@@ -17,6 +17,10 @@ struct ModelResourceResolver: Sendable {
 
     enum Outcome: Equatable, Sendable {
         case file(Resource)
+        /// An allowed asset path that does not exist yet. The handler
+        /// records the request so creating the sidecar later reloads the
+        /// model.
+        case missingAsset(URL)
         /// Malformed URL, wrong host, query, fragment, or empty component.
         case badRequest
         /// A valid-looking path that escapes its root or names a hidden file.
@@ -136,7 +140,10 @@ struct ModelResourceResolver: Sendable {
             atPath: target.path,
             isDirectory: &isDirectory
         ), !isDirectory.boolValue else {
-            return .notFound
+            // An allowed asset path can name a sidecar the model declares
+            // but that does not exist (yet). Record that request so its
+            // creation is visible to the resource-revision check.
+            return route == .asset ? .missingAsset(target) : .notFound
         }
 
         return .file(

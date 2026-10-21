@@ -2,33 +2,23 @@ import SwiftUI
 
 struct DetailWorkspace: View {
     @Bindable var state: AppState
-    @AppStorage("sonovo.canvasInset") private var canvasInset = AppTheme.Canvas.comfortableInset
-    @AppStorage("sonovo.canvasRadius") private var canvasRadius = AppTheme.Canvas.roundedRadius
 
     var body: some View {
         GeometryReader { geometry in
             let layout = WorkspaceLayout(state: state, size: geometry.size)
 
             ZStack(alignment: .topLeading) {
-                VStack(spacing: AppTheme.Spacing.zero) {
-                    if state.showTabBar {
-                        EditorTabBar(state: state)
-                    }
-                    if state.showBreadcrumbs {
-                        EditorBreadcrumb(state: state)
-                    }
-                    EditorContentView(state: state)
-                        .appCanvasStyle(
-                            inset: CGFloat(canvasInset),
-                            radius: CGFloat(canvasRadius)
-                        )
-                }
-                .frame(
-                    width: layout.editorFrame.width,
-                    height: layout.editorFrame.height,
-                    alignment: .topLeading
+                ProjectEditorHostsView(
+                    state: state,
+                    projects: state.workspace.allProjects,
+                    active: state.liveProject
                 )
-                .clipped()
+                    .frame(
+                        width: layout.editorFrame.width,
+                        height: layout.editorFrame.height,
+                        alignment: .topLeading
+                    )
+                    .clipped()
 
                 TerminalPane(
                     state: state,
@@ -62,8 +52,6 @@ struct DetailWorkspace: View {
 
 @MainActor
 struct WorkspaceLayout {
-    let size: CGSize
-    let availableHeight: CGFloat
     let terminalResizeHeight: CGFloat
     let editorFrame: CGRect
     let terminalFrame: CGRect
@@ -73,10 +61,7 @@ struct WorkspaceLayout {
     let inspectorPlacement: InspectorPlacement
 
     init(state: AppState, size: CGSize) {
-        self.size = size
-
         let contentHeight = size.height
-        self.availableHeight = contentHeight
 
         let transportHeight = AppTheme.Layout.transportHeight
         let contentAboveTransport = max(contentHeight - transportHeight, 0)

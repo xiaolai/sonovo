@@ -15,6 +15,7 @@ struct ModelWebView: NSViewRepresentable {
     let clip: Int
     let scene: Int
     let fitRequest: UInt64
+    @Environment(\.projectIsVisible) private var projectIsVisible
 
     func makeCoordinator() -> Coordinator {
         Coordinator(document: document)
@@ -37,7 +38,9 @@ struct ModelWebView: NSViewRepresentable {
             assetRoot: renderableURL.deletingLastPathComponent(),
             primaryFile: renderableURL
         )
-        let handler = ModelSchemeHandler(resolver: resolver)
+        let handler = ModelSchemeHandler(resolver: resolver) { [weak document] url in
+            document?.recordResourceServed(url)
+        }
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
@@ -77,7 +80,8 @@ struct ModelWebView: NSViewRepresentable {
             upAxis: upAxis.rawValue,
             playing: playing,
             clip: clip,
-            scene: document.sceneNames.isEmpty ? -1 : scene
+            scene: document.sceneNames.isEmpty ? -1 : scene,
+            active: projectIsVisible
         )
         guard let configJSON = ModelViewerBridge.configurationJSON(payload) else {
             document.fail("The model viewer configuration could not be encoded.")
@@ -116,7 +120,8 @@ struct ModelWebView: NSViewRepresentable {
             playing: playing,
             clip: clip,
             scene: scene,
-            fitRequest: fitRequest
+            fitRequest: fitRequest,
+            active: projectIsVisible
         )
     }
 
@@ -140,7 +145,12 @@ struct ModelWebView: NSViewRepresentable {
         let token = UUID().uuidString
         private let document: Model3DDocument
         private weak var webView: WKWebView?
+        private var loadTask: Task<Void, Never>?
         private var isReady = false
+        /// Set by `teardown`. Every late WebKit callback checks it so a
+        /// cancelled navigation cannot fail a document this coordinator no
+        /// longer owns.
+        private var isTornDown = false
         private var pending: [String: Any] = [:]
         private var lastTheme: String?
         private var lastGrid: Bool?
@@ -150,6 +160,7 @@ struct ModelWebView: NSViewRepresentable {
         private var lastClip: Int?
         private var lastScene: Int?
         private var lastFit: UInt64?
+        private var lastActive: Bool?
 
         init(document: Model3DDocument) {
             self.document = document
@@ -160,15 +171,22 @@ struct ModelWebView: NSViewRepresentable {
         }
 
         func load(viewerURL: URL) {
-            Task { @MainActor [weak self] in
+            loadTask?.cancel()
+            loadTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard let rules = await ModelContentRules.ruleList() else {
+                let rules = await ModelContentRules.ruleList()
+                // Teardown may have run while the rule list compiled. Do
+                // not fail a document that this coordinator no longer owns.
+                guard !Task.isCancelled, !self.isTornDown,
+                      let webView = self.webView else {
+                    return
+                }
+                guard let rules else {
                     self.document.fail(
                         "The model viewer could not install its network block."
                     )
                     return
                 }
-                guard let webView = self.webView else { return }
                 webView.configuration.userContentController.add(rules)
                 webView.load(URLRequest(url: viewerURL))
             }
@@ -182,7 +200,8 @@ struct ModelWebView: NSViewRepresentable {
             playing: Bool,
             clip: Int,
             scene: Int,
-            fitRequest: UInt64
+            fitRequest: UInt64,
+            active: Bool
         ) {
             var command: [String: Any] = [:]
             let themeName = theme == .dark ? "dark" : "light"
@@ -218,6 +237,10 @@ struct ModelWebView: NSViewRepresentable {
                 command["fit"] = Int(clamping: fitRequest)
                 lastFit = fitRequest
             }
+            if lastActive != active {
+                command["active"] = active
+                lastActive = active
+            }
             guard !command.isEmpty else { return }
             if isReady {
                 send(command)
@@ -240,7 +263,8 @@ struct ModelWebView: NSViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == Self.messageName,
+            guard !isTornDown,
+                  message.name == Self.messageName,
                   message.webView === webView,
                   let event = ModelViewerBridge.decode(
                     message.body,
@@ -348,6 +372,7 @@ struct ModelWebView: NSViewRepresentable {
             didFailProvisionalNavigation navigation: WKNavigation!,
             withError error: Error
         ) {
+            guard !isTornDown else { return }
             document.fail("The model viewer could not load: \(error.localizedDescription)")
         }
 
@@ -356,21 +381,28 @@ struct ModelWebView: NSViewRepresentable {
             didFail navigation: WKNavigation!,
             withError error: Error
         ) {
+            guard !isTornDown else { return }
             document.fail("The model viewer stopped loading: \(error.localizedDescription)")
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            guard !isTornDown else { return }
             document.fail("The model renderer stopped unexpectedly. Reload to continue.")
         }
 
         func teardown() {
+            isTornDown = true
+            loadTask?.cancel()
+            loadTask = nil
             isReady = false
             pending.removeAll()
+            // Detach first: stopLoading delivers a cancellation callback to
+            // whoever is still installed as the navigation delegate.
+            webView?.navigationDelegate = nil
+            webView?.uiDelegate = nil
             webView?.stopLoading()
             webView?.configuration.userContentController
                 .removeScriptMessageHandler(forName: Self.messageName)
-            webView?.navigationDelegate = nil
-            webView?.uiDelegate = nil
             webView = nil
         }
     }

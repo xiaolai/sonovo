@@ -163,7 +163,11 @@ final class ModelResourceResolverTests: XCTestCase {
     }
 
     func testMissingFileIsNotFound() {
-        XCTAssertEqual(resolver.resolve(url("/asset/missing.glb")), .notFound)
+        let missingAsset = resolver.resolve(url("/asset/missing.glb"))
+        guard case .missingAsset(let target) = missingAsset else {
+            return XCTFail("An absent asset must be reported as missing")
+        }
+        XCTAssertEqual(target.lastPathComponent, "missing.glb")
         XCTAssertEqual(resolver.resolve(url("/viewer/missing.js")), .notFound)
     }
 

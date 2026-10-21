@@ -197,6 +197,7 @@ enum ModelViewerBridge {
         let playing: Bool
         let clip: Int
         let scene: Int
+        let active: Bool
     }
 
     static func configurationJSON(_ configuration: Configuration) -> String? {

@@ -255,6 +255,25 @@ final class Model3DWorkspaceTests: XCTestCase {
         XCTAssertTrue(cancelled)
     }
 
+    func testDeclaredMaterialThatDoesNotExistYetIsRetained() throws {
+        let directory = try makeDirectory()
+        let obj = directory.appendingPathComponent("model.obj")
+        try Data(
+            """
+            mtllib materials/future.mtl
+            v 0 0 0
+            """.utf8
+        ).write(to: obj)
+
+        // The path must be cached even before the file exists: otherwise
+        // creating it later leaves the empty cache valid and the viewer
+        // never loads the new library.
+        XCTAssertEqual(
+            Model3DDocument.scanMaterialPaths(sourceURL: obj),
+            ["materials/future.mtl"]
+        )
+    }
+
     func testOBJMaterialLibraryUsesTheDeclaredPath() throws {
         let container = try makeDirectory()
         let directory = container.appendingPathComponent("model", isDirectory: true)
@@ -275,10 +294,8 @@ final class Model3DWorkspaceTests: XCTestCase {
         let obj = directory.appendingPathComponent("model.obj")
         try Data("mtllib materials/custom.mtl\nv 0 0 0\n".utf8).write(to: obj)
 
-        let document = Model3DDocument(url: obj, format: .obj)
-        XCTAssertEqual(document.materialURLs, [custom])
         XCTAssertEqual(
-            document.materialPaths,
+            Model3DDocument.scanMaterialPaths(sourceURL: obj),
             ["materials/custom.mtl"],
             "The viewer must request the declared subdirectory, not just the name"
         )
@@ -287,13 +304,11 @@ final class Model3DWorkspaceTests: XCTestCase {
         let outside = container.appendingPathComponent("outside.mtl")
         try Data("newmtl Outside".utf8).write(to: outside)
         try Data("mtllib ../outside.mtl\n".utf8).write(to: obj)
-        let guarded = Model3DDocument(url: obj, format: .obj)
         XCTAssertEqual(
-            guarded.materialURLs,
-            [directory.appendingPathComponent("model.mtl")],
+            Model3DDocument.scanMaterialPaths(sourceURL: obj),
+            ["model.mtl"],
             "An escaped mtllib falls back to the sibling MTL"
         )
-        XCTAssertEqual(guarded.materialPaths, ["model.mtl"])
         try? FileManager.default.removeItem(at: outside)
     }
 
@@ -327,10 +342,8 @@ final class Model3DWorkspaceTests: XCTestCase {
             v 0 0 0
             """.utf8
         ).write(to: obj)
-        let document = Model3DDocument(url: obj, format: .obj)
-        XCTAssertEqual(document.materialURLs, [first, spaced, last])
         XCTAssertEqual(
-            document.materialPaths,
+            Model3DDocument.scanMaterialPaths(sourceURL: obj),
             [
                 "materials/first.mtl",
                 "materials/my materials.mtl",
@@ -343,16 +356,17 @@ final class Model3DWorkspaceTests: XCTestCase {
         let padding = String(repeating: "# padding line\n", count: 80_000)
         try Data((padding + "mtllib materials/my materials.mtl\n").utf8)
             .write(to: obj)
-        let distant = Model3DDocument(url: obj, format: .obj)
-        XCTAssertEqual(distant.materialURLs, [spaced])
-        XCTAssertEqual(distant.materialPaths, ["materials/my materials.mtl"])
+        XCTAssertEqual(
+            Model3DDocument.scanMaterialPaths(sourceURL: obj),
+            ["materials/my materials.mtl"]
+        )
 
         // CRLF line endings leave a carriage return on the name.
         try Data("mtllib materials/first.mtl\r\nv 0 0 0\r\n".utf8)
             .write(to: obj)
         XCTAssertEqual(
-            Model3DDocument(url: obj, format: .obj).materialURLs,
-            [first]
+            Model3DDocument.scanMaterialPaths(sourceURL: obj),
+            ["materials/first.mtl"]
         )
     }
 

@@ -36,37 +36,50 @@ enum ReviewStatus: String, CaseIterable, Hashable, Sendable {
 
 enum AssetKind: String, Hashable, Sendable {
     case script
+    case document
     case audio
     case video
     case stills
+    case image
     case subtitle
     case model3d
     case html
+    case archive
     case delivery
+    case other
 
     var icon: String {
         switch self {
         case .script: "doc.text"
+        case .document: "doc.richtext"
         case .audio: "waveform"
         case .video: "film"
         case .stills: "photo.on.rectangle.angled"
+        case .image: "photo"
         case .subtitle: "captions.bubble"
         case .model3d: "cube.transparent"
         case .html: "chevron.left.forwardslash.chevron.right"
+        case .archive: "archivebox"
         case .delivery: "shippingbox"
+        case .other: "questionmark.square.dashed"
         }
     }
 
     var tabIcon: String {
         switch self {
-        case .script: "doc.text"
-        case .audio: "waveform"
-        case .video: "film"
         case .stills: "photo"
-        case .subtitle: "captions.bubble"
         case .model3d: "cube"
         case .html: "globe"
-        case .delivery: "shippingbox"
+        default: icon
+        }
+    }
+
+    var workspaceTitle: String {
+        switch self {
+        case .script: "Script"
+        case .subtitle: "Subtitles"
+        case .model3d: "3D"
+        default: "Workspace"
         }
     }
 }
@@ -97,10 +110,6 @@ struct Production: Hashable, Sendable {
 
     var allAssets: [ProductionAsset] {
         stages.flatMap(\.assets)
-    }
-
-    var needsReviewCount: Int {
-        allAssets.filter { $0.status == .needsReview }.count
     }
 
     func asset(id: String) -> ProductionAsset? {
@@ -218,12 +227,22 @@ struct Production: Hashable, Sendable {
     )
 }
 
+enum EditorTabContent: Hashable, Sendable {
+    case sample(ProductionAsset)
+    case project(ProjectAsset)
+    /// A workspace with no file yet: the empty state is the content.
+    case workspace(AssetKind)
+}
+
 struct EditorTab: Identifiable, Hashable, Sendable {
     let id: String
     let assetID: String
     let title: String
     let kind: AssetKind
     let icon: String
+    /// The file this tab owns in a real project. Nil for a sample tab.
+    let url: URL?
+    let content: EditorTabContent
 
     init(asset: ProductionAsset) {
         id = asset.id
@@ -231,6 +250,45 @@ struct EditorTab: Identifiable, Hashable, Sendable {
         title = asset.name
         kind = asset.kind
         icon = asset.kind.tabIcon
+        url = nil
+        content = .sample(asset)
+    }
+
+    init(asset: ProjectAsset) {
+        id = asset.id
+        assetID = asset.id
+        title = asset.name
+        kind = asset.kind
+        icon = asset.kind.tabIcon
+        url = asset.url
+        content = .project(asset)
+    }
+
+    init(workspaceKind kind: AssetKind) {
+        id = "workspace-\(kind.rawValue)"
+        assetID = id
+        title = kind.workspaceTitle
+        self.kind = kind
+        icon = kind.tabIcon
+        url = nil
+        content = .workspace(kind)
+    }
+
+    var projectAsset: ProjectAsset? {
+        if case .project(let asset) = content { return asset }
+        return nil
+    }
+
+    var sampleAsset: ProductionAsset? {
+        if case .sample(let asset) = content { return asset }
+        return nil
+    }
+
+    /// The workspace kind when this is a synthetic workspace tab. Such a tab
+    /// has no URL; its identity is the document selected inside it.
+    var workspaceKind: AssetKind? {
+        if case .workspace(let kind) = content { return kind }
+        return nil
     }
 }
 
@@ -315,11 +373,19 @@ struct TranscriptSegment: Identifiable, Hashable, Sendable {
     }
 
     static func timecode(for seconds: Double) -> String {
-        let clamped = max(0, seconds)
-        let minutes = Int(clamped) / 60
-        let wholeSeconds = Int(clamped) % 60
-        let hundredths = Int((clamped - floor(clamped)) * 100)
-        return String(format: "%02d:%02d.%02d", minutes, wholeSeconds, hundredths)
+        // Round to the displayed precision first. Truncating the fractional
+        // part separately turns 4.6 into 4 seconds + 59 hundredths.
+        let totalHundredths = Int((max(0, seconds) * 100).rounded())
+        let hundredths = totalHundredths % 100
+        let totalSeconds = totalHundredths / 100
+        let minutes = totalSeconds / 60
+        let wholeSeconds = totalSeconds % 60
+        return String(
+            format: "%02d:%02d.%02d",
+            minutes,
+            wholeSeconds,
+            hundredths
+        )
     }
 }
 
@@ -406,6 +472,10 @@ enum SampleContent {
             isResolved: true
         )
     ]
+
+    /// The take the player is currently showing. One constant keeps the
+    /// history badge and the take strip from disagreeing.
+    static let currentTakeID = "take-03"
 
     static let takes: [TakeVersion] = [
         TakeVersion(

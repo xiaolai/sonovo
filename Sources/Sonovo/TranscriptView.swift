@@ -2,6 +2,11 @@ import SwiftUI
 
 struct TranscriptView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     var body: some View {
         ScrollView {
@@ -36,14 +41,14 @@ struct TranscriptView: View {
                 Text("Tidewater — Ep. 01")
                     .font(.system(size: AppTheme.TypeScale.displaySmall, weight: .bold, design: .serif))
 
-                Text("\(state.selectedAsset?.name ?? "take-03.mp4") · 00:12.4 · 4 segments")
+                Text("\(selectedAsset?.name ?? "take-03.mp4") · 00:12.4 · 4 segments")
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            if let asset = state.selectedAsset {
+            if let asset = selectedAsset {
                 StatusBadge(status: state.status(for: asset))
             }
         }
@@ -147,7 +152,7 @@ struct TranscriptView: View {
 
             Spacer()
 
-            if let asset = state.selectedAsset {
+            if let asset = selectedAsset {
                 BarIconButton(systemName: "text.bubble", help: "Request change") {
                     state.requestChange(for: asset)
                 }

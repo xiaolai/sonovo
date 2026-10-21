@@ -19,9 +19,7 @@ enum AppTheme {
         static let sidebarWidth: CGFloat = 264
         static let sidebarMaxWidth: CGFloat = 340
 
-        static let inspectorMinWidth: CGFloat = 264
         static let inspectorWidth: CGFloat = 304
-        static let inspectorMaxWidth: CGFloat = 380
 
         static let terminalMinWidth: CGFloat = 340
         static let terminalMaxWidth: CGFloat = 520
@@ -46,12 +44,13 @@ enum AppTheme {
         static let breadcrumbHeight: CGFloat = 28
         static let transportHeight: CGFloat = 46
         static let toolbarControlHeight: CGFloat = 24
-        static let toolbarContentHeight: CGFloat = 28
-        static let toolbarTitleHeight: CGFloat = 30
 
         static let pageMaxWidth: CGFloat = 760
         static let markdownSidebarWidth: CGFloat = 220
         static let mediaMaxWidth: CGFloat = 900
+        static let mediaVolumeMaxWidth: CGFloat = 120
+        static let documentMetadataCardWidth: CGFloat = 300
+        static let documentSearchFieldWidth: CGFloat = 180
         static let dialogueMaxWidth: CGFloat = 440
         static let urlBarMaxWidth: CGFloat = 420
         static let emptyDescriptionMaxWidth: CGFloat = 300
@@ -59,8 +58,6 @@ enum AppTheme {
         static let settingsWidth: CGFloat = 720
         static let settingsHeight: CGFloat = 500
         static let settingsSidebarWidth: CGFloat = 184
-        static let settingsContentMaxWidth: CGFloat = 440
-        static let settingsDescriptionMaxWidth: CGFloat = 300
         static let settingsRowLabelWidth: CGFloat = 150
         static let settingsPickerWidth: CGFloat = 190
         static let settingsPickerNarrowWidth: CGFloat = 170
@@ -80,22 +77,14 @@ enum AppTheme {
         static let s6: CGFloat = 6
         static let s7: CGFloat = 7
         static let sm: CGFloat = 8
-        static let s9: CGFloat = 9
         static let s10: CGFloat = 10
         static let md: CGFloat = 12
         static let s14: CGFloat = 14
         static let lg: CGFloat = 16
         static let s18: CGFloat = 18
-        static let s20: CGFloat = 20
         static let xl: CGFloat = 24
-        static let s26: CGFloat = 26
-        static let s28: CGFloat = 28
-        static let s30: CGFloat = 30
         static let xxl: CGFloat = 32
-        static let s36: CGFloat = 36
         static let s40: CGFloat = 40
-        static let s42: CGFloat = 42
-        static let s48: CGFloat = 48
     }
 
     // MARK: - Shape
@@ -136,12 +125,36 @@ enum AppTheme {
         static let logSheetHeight: CGFloat = 380
     }
 
+    /// Project chips and the live project overview.
+    enum ProjectSwitcher {
+        static let chipMaxWidth: CGFloat = 148
+        static let badgeSize: CGFloat = 9
+        static let badgeGap: CGFloat = 3
+        static let overviewWidth: CGFloat = 380
+        static let overviewMaxHeight: CGFloat = 420
+        static let overviewRowMinHeight: CGFloat = 52
+    }
+
+    /// Side-by-side and wipe comparison chrome.
+    enum Comparison {
+        static let modePickerWidth: CGFloat = 180
+        static let zoomLabelWidth: CGFloat = 52
+        static let dividerHitWidth: CGFloat = 24
+        static let dividerHitRadius: CGFloat = 12
+        static let handleDiameter: CGFloat = 22
+        static let handleRadius: CGFloat = 11
+        static let half: CGFloat = 0.5
+        static let metadataStripHeight: CGFloat = 68
+        static let metadataDividerHeight: CGFloat = 32
+        static let pickerWidth: CGFloat = 420
+        static let pickerHeight: CGFloat = 420
+        static let pickerRowHeight: CGFloat = 52
+    }
+
     enum Subtitle {
         static let stageMaxWidth: CGFloat = 720
         static let stageMaxHeight: CGFloat = 360
-        static let stageMinHeight: CGFloat = 180
         static let captionSize: CGFloat = 22
-        static let captionMaxWidth: CGFloat = 620
         static let cueTimeFieldWidth: CGFloat = 82
         static let cueIndexWidth: CGFloat = 20
         static let cueDividerInset: CGFloat = 44
@@ -234,7 +247,6 @@ enum AppTheme {
         static let lg: CGFloat = 15
         static let title: CGFloat = 16
         static let xl: CGFloat = 17
-        static let titleLarge: CGFloat = 18
         static let hero: CGFloat = 21
         static let xxl: CGFloat = 22
         static let displaySmall: CGFloat = 24
@@ -247,18 +259,14 @@ enum AppTheme {
         static let tight: CGFloat = 0.6
         static let normal: CGFloat = 0.7
         static let wide: CGFloat = 0.8
-        static let wider: CGFloat = 0.9
         static let widest: CGFloat = 1.0
         static let display: CGFloat = 1.2
-        static let displayWide: CGFloat = 1.3
-        static let displayWider: CGFloat = 1.4
         static let hero: CGFloat = 3.0
     }
 
     enum LineSpacing {
         static let tight: CGFloat = 3
         static let normal: CGFloat = 4
-        static let relaxed: CGFloat = 5
     }
 
     enum Time {
@@ -300,7 +308,6 @@ enum AppTheme {
         static let micro: CGFloat = 8
         static let tiny: CGFloat = 9
         static let small: CGFloat = 10
-        static let footnote: CGFloat = 11
         static let regular: CGFloat = 12
         static let medium: CGFloat = 14
         static let large: CGFloat = 15
@@ -309,7 +316,6 @@ enum AppTheme {
         static let extraLarge: CGFloat = 21
         static let display: CGFloat = 26
         static let empty: CGFloat = 28
-        static let editorEmpty: CGFloat = 30
         static let play: CGFloat = 52
         static let render: CGFloat = 66
     }
@@ -326,15 +332,12 @@ enum AppTheme {
 
     enum Size {
         static let toolbarDividerHeight: CGFloat = 16
-        static let rowGlyph: CGFloat = 16
-        static let statusDot: CGFloat = 5
-        static let statusDotLarge: CGFloat = 6
+        static let metadataLabelWidth: CGFloat = 76
         static let avatar: CGFloat = 36
         static let inspectorTabsWidth: CGFloat = 96
         static let bottomHeaderHeight: CGFloat = 34
         static let bottomInfoColumnMinWidth: CGFloat = 170
         static let bottomNoteWidth: CGFloat = 260
-        static let latestNoteWidth: CGFloat = 260
         static let takeCardWidth: CGFloat = 210
         static let timecodeWidth: CGFloat = 54
         static let timecodeColumnWidth: CGFloat = 56
@@ -348,18 +351,14 @@ enum AppTheme {
         static let scrubberHitHeight: CGFloat = 14
         static let waveformHeight: CGFloat = 208
         static let compareWaveformHeight: CGFloat = 108
-        static let differenceDividerHeight: CGFloat = 24
         static let timelineLineHeight: CGFloat = 42
         static let timelineDotColumnWidth: CGFloat = 8
-        static let timelineDotTopPadding: CGFloat = 5
         static let letterBadge: CGFloat = 17
         static let thumbnailWidth: CGFloat = 116
         static let thumbnailHeight: CGFloat = 65
         static let stillThumbnailWidth: CGFloat = 96
         static let stillThumbnailHeight: CGFloat = 54
         static let compareHandle: CGFloat = 30
-        static let compareHandleIcon: CGFloat = 8
-        static let compareDividerWidth: CGFloat = 1.5
         static let compareSummaryWidth: CGFloat = 104
         static let settingsPreviewHeight: CGFloat = 92
         static let settingsSwatchWidth: CGFloat = 26
@@ -371,12 +370,8 @@ enum AppTheme {
         static let terminalTabClose: CGFloat = 20
         static let menuIcon: CGFloat = 18
         static let addIcon: CGFloat = 20
-        static let inlineIcon: CGFloat = 20
         static let navigatorPickerWidth: CGFloat = 76
         static let reviewModePickerWidth: CGFloat = 94
-        static let formatButtonWidth: CGFloat = 22
-        static let formatButtonHeight: CGFloat = 20
-        static let deliveryCardMaxWidth: CGFloat = 440
         static let miniWindowSidebar: CGFloat = 26
         static let miniWindowTrafficDot: CGFloat = 3
         static let miniWindowTitlebarHeight: CGFloat = 8
@@ -386,17 +381,9 @@ enum AppTheme {
         static let miniWindowLineHeight: CGFloat = 2
         static let resizeHandleWidth: CGFloat = 28
         static let resizeHandleHeight: CGFloat = 2
-        static let titlebarControl: CGFloat = 22
-        static let tabMaxHeight: CGFloat = 24
-        static let terminalTabHeight: CGFloat = 22
-        static let searchFieldHeight: CGFloat = 22
-        static let noteComposerHeight: CGFloat = 28
         static let browserBarHeight: CGFloat = 38
         static let stageAspectWidth: CGFloat = 16
         static let stageAspectHeight: CGFloat = 9
-        static let comparisonDeltaWidth: CGFloat = 104
-        static let sourceLineSpacing: CGFloat = 3
-        static let noValue: CGFloat = 0
     }
 
     // MARK: - Opacity
@@ -544,7 +531,6 @@ extension Color {
     static var appSecondaryLabel: Color { AppTheme.Palette.secondaryLabel }
     static var appTertiaryLabel: Color { AppTheme.Palette.tertiaryLabel }
     static var appSeparator: Color { AppTheme.Palette.separator }
-    static var appSelection: Color { AppTheme.Palette.selection }
 }
 
 // MARK: - Shared view helpers

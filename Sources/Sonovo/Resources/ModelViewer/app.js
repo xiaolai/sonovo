@@ -76,6 +76,7 @@ let disposed = false;
 let themeName = config?.theme === 'light' ? 'light' : 'dark';
 let currentClip = Number.isInteger(config?.clip) ? config.clip : 0;
 let playing = config?.playing !== false;
+let suspended = config?.active === false;
 let wireframe = config?.wireframe === true;
 let showGrid = config?.grid !== false;
 let upAxis = config?.upAxis === 'y' ? 'y' : 'z';
@@ -855,7 +856,7 @@ async function loadModel() {
 }
 
 function render() {
-    if (!renderer || !scene || !camera) return;
+    if (suspended || !renderer || !scene || !camera) return;
     const delta = Math.min(clock?.getDelta() ?? 0, 0.1);
     if (animationMixer && playing) animationMixer.update(delta);
     controls?.update();
@@ -904,8 +905,22 @@ window.sonovoViewer = {
             lastFit = payload.fit;
             frameModel();
         }
+        if (typeof payload.active === 'boolean') {
+            setActive(payload.active);
+        }
     }
 };
+
+function setActive(active) {
+    suspended = !active;
+    if (!renderer) return;
+    if (suspended) {
+        renderer.setAnimationLoop(null);
+    } else {
+        renderer.setAnimationLoop(render);
+        render();
+    }
+}
 
 async function main() {
     if (!config) {
@@ -914,7 +929,9 @@ async function main() {
     if (config.theme) applyTheme(config.theme);
     setupRenderer();
     post('ready');
-    renderer.setAnimationLoop(render);
+    if (!suspended) {
+        renderer.setAnimationLoop(render);
+    }
     await loadModel();
 }
 

@@ -1,10 +1,11 @@
 import AppKit
+import SonovoCore
 import SwiftUI
 
 /// The model viewer page: one read-only document card, a WebKit viewport, and
 /// native controls that never depend on the page rendering its own chrome.
 struct Model3DWorkspaceView: View {
-    @Bindable var state: AppState
+    let project: Project
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("sonovo.model3D.grid") private var grid = true
@@ -12,7 +13,7 @@ struct Model3DWorkspaceView: View {
 
     @State private var showLog = false
 
-    private var workspace: Model3DWorkspace { state.models }
+    private var workspace: Model3DWorkspace { project.models }
 
     var body: some View {
         Group {
@@ -140,6 +141,38 @@ struct Model3DWorkspaceView: View {
         .frame(height: AppTheme.Layout.subtitleHeaderHeight)
     }
 
+    /// Document selection notifies `Project`, which routes indexed files
+    /// through their asset tab and unindexed files through the 3D workspace
+    /// tab. The view never bypasses the project's tab identity.
+    private func selectModel(_ document: Model3DDocument) {
+        workspace.select(document)
+    }
+
+    private func modelTab(
+        for document: Model3DDocument,
+        in project: Project
+    ) -> EditorTab? {
+        let path = MarkdownSecurity.canonical(document.sourceURL).path
+        return project.openTabs.first { tab in
+            guard tab.kind == .model3d, let url = tab.url else {
+                return false
+            }
+            return MarkdownSecurity.canonical(url).path == path
+        }
+    }
+
+    private func closeModel(_ document: Model3DDocument) {
+        // Resolve the owner synchronously. Reading a global active project
+        // inside the task would target whichever project is active then.
+        let project = self.project
+        if let tab = modelTab(for: document, in: project) {
+            Task { await project.closeTab(tab.id) }
+        } else {
+            let models = project.models
+            Task { await models.close(document) }
+        }
+    }
+
     private func stateLabel(_ document: Model3DDocument) -> String {
         switch document.state {
         case .needsConversion: "Needs conversion"
@@ -157,7 +190,7 @@ struct Model3DWorkspaceView: View {
                 Section("Open Models") {
                     ForEach(workspace.documents) { candidate in
                         Button {
-                            workspace.select(candidate)
+                            selectModel(candidate)
                         } label: {
                             Text(candidate.displayName)
                         }
@@ -165,7 +198,11 @@ struct Model3DWorkspaceView: View {
                 }
                 Divider()
             }
-            Button("Open Model…") { workspace.presentOpenPanel() }
+            Button("Open Model…") {
+                // Each opened model notifies the project as it becomes
+                // selected, so every indexed model gets its tab.
+                workspace.presentOpenPanel()
+            }
             Button("Reload") { workspace.reload(document) }
                 .disabled(document.state.isConverting)
             if document.format.canConvertWithBlender {
@@ -184,7 +221,7 @@ struct Model3DWorkspaceView: View {
             }
             Divider()
             Button("Close Model") {
-                Task { await workspace.close(document) }
+                closeModel(document)
             }
         } label: {
             Image(systemName: "cube.transparent")
@@ -255,7 +292,7 @@ struct Model3DWorkspaceView: View {
 
     private func viewport(_ document: Model3DDocument) -> some View {
         ZStack {
-            if document.renderableURL != nil {
+            if document.renderableURL != nil, document.materialsReady {
                 ModelWebView(
                     document: document,
                     theme: colorScheme,

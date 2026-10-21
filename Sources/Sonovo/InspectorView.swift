@@ -29,9 +29,21 @@ struct InspectorView: View {
             case .info:
                 infoContent
             case .history:
-                historyContent
+                if state.liveProject.isDemo {
+                    historyContent
+                } else {
+                    projectUnavailable(
+                        "Review history is not available for folder projects."
+                    )
+                }
             case .notes:
-                notesContent
+                if state.liveProject.isDemo {
+                    notesContent
+                } else {
+                    projectUnavailable(
+                        "Notes are not available for folder projects."
+                    )
+                }
             }
         }
         .background(Color.appText)
@@ -59,7 +71,19 @@ struct InspectorView: View {
             .labelsHidden()
             .frame(width: AppTheme.Size.inspectorTabsWidth)
 
-            if let asset = state.selectedAsset {
+            if !state.liveProject.isDemo {
+                if let asset = state.liveProject.selectedAsset {
+                    Text(asset.name)
+                        .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
+                        .lineLimit(1)
+                    Text(asset.kind.projectGroup.title)
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                } else {
+                    Spacer()
+                }
+            } else if let asset = state.selectedAsset {
                 Text(state.displayName(for: asset))
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
                     .lineLimit(1)
@@ -80,31 +104,67 @@ struct InspectorView: View {
             Label("Approved", systemImage: "checkmark.circle.fill")
                 .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
                 .foregroundStyle(AppTheme.Palette.approved)
+        }
+        reviewButtons(for: asset, fillsWidth: false)
+    }
+
+    /// The approval-state branching and action wiring are shared; only the
+    /// control size and width differ between the header and the panel.
+    @ViewBuilder
+    private func reviewButtons(
+        for asset: ProductionAsset,
+        fillsWidth: Bool
+    ) -> some View {
+        if state.status(for: asset) == .approved {
             Button("Reopen Review") { state.reopen(asset) }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
+                .controlSize(fillsWidth ? .large : .small)
+                .frame(maxWidth: fillsWidth ? .infinity : nil)
         } else {
             Button {
                 state.approve(asset)
             } label: {
                 Label("Approve", systemImage: "checkmark")
+                    .frame(maxWidth: fillsWidth ? .infinity : nil)
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .controlSize(fillsWidth ? .large : .small)
 
             Button {
                 state.requestChange(for: asset)
             } label: {
                 Label("Request Change…", systemImage: "text.bubble")
+                    .frame(maxWidth: fillsWidth ? .infinity : nil)
             }
             .buttonStyle(.bordered)
-            .controlSize(.small)
+            .controlSize(fillsWidth ? .large : .small)
         }
     }
 
     @ViewBuilder
     private var bottomContent: some View {
-        if let asset = state.selectedAsset {
+        if !state.liveProject.isDemo {
+            if let asset = state.liveProject.selectedAsset {
+                switch state.inspectorTab {
+                case .info:
+                    // The bottom panel is short; the project metadata card
+                    // must scroll rather than clip its lower rows.
+                    ScrollView {
+                        projectInfo(for: asset)
+                    }
+                case .history:
+                    projectUnavailable(
+                        "Review history is not available for folder projects."
+                    )
+                case .notes:
+                    projectUnavailable(
+                        "Notes are not available for folder projects."
+                    )
+                }
+            } else {
+                noSelection
+            }
+        } else if let asset = state.selectedAsset {
             switch state.inspectorTab {
             case .info:
                 bottomInfo(asset)
@@ -114,13 +174,17 @@ struct InspectorView: View {
                 bottomNotes
             }
         } else {
-            ContentUnavailableView(
-                "No Selection",
-                systemImage: "sidebar.right",
-                description: Text("Select an asset to inspect it.")
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            noSelection
         }
+    }
+
+    private func projectUnavailable(_ message: String) -> some View {
+        ContentUnavailableView(
+            "No Review Data",
+            systemImage: "tray",
+            description: Text(message)
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func bottomInfo(_ asset: ProductionAsset) -> some View {
@@ -162,71 +226,56 @@ struct InspectorView: View {
                     .tracking(AppTheme.Tracking.normal)
                     .foregroundStyle(.tertiary)
 
-                HStack(spacing: AppTheme.Spacing.s5) {
-                    Text(note.timecode)
-                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Color.accentColor)
-                    Spacer()
-                    Text(note.createdAt)
-                        .font(.system(size: AppTheme.TypeScale.xxs))
-                        .foregroundStyle(.tertiary)
-                }
-
-                Text(note.text)
-                    .font(.system(size: AppTheme.TypeScale.xs))
-                    .lineLimit(4)
-
-                Button("Open Notes") {
-                    state.inspectorTab = .notes
-                }
-                .buttonStyle(.link)
-                .font(.system(size: AppTheme.TypeScale.xs))
+                latestNoteContent(note, style: .bottom)
             }
             .frame(width: AppTheme.Size.bottomNoteWidth, alignment: .leading)
-            .padding(AppTheme.Spacing.sm)
-            .background(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                    .fill(Color.appCard)
-            )
         }
+    }
+
+    /// One rendering of a note for both the bottom info panel and the
+    /// inspector; only the type scale and line limit differ.
+    private func latestNoteContent(
+        _ note: ReviewNote,
+        style: LatestNoteStyle
+    ) -> some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
+            HStack(spacing: AppTheme.Spacing.s5) {
+                Text(note.timecode)
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                Spacer()
+                Text(note.createdAt)
+                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Text(note.text)
+                .font(.system(size: style.fontSize))
+                .lineLimit(style.lineLimit)
+                .fixedSize(horizontal: false, vertical: style.fixedSize)
+
+            Button("Open Notes") {
+                state.inspectorTab = .notes
+            }
+            .buttonStyle(.link)
+            .font(.system(size: AppTheme.TypeScale.xs))
+        }
+        .padding(AppTheme.Spacing.sm)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                .fill(Color.appCard)
+        )
     }
 
     private var bottomHistory: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: AppTheme.Spacing.sm) {
                 ForEach(SampleContent.takes) { take in
-                    VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
-                        HStack(spacing: AppTheme.Spacing.xs) {
-                            Text(take.name)
-                                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
-                            if take.id == "take-03" {
-                                Text("Current")
-                                    .font(.system(size: AppTheme.TypeScale.micro, weight: .medium))
-                                    .padding(.horizontal, AppTheme.Spacing.s5)
-                                    .padding(.vertical, AppTheme.Spacing.hairline)
-                                    .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.tint)))
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                            Spacer()
-                            StatusBadge(status: take.status, compact: true)
-                        }
-
-                        Text(take.detail)
-                            .font(.system(size: AppTheme.TypeScale.xs))
-                            .foregroundStyle(.secondary)
-                        Text(take.createdAt)
-                            .font(.system(size: AppTheme.TypeScale.xxs))
-                            .foregroundStyle(.tertiary)
-
-                        if take.status == .approved {
-                            Button("Compare with Current") {
-                                if state.canUseReviewModes {
-                                    state.editorMode = .compare
-                                }
-                            }
-                            .buttonStyle(.link)
-                            .font(.system(size: AppTheme.TypeScale.xs))
-                        }
+                    TakeContent(
+                        take: take,
+                        canCompare: state.canUseReviewModes
+                    ) {
+                        state.editorMode = .compare
                     }
                     .padding(AppTheme.Spacing.sm)
                     .frame(width: AppTheme.Size.takeCardWidth, alignment: .leading)
@@ -255,88 +304,13 @@ struct InspectorView: View {
                 .padding(AppTheme.Spacing.md)
             }
 
-            HStack(spacing: AppTheme.Spacing.xs) {
-                TextField(
-                    "Add a note at \(TranscriptSegment.timecode(for: state.playhead))…",
-                    text: $state.noteDraft
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: AppTheme.TypeScale.sm))
-                .onSubmit {
-                    state.addNote()
-                }
-
-                Button {
-                    state.addNote()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: AppTheme.TypeScale.title))
-                        .foregroundStyle(
-                            state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? Color.secondary
-                                : Color.accentColor
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Add note")
-                .accessibilityLabel("Add note")
-            }
-            .padding(.horizontal, AppTheme.Spacing.sm)
-            .frame(height: AppTheme.ControlSize.large)
-            .background(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
-                    .fill(Color.appCard)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
-                    .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
-            )
-            .padding(AppTheme.Spacing.sm)
+            NoteComposer(state: state)
+                .padding(AppTheme.Spacing.sm)
         }
     }
 
     private func bottomNoteCard(_ note: ReviewNote) -> some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
-            HStack {
-                Text(note.timecode)
-                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, AppTheme.Spacing.s5)
-                    .padding(.vertical, AppTheme.Spacing.xxs)
-                    .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.soft)))
-                    .foregroundStyle(Color.accentColor)
-                Spacer()
-                Button {
-                    state.toggleNoteResolved(note.id)
-                } label: {
-                    Image(systemName: note.isResolved ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: AppTheme.TypeScale.md))
-                        .foregroundStyle(note.isResolved ? AppTheme.Palette.approved : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .help(note.isResolved ? "Reopen note" : "Resolve note")
-                .accessibilityLabel(note.isResolved ? "Reopen note" : "Resolve note")
-            }
-
-            Text(note.text)
-                .font(.system(size: AppTheme.TypeScale.xs))
-                .lineLimit(3)
-
-            Text("\(note.author) · \(note.createdAt)")
-                .font(.system(size: AppTheme.TypeScale.xxs))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(AppTheme.Spacing.sm)
-        .frame(width: AppTheme.Size.bottomNoteWidth, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                .fill(Color.appCard.opacity(note.isResolved ? AppTheme.Opacity.half : AppTheme.Opacity.full))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
-        )
-        .opacity(note.isResolved ? AppTheme.Opacity.heavy : AppTheme.Opacity.full)
+        NoteCard(state: state, note: note, layout: .bottom)
     }
 
     private var inspectorTabs: some View {
@@ -357,40 +331,111 @@ struct InspectorView: View {
     private var infoContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.s18) {
-                if let asset = state.selectedAsset {
-                    assetHeader(asset)
-
-                    InspectorSection("File") {
-                        ForEach(metadataRows(for: asset)) { item in
-                            MetadataRow(label: item.label, value: item.value)
-                        }
+                if !state.liveProject.isDemo {
+                    if let asset = state.liveProject.selectedAsset {
+                        projectInfo(for: asset)
+                    } else {
+                        noSelection
                     }
-
-                    InspectorSection("Provenance") {
-                        ForEach(provenanceRows(for: asset)) { item in
-                            MetadataRow(label: item.label, value: item.value)
-                        }
-                    }
-
-                    InspectorSection("Review") {
-                        MetadataRow(label: "Status", value: state.status(for: asset).label)
-                        MetadataRow(label: "Open notes", value: "\(state.notes.filter { !$0.isResolved }.count)")
-                        MetadataRow(label: "Approved by", value: state.status(for: asset) == .approved ? "You" : "—")
-                    }
-
-                    latestNote
-
-                    reviewActions(for: asset)
+                } else if let asset = state.selectedAsset {
+                    demoInfo(for: asset)
                 } else {
-                    ContentUnavailableView(
-                        "No Selection",
-                        systemImage: "sidebar.right",
-                        description: Text("Select an asset to inspect it.")
-                    )
-                    .padding(.top, AppTheme.Spacing.s40)
+                    noSelection
                 }
             }
             .padding(AppTheme.Spacing.lg)
+        }
+    }
+
+    @ViewBuilder
+    private func demoInfo(for asset: ProductionAsset) -> some View {
+        assetHeader(asset)
+
+        InspectorSection("File") {
+            ForEach(metadataRows(for: asset)) { item in
+                MetadataRow(label: item.label, value: item.value)
+            }
+        }
+
+        InspectorSection("Provenance") {
+            ForEach(provenanceRows(for: asset)) { item in
+                MetadataRow(label: item.label, value: item.value)
+            }
+        }
+
+        InspectorSection("Review") {
+            MetadataRow(label: "Status", value: state.status(for: asset).label)
+            MetadataRow(label: "Open notes", value: "\(state.notes.filter { !$0.isResolved }.count)")
+            MetadataRow(label: "Approved by", value: state.status(for: asset) == .approved ? "You" : "—")
+        }
+
+        latestNote
+
+        reviewActions(for: asset)
+    }
+
+    @ViewBuilder
+    private func projectInfo(for asset: ProjectAsset) -> some View {
+        projectAssetHeader(asset)
+
+        InspectorSection("File") {
+            MetadataRow(
+                label: "Kind",
+                value: asset.kind.projectGroup.title
+            )
+            MetadataRow(
+                label: "Format",
+                value: asset.fileExtension.uppercased()
+            )
+            MetadataRow(
+                label: "Size",
+                value: ByteCountFormatter.string(
+                    fromByteCount: asset.size,
+                    countStyle: .file
+                )
+            )
+            MetadataRow(
+                label: "Modified",
+                value: asset.modified?.formatted(
+                    date: .abbreviated,
+                    time: .shortened
+                ) ?? "—"
+            )
+            MetadataRow(label: "Path", value: asset.relativePath)
+        }
+    }
+
+    private var noSelection: some View {
+        ContentUnavailableView(
+            "No Selection",
+            systemImage: "sidebar.right",
+            description: Text("Select an asset to inspect it.")
+        )
+        .padding(.top, AppTheme.Spacing.s40)
+    }
+
+    private func projectAssetHeader(_ asset: ProjectAsset) -> some View {
+        HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
+            ZStack {
+                RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
+                    .fill(Color.accentColor.opacity(AppTheme.Opacity.tint))
+                Image(systemName: asset.kind.icon)
+                    .font(.system(size: AppTheme.TypeScale.title, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: AppTheme.Size.avatar, height: AppTheme.Size.avatar)
+
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
+                Text(asset.name)
+                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
+                    .lineLimit(2)
+
+                Text(asset.kind.projectGroup.title)
+                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: AppTheme.Spacing.zero)
         }
     }
 
@@ -427,33 +472,7 @@ struct InspectorView: View {
         Group {
             if let note = state.notes.first(where: { !$0.isResolved }) {
                 InspectorSection("Latest Note") {
-                    VStack(alignment: .leading, spacing: AppTheme.Spacing.s5) {
-                        HStack(spacing: AppTheme.Spacing.s5) {
-                            Text(note.timecode)
-                                .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Color.accentColor)
-                            Spacer()
-                            Text(note.createdAt)
-                                .font(.system(size: AppTheme.TypeScale.xxs))
-                                .foregroundStyle(.tertiary)
-                        }
-
-                        Text(note.text)
-                            .font(.system(size: AppTheme.TypeScale.sm))
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Button("Open Notes") {
-                            state.inspectorTab = .notes
-                        }
-                        .buttonStyle(.link)
-                        .font(.system(size: AppTheme.TypeScale.xs))
-                    }
-                    .padding(AppTheme.Spacing.sm)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                            .fill(Color.appCard)
-                    )
+                    latestNoteContent(note, style: .inspector)
                 }
             }
         }
@@ -462,7 +481,6 @@ struct InspectorView: View {
     @ViewBuilder
     private func reviewActions(for asset: ProductionAsset) -> some View {
         VStack(spacing: AppTheme.Spacing.sm) {
-
             if state.status(for: asset) == .approved {
                 HStack(spacing: AppTheme.Spacing.s6) {
                     Image(systemName: "checkmark.circle.fill")
@@ -471,34 +489,8 @@ struct InspectorView: View {
                         .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
                     Spacer()
                 }
-
-                Button {
-                    state.reopen(asset)
-                } label: {
-                    Text("Reopen Review")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-            } else {
-                Button {
-                    state.approve(asset)
-                } label: {
-                    Label("Approve", systemImage: "checkmark")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button {
-                    state.requestChange(for: asset)
-                } label: {
-                    Label("Request Change…", systemImage: "text.bubble")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
             }
+            reviewButtons(for: asset, fillsWidth: true)
         }
     }
 
@@ -531,40 +523,11 @@ struct InspectorView: View {
                         }
                         .frame(width: AppTheme.Size.timelineDotColumnWidth)
 
-                        VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
-                            HStack(spacing: AppTheme.Spacing.xs) {
-                                Text(take.name)
-                                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
-                                if take.id == "take-03" {
-                                    Text("Current")
-                                        .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
-                                        .padding(.horizontal, AppTheme.Spacing.s5)
-                                        .padding(.vertical, AppTheme.Spacing.hairline)
-                                        .background(Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.tint)))
-                                        .foregroundStyle(Color.accentColor)
-                                }
-                                Spacer()
-                                StatusBadge(status: take.status, compact: true)
-                            }
-
-                            Text(take.detail)
-                                .font(.system(size: AppTheme.TypeScale.xs))
-                                .foregroundStyle(.secondary)
-
-                            Text(take.createdAt)
-                                .font(.system(size: AppTheme.TypeScale.xxs))
-                                .foregroundStyle(.tertiary)
-
-                            if take.status == .approved {
-                                Button("Compare with Current") {
-                                    if state.canUseReviewModes {
-                                        state.editorMode = .compare
-                                    }
-                                }
-                                .buttonStyle(.link)
-                                .font(.system(size: AppTheme.TypeScale.xs))
-                                .padding(.top, AppTheme.Spacing.xxs)
-                            }
+                        TakeContent(
+                            take: take,
+                            canCompare: state.canUseReviewModes
+                        ) {
+                            state.editorMode = .compare
                         }
                         .padding(.bottom, AppTheme.Spacing.lg)
                     }
@@ -596,48 +559,9 @@ struct InspectorView: View {
                 .padding(AppTheme.Spacing.md)
             }
 
-            noteComposer
+            NoteComposer(state: state)
                 .padding(AppTheme.Spacing.sm)
         }
-    }
-
-    private var noteComposer: some View {
-        let timecode = TranscriptSegment.timecode(for: state.playhead)
-
-        return HStack(spacing: AppTheme.Spacing.xs) {
-            TextField("Add a note at \(timecode)…", text: $state.noteDraft)
-                .textFieldStyle(.plain)
-                .font(.system(size: AppTheme.TypeScale.sm))
-                .onSubmit {
-                    state.addNote()
-                }
-
-            Button {
-                state.addNote()
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: AppTheme.TypeScale.title))
-                    .foregroundStyle(
-                        state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            ? Color.secondary
-                            : Color.accentColor
-                    )
-            }
-            .buttonStyle(.plain)
-            .disabled(state.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .help("Add note")
-            .accessibilityLabel("Add note")
-        }
-        .padding(.horizontal, AppTheme.Spacing.sm)
-        .frame(height: AppTheme.ControlSize.large)
-        .background(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
-                .fill(Color.appCard)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
-                .strokeBorder(Color.appSeparator, lineWidth: AppTheme.BorderWidth.hairline)
-        )
     }
 
     private func metadataRows(for asset: ProductionAsset) -> [MetadataItem] {
@@ -728,6 +652,8 @@ struct InspectorView: View {
                 MetadataItem(label: "Codec", value: "H.264"),
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
+        case .document, .image, .archive, .other:
+            []
         }
     }
 
@@ -801,6 +727,8 @@ struct InspectorView: View {
                 MetadataItem(label: "Preset", value: "1080p · H.264"),
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
+        case .document, .image, .archive, .other:
+            []
         }
     }
 
@@ -926,12 +854,77 @@ struct InspectorView: View {
     }
 }
 
-private struct NoteCard: View {
-    let state: AppState
-    let note: ReviewNote
+private struct NoteComposer: View {
+    @Bindable var state: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.s6) {
+        let timecode = TranscriptSegment.timecode(for: state.playhead)
+        let isEmpty = state.noteDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        HStack(spacing: AppTheme.Spacing.xs) {
+            TextField("Add a note at \(timecode)…", text: $state.noteDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: AppTheme.TypeScale.sm))
+                .onSubmit {
+                    state.addNote()
+                }
+
+            Button {
+                state.addNote()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: AppTheme.TypeScale.title))
+                    .foregroundStyle(
+                        isEmpty ? Color.secondary : Color.accentColor
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(isEmpty)
+            .help("Add note")
+            .accessibilityLabel("Add note")
+        }
+        .padding(.horizontal, AppTheme.Spacing.sm)
+        .frame(height: AppTheme.ControlSize.large)
+        .background(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.control,
+                style: .continuous
+            )
+            .fill(Color.appCard)
+        )
+        .overlay(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.control,
+                style: .continuous
+            )
+            .strokeBorder(
+                Color.appSeparator,
+                lineWidth: AppTheme.BorderWidth.hairline
+            )
+        )
+    }
+}
+
+private struct NoteCard: View {
+    enum Layout {
+        case sidebar
+        case bottom
+    }
+
+    let state: AppState
+    let note: ReviewNote
+    var layout: Layout = .sidebar
+
+    private var compact: Bool { layout == .bottom }
+
+    var body: some View {
+        VStack(
+            alignment: .leading,
+            spacing: compact
+                ? AppTheme.Spacing.s5
+                : AppTheme.Spacing.s6
+        ) {
             HStack(spacing: AppTheme.Spacing.xs) {
                 Text(note.timecode)
                     .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium, design: .monospaced))
@@ -951,11 +944,21 @@ private struct NoteCard: View {
                 }
                 .buttonStyle(.plain)
                 .help(note.isResolved ? "Reopen note" : "Resolve note")
+                .accessibilityLabel(note.isResolved ? "Reopen note" : "Resolve note")
             }
 
             Text(note.text)
-                .font(.system(size: AppTheme.TypeScale.sm))
-                .foregroundStyle(note.isResolved ? Color.secondary : Color.primary)
+                .font(
+                    .system(
+                        size: compact
+                            ? AppTheme.TypeScale.xs
+                            : AppTheme.TypeScale.sm
+                    )
+                )
+                .foregroundStyle(
+                    note.isResolved ? Color.secondary : Color.primary
+                )
+                .lineLimit(compact ? 3 : nil)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("\(note.author) · \(note.createdAt)")
@@ -963,6 +966,10 @@ private struct NoteCard: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(AppTheme.Spacing.sm)
+        .frame(
+            width: compact ? AppTheme.Size.bottomNoteWidth : nil,
+            alignment: .leading
+        )
         .background(
             RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
                 .fill(Color.appCard.opacity(note.isResolved ? AppTheme.Opacity.half : AppTheme.Opacity.full))
@@ -973,4 +980,79 @@ private struct NoteCard: View {
         )
         .opacity(note.isResolved ? AppTheme.Opacity.heavy : AppTheme.Opacity.full)
     }
+}
+
+/// One take's identity, status, and compare action. The bottom strip and the
+/// right-hand timeline supply different cards around this shared content.
+private struct TakeContent: View {
+    let take: TakeVersion
+    let canCompare: Bool
+    let onCompare: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
+            HStack(spacing: AppTheme.Spacing.xs) {
+                Text(take.name)
+                    .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
+                if take.id == SampleContent.currentTakeID {
+                    CurrentTakeBadge()
+                }
+                Spacer()
+                StatusBadge(status: take.status, compact: true)
+            }
+
+            Text(take.detail)
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.secondary)
+
+            Text(take.createdAt)
+                .font(.system(size: AppTheme.TypeScale.xxs))
+                .foregroundStyle(.tertiary)
+
+            if take.status == .approved {
+                Button("Compare with Current") {
+                    if canCompare {
+                        onCompare()
+                    }
+                }
+                .buttonStyle(.link)
+                .disabled(!canCompare)
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .padding(.top, AppTheme.Spacing.xxs)
+            }
+        }
+    }
+}
+
+private struct CurrentTakeBadge: View {
+    var body: some View {
+        Text("Current")
+            .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
+            .padding(.horizontal, AppTheme.Spacing.s5)
+            .padding(.vertical, AppTheme.Spacing.hairline)
+            .background(
+                Capsule().fill(Color.accentColor.opacity(AppTheme.Opacity.tint))
+            )
+            .foregroundStyle(Color.accentColor)
+    }
+}
+
+/// Type scale and clipping differ between the short bottom panel and the
+/// taller inspector; the note content itself is shared.
+private struct LatestNoteStyle {
+    let fontSize: CGFloat
+    let lineLimit: Int?
+    let fixedSize: Bool
+
+    static let bottom = LatestNoteStyle(
+        fontSize: AppTheme.TypeScale.xs,
+        lineLimit: 4,
+        fixedSize: false
+    )
+
+    static let inspector = LatestNoteStyle(
+        fontSize: AppTheme.TypeScale.sm,
+        lineLimit: nil,
+        fixedSize: true
+    )
 }

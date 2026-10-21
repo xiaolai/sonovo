@@ -4,13 +4,6 @@ import Observation
 import SonovoCore
 import UniformTypeIdentifiers
 
-/// The active subtitle workspace, reachable by the app delegate for quit
-/// flushing.
-@MainActor
-enum SubtitleWorkspaceRegistry {
-    static weak var active: SubtitleWorkspace?
-}
-
 /// Whether the video surface is shown at all. Collapsed is the default: the
 /// cue text is the work, and the player remains available in the floating bar.
 enum SubtitlePreviewMode: String, Sendable, CaseIterable {
@@ -51,15 +44,27 @@ final class SubtitleWorkspace {
     }
 
     var lastError: String?
+    /// Called after a document is removed so the owning project can remove
+    /// the matching tab.
+    var onDocumentClosed: ((URL) -> Void)?
+    /// A selection change made inside the workspace. The owning project
+    /// keeps its tab, breadcrumb, and persisted selection on the same file.
+    var onDocumentActivated: ((URL) -> Void)?
     /// The player serves the selected document; media is attached per
     /// document, so switching documents reloads it.
     let player = SubtitleMediaPlayer()
 
+    /// A hidden project must not keep playing its media. Position and item
+    /// remain; only the transport stops.
+    func pauseForDeactivation() {
+        player.pause()
+    }
+
     private var watchers: [UUID: MarkdownFileWatcher] = [:]
+    private var mediaOpenTasks: [UUID: Task<Void, Never>] = [:]
     private var sourceEditors: [UUID: SubtitleSourceEditorController] = [:]
-    private var autosaveTask: Task<Void, Never>?
-    private var autosaveRetryAfter: [UUID: Date] = [:]
-    private var autosaveFailures: [UUID: Int] = [:]
+    @ObservationIgnored
+    private var autosave: AutosaveDriver<SubtitleDocument>!
 
     var selectedDocument: SubtitleDocument? {
         guard let selectedDocumentID else { return nil }
@@ -70,26 +75,38 @@ final class SubtitleWorkspace {
         documents.contains(where: \.isDirty)
     }
 
-    init(store: SubtitleFileStore = SubtitleFileStore()) {
+    init(
+        store: SubtitleFileStore = SubtitleFileStore(),
+        readsDemoEnvironment: Bool = true
+    ) {
         self.store = store
         self.previewMode = SubtitlePreviewMode.stored(
             UserDefaults.standard.string(forKey: Self.previewModeKey)
         )
-        SubtitleWorkspaceRegistry.active = self
+        autosave = AutosaveDriver(
+            documents: { [weak self] in self?.documents ?? [] },
+            reportsError: { [weak self] message in
+                self?.lastError = message
+            }
+        )
         startAutosaveLoop()
 
         let environment = ProcessInfo.processInfo.environment
-        if let rawPreview = environment["SONOVO_DEMO_SUBTITLE_PREVIEW"] {
+        if readsDemoEnvironment,
+           let rawPreview = environment["SONOVO_DEMO_SUBTITLE_PREVIEW"] {
             previewMode = SubtitlePreviewMode.stored(rawPreview)
         }
-        if let path = environment["SONOVO_DEMO_SUBTITLE"] {
+        if readsDemoEnvironment,
+           let path = environment["SONOVO_DEMO_SUBTITLE"] {
             _ = open(url: URL(fileURLWithPath: path))
         }
-        if environment["SONOVO_DEMO_SUBTITLE_MODE"] == "source",
+        if readsDemoEnvironment,
+           environment["SONOVO_DEMO_SUBTITLE_MODE"] == "source",
            let document = selectedDocument {
             document.mode = .source
         }
-        if let path = environment["SONOVO_DEMO_MEDIA"],
+        if readsDemoEnvironment,
+           let path = environment["SONOVO_DEMO_MEDIA"],
            let document = selectedDocument {
             attachMedia(URL(fileURLWithPath: path), to: document)
         }
@@ -124,20 +141,29 @@ final class SubtitleWorkspace {
         selectedDocumentID = document.id
         reloadNotice = nil
         syncPlayer()
+        onDocumentActivated?(document.fileURL)
     }
 
-    func close(_ document: SubtitleDocument) async {
+    /// Returns true only when the document was actually closed.
+    @discardableResult
+    func close(_ document: SubtitleDocument) async -> Bool {
         let outcome = await document.flushForClose()
         switch outcome {
         case .closed:
             remove(document)
+            return true
         case let .needsDecision(blocker):
-            switch blocker {
-            case let .saveFailed(message):
-                lastError = "Save failed: \(message)"
-            case .untitled:
-                lastError = "The subtitle file has no path."
-            }
+            report(blocker)
+            return false
+        }
+    }
+
+    private func report(_ blocker: CloseBlocker) {
+        switch blocker {
+        case let .saveFailed(message):
+            lastError = "Save failed: \(message)"
+        case .untitled:
+            lastError = "The subtitle file has no path."
         }
     }
 
@@ -184,15 +210,16 @@ final class SubtitleWorkspace {
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
         sourceEditors.removeValue(forKey: id)
+        mediaOpenTasks.removeValue(forKey: id)?.cancel()
         mediaURLs.removeValue(forKey: id)
-        autosaveRetryAfter.removeValue(forKey: id)
-        autosaveFailures.removeValue(forKey: id)
+        autosave.forget(id)
         documents.removeAll { $0.id == id }
 
         if selectedDocumentID == id {
             selectedDocumentID = documents.first?.id
             syncPlayer()
         }
+        onDocumentClosed?(document.fileURL)
     }
 
     // MARK: - Saving
@@ -200,8 +227,7 @@ final class SubtitleWorkspace {
     func save(_ document: SubtitleDocument) async {
         do {
             try await document.save()
-            autosaveRetryAfter.removeValue(forKey: document.id)
-            autosaveFailures.removeValue(forKey: document.id)
+            autosave.didSave(document.id)
             lastError = nil
         } catch {
             lastError = "Save failed: \(error)"
@@ -219,12 +245,7 @@ final class SubtitleWorkspace {
                 let outcome = await document.flushForClose()
                 if case let .needsDecision(blocker) = outcome {
                     selectedDocumentID = document.id
-                    switch blocker {
-                    case let .saveFailed(message):
-                        lastError = "Save failed: \(message)"
-                    case .untitled:
-                        lastError = "The subtitle file has no path."
-                    }
+                    report(blocker)
                     return false
                 }
             }
@@ -250,11 +271,12 @@ final class SubtitleWorkspace {
         let target = MarkdownSecurity.canonical(url)
         mediaURLs[document.id] = target
         if selectedDocumentID == document.id {
-            Task { await player.open(url: target) }
+            openMedia(target, for: document)
         }
     }
 
     func detachMedia(for document: SubtitleDocument) {
+        mediaOpenTasks.removeValue(forKey: document.id)?.cancel()
         mediaURLs.removeValue(forKey: document.id)
         if selectedDocumentID == document.id {
             player.close()
@@ -262,6 +284,13 @@ final class SubtitleWorkspace {
     }
 
     private func syncPlayer() {
+        // A queued open for another document must not run after the user
+        // has already selected a document without media.
+        for (id, task) in mediaOpenTasks
+        where id != selectedDocument?.id {
+            task.cancel()
+            mediaOpenTasks[id] = nil
+        }
         guard let document = selectedDocument,
               let url = mediaURLs[document.id] else {
             if player.url != nil {
@@ -270,7 +299,21 @@ final class SubtitleWorkspace {
             return
         }
         if player.url != url {
-            Task { await player.open(url: url) }
+            openMedia(url, for: document)
+        }
+    }
+
+    private func openMedia(_ url: URL, for document: SubtitleDocument) {
+        mediaOpenTasks[document.id]?.cancel()
+        mediaOpenTasks[document.id] = Task { @MainActor [weak self, weak document] in
+            guard let self,
+                  let document,
+                  !Task.isCancelled,
+                  self.selectedDocumentID == document.id,
+                  self.mediaURLs[document.id] == url else {
+                return
+            }
+            await self.player.open(url: url)
         }
     }
 
@@ -298,7 +341,12 @@ final class SubtitleWorkspace {
                 let change = try await document.checkExternalChange()
                 switch change {
                 case .adopted:
-                    reloadNotice = "Reloaded changes written by another app."
+                    // The notice is displayed above the selected document;
+                    // a background file's reload must not appear there.
+                    if selectedDocumentID == id {
+                        reloadNotice =
+                            "Reloaded changes written by another app."
+                    }
                 case .deleted:
                     lastError = "The file was deleted on disk: "
                         + document.fileURL.lastPathComponent
@@ -356,54 +404,7 @@ final class SubtitleWorkspace {
     // MARK: - Autosave
 
     private func startAutosaveLoop() {
-        autosaveTask?.cancel()
-        autosaveTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard let self else { return }
-                let now = Date()
-                let due = self.documents.filter {
-                    if let retry = self.autosaveRetryAfter[$0.id],
-                       retry > now {
-                        return false
-                    }
-                    guard let delay = $0.autosaveDelay(now: now) else {
-                        return false
-                    }
-                    return delay <= 0
-                }
-                for document in due {
-                    // A conflict must never be overwritten by autosave.
-                    guard document.conflict == nil else { continue }
-                    guard self.documents.contains(where: {
-                        $0.id == document.id
-                    }) else {
-                        continue
-                    }
-                    do {
-                        try await document.save()
-                        self.autosaveRetryAfter.removeValue(
-                            forKey: document.id
-                        )
-                        self.autosaveFailures.removeValue(forKey: document.id)
-                    } catch let error as SubtitleDocumentError
-                        where error == .closed {
-                        continue
-                    } catch {
-                        let failures =
-                            (self.autosaveFailures[document.id] ?? 0) + 1
-                        self.autosaveFailures[document.id] = failures
-                        let delay = min(
-                            30.0,
-                            pow(2.0, Double(min(failures, 5)))
-                        )
-                        self.autosaveRetryAfter[document.id] = Date()
-                            .addingTimeInterval(delay)
-                        self.lastError = "Autosave failed: \(error)"
-                    }
-                }
-            }
-        }
+        autosave.start()
     }
 
     // MARK: - Utilities

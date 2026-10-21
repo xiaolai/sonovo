@@ -1,14 +1,15 @@
 import SwiftUI
 
 struct EditorTabBar: View {
-    @Bindable var state: AppState
+    let state: AppState
+    let project: Project
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.zero) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: AppTheme.Spacing.xxs) {
-                    ForEach(state.openTabs) { tab in
-                        EditorTabButton(state: state, tab: tab)
+                    ForEach(project.openTabs) { tab in
+                        EditorTabButton(project: project, tab: tab)
                     }
                 }
                 .padding(.horizontal, AppTheme.Spacing.sm)
@@ -18,20 +19,32 @@ struct EditorTabBar: View {
             Spacer(minLength: AppTheme.Spacing.zero)
 
             Menu {
-                ForEach(state.production.stages) { stage in
-                    Section(stage.title) {
-                        ForEach(stage.assets) { asset in
-                            Button(asset.name) {
-                                state.openAsset(asset.id)
+                if project.isDemo {
+                    ForEach(state.production.stages) { stage in
+                        Section(stage.title) {
+                            ForEach(stage.assets) { asset in
+                                Button(asset.name) {
+                                    state.openAsset(asset.id)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    ForEach(project.filteredGroups) { group in
+                        Section(group.title) {
+                            ForEach(group.assets) { asset in
+                                Button(asset.name) {
+                                    project.openAsset(asset)
+                                }
                             }
                         }
                     }
                 }
                 Divider()
                 Button("Close All Tabs") {
-                    state.closeAllTabs()
+                    Task { await project.closeAllTabs() }
                 }
-                .disabled(state.openTabs.isEmpty)
+                .disabled(project.openTabs.isEmpty)
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
@@ -49,26 +62,26 @@ struct EditorTabBar: View {
 }
 
 private struct EditorTabButton: View {
-    @Bindable var state: AppState
+    let project: Project
     let tab: EditorTab
 
     @State private var isHovering = false
 
     private var isSelected: Bool {
-        state.selectedTabID == tab.id
+        project.selectedTabID == tab.id
     }
 
     var body: some View {
         ZStack(alignment: .trailing) {
             Button {
-                state.selectTab(tab.id)
+                project.selectTab(tab.id)
             } label: {
                 HStack(spacing: AppTheme.Spacing.s5) {
                     Image(systemName: tab.icon)
                         .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
 
-                    Text(state.displayName(for: tab))
+                    Text(project.displayName(for: tab))
                         .font(.system(size: AppTheme.TypeScale.sm, weight: isSelected ? .medium : .regular))
                         .lineLimit(1)
                 }
@@ -94,7 +107,7 @@ private struct EditorTabButton: View {
 
             if isHovering || isSelected {
                 Button {
-                    state.closeTab(tab.id)
+                    Task { await project.closeTab(tab.id) }
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: AppTheme.TypeScale.micro, weight: .semibold))

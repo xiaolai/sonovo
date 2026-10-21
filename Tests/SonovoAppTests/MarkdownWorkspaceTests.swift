@@ -43,6 +43,30 @@ final class MarkdownWorkspaceTests: XCTestCase {
         XCTAssertTrue(document.isDirty)
     }
 
+    func testOpeningAnAlreadyOpenDocumentActivatesItsTab() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("first.md")
+        let second = directory.appendingPathComponent("second.md")
+        try Data("one".utf8).write(to: first)
+        try Data("two".utf8).write(to: second)
+
+        let workspace = MarkdownWorkspace()
+        workspace.open(url: first)
+        workspace.open(url: second)
+        var activated: [String] = []
+        workspace.onDocumentActivated = { url in
+            activated.append(url?.lastPathComponent ?? "untitled")
+        }
+
+        workspace.open(url: first)
+        XCTAssertEqual(activated, ["first.md"])
+        XCTAssertEqual(
+            workspace.selectedDocument?.fileURL,
+            first.resolvingSymlinksInPath()
+        )
+    }
+
     func testSaveAndClose() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

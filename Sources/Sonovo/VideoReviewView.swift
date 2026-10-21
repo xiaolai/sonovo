@@ -2,9 +2,14 @@ import SwiftUI
 
 struct VideoReviewView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     var body: some View {
-        if let asset = state.selectedAsset {
+        if let asset = selectedAsset {
             content(asset)
         } else {
             EmptyEditorView()
@@ -238,6 +243,11 @@ struct VideoStageView: View {
 
 struct VideoCompareView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     var body: some View {
         VStack(spacing: AppTheme.Spacing.md) {
@@ -255,7 +265,7 @@ struct VideoCompareView: View {
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 Text("Compare Takes")
                     .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
-                Text("Take 02 (approved) against \(state.selectedAsset?.name ?? "the current take")")
+                Text("Take 02 (approved) against \(selectedAsset?.name ?? "the current take")")
                     .font(.system(size: AppTheme.TypeScale.xs))
                     .foregroundStyle(.secondary)
             }
@@ -280,67 +290,7 @@ struct VideoCompareView: View {
             .aspectRatio(AppTheme.Size.stageAspectWidth / AppTheme.Size.stageAspectHeight, contentMode: .fit)
             .overlay {
                 GeometryReader { geometry in
-                    let size = geometry.size
-                    let splitX = size.width * state.compareSplit
-
-                    ZStack {
-                        CoastalSceneView(palette: .dusk)
-
-                        CoastalSceneView(palette: .dawn)
-                            .mask(alignment: .leading) {
-                                Rectangle()
-                                    .frame(width: splitX)
-                            }
-
-                        Rectangle()
-                            .fill(AppTheme.Palette.white.opacity(AppTheme.Opacity.dark))
-                            .frame(width: AppTheme.BorderWidth.medium)
-                            .position(x: splitX, y: size.height / 2)
-
-                        ZStack {
-                            Circle()
-                                .fill(AppTheme.Surface.mediaOverlay)
-                                .frame(width: AppTheme.Size.compareHandle, height: AppTheme.Size.compareHandle)
-                                .overlay(Circle().strokeBorder(AppTheme.Palette.white.opacity(AppTheme.Opacity.secondary), lineWidth: AppTheme.BorderWidth.hairline))
-                            HStack(spacing: AppTheme.Spacing.xxs) {
-                                Image(systemName: "chevron.left")
-                                Image(systemName: "chevron.right")
-                            }
-                            .font(.system(size: AppTheme.TypeScale.micro, weight: .bold))
-                            .foregroundStyle(AppTheme.Palette.white)
-                        }
-                        .position(x: splitX, y: size.height / 2)
-
-                        VStack {
-                            HStack {
-                                compareLabel("A · TAKE 02", color: AppTheme.Palette.approved)
-                                Spacer()
-                                compareLabel("B · TAKE 03", color: AppTheme.Palette.needsReview)
-                            }
-                            Spacer()
-                            HStack {
-                                Text("\(TranscriptSegment.timecode(for: state.playhead)) / \(TranscriptSegment.timecode(for: state.duration))")
-                                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
-                                    .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.near))
-                                Spacer()
-                                Text("Drag to wipe")
-                                    .font(.system(size: AppTheme.TypeScale.xxs))
-                                    .foregroundStyle(AppTheme.Palette.white.opacity(AppTheme.Opacity.heavy))
-                            }
-                        }
-                        .padding(AppTheme.Spacing.md)
-                    }
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: AppTheme.Spacing.zero)
-                            .onChanged { value in
-                                let fraction = value.location.x / max(size.width, AppTheme.Spacing.hairline)
-                                state.compareSplit = min(
-                                    max(fraction, AppTheme.Layout.compareMinSplit),
-                                    AppTheme.Layout.compareMaxSplit
-                                )
-                            }
-                    )
+                    WipeStageContent(state: state, size: geometry.size)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous))
@@ -378,9 +328,9 @@ struct VideoCompareView: View {
 
             summaryCard(
                 letter: "B",
-                name: state.selectedAsset?.name ?? "take-03.mp4",
+                name: selectedAsset?.name ?? "take-03.mp4",
                 detail: "00:12.4 · Tighter pauses",
-                status: state.selectedAsset.map { state.status(for: $0) } ?? .needsReview,
+                status: selectedAsset.map { state.status(for: $0) } ?? .needsReview,
                 tint: AppTheme.Palette.needsReview
             )
 
@@ -426,5 +376,127 @@ struct VideoCompareView: View {
         .padding(AppTheme.Spacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .appCardStyle()
+    }
+}
+
+/// The wipe comparison surface: two scenes, the split line and handle, the
+/// labels, and the drag that moves the split.
+private struct WipeStageContent: View {
+    let state: AppState
+    let size: CGSize
+
+    private var splitX: CGFloat {
+        size.width * state.compareSplit
+    }
+
+    var body: some View {
+        ZStack {
+            CoastalSceneView(palette: .dusk)
+
+            CoastalSceneView(palette: .dawn)
+                .mask(alignment: .leading) {
+                    Rectangle()
+                        .frame(width: splitX)
+                }
+
+            Rectangle()
+                .fill(AppTheme.Palette.white.opacity(AppTheme.Opacity.dark))
+                .frame(width: AppTheme.BorderWidth.medium)
+                .position(x: splitX, y: size.height / 2)
+
+            handle
+            labels
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: AppTheme.Spacing.zero)
+                .onChanged { value in
+                    let fraction = value.location.x
+                        / max(size.width, AppTheme.Spacing.hairline)
+                    state.compareSplit = min(
+                        max(fraction, AppTheme.Layout.compareMinSplit),
+                        AppTheme.Layout.compareMaxSplit
+                    )
+                }
+        )
+    }
+
+    private var handle: some View {
+        ZStack {
+            Circle()
+                .fill(AppTheme.Surface.mediaOverlay)
+                .frame(
+                    width: AppTheme.Size.compareHandle,
+                    height: AppTheme.Size.compareHandle
+                )
+                .overlay(
+                    Circle().strokeBorder(
+                        AppTheme.Palette.white.opacity(
+                            AppTheme.Opacity.secondary
+                        ),
+                        lineWidth: AppTheme.BorderWidth.hairline
+                    )
+                )
+            HStack(spacing: AppTheme.Spacing.xxs) {
+                Image(systemName: "chevron.left")
+                Image(systemName: "chevron.right")
+            }
+            .font(.system(size: AppTheme.TypeScale.micro, weight: .bold))
+            .foregroundStyle(AppTheme.Palette.white)
+        }
+        .position(x: splitX, y: size.height / 2)
+    }
+
+    private var labels: some View {
+        VStack {
+            HStack {
+                compareLabel("A · TAKE 02", color: AppTheme.Palette.approved)
+                Spacer()
+                compareLabel("B · TAKE 03", color: AppTheme.Palette.needsReview)
+            }
+            Spacer()
+            HStack {
+                Text(
+                    "\(TranscriptSegment.timecode(for: state.playhead))"
+                        + " / \(TranscriptSegment.timecode(for: state.duration))"
+                )
+                .font(
+                    .system(
+                        size: AppTheme.TypeScale.xxs,
+                        design: .monospaced
+                    )
+                )
+                .foregroundStyle(
+                    AppTheme.Palette.white.opacity(AppTheme.Opacity.near)
+                )
+                Spacer()
+                Text("Drag to wipe")
+                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .foregroundStyle(
+                        AppTheme.Palette.white.opacity(
+                            AppTheme.Opacity.heavy
+                        )
+                    )
+            }
+        }
+        .padding(AppTheme.Spacing.md)
+    }
+
+    private func compareLabel(_ text: String, color: Color) -> some View {
+        HStack(spacing: AppTheme.Spacing.s5) {
+            Circle()
+                .fill(color)
+                .frame(
+                    width: AppTheme.IconSize.dotSmall,
+                    height: AppTheme.IconSize.dotSmall
+                )
+            Text(text)
+                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
+                .tracking(AppTheme.Tracking.wide)
+        }
+        .foregroundStyle(AppTheme.Palette.white)
+        .padding(.horizontal, AppTheme.Spacing.sm)
+        .padding(.vertical, AppTheme.Spacing.xs)
+        .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
     }
 }

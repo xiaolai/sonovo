@@ -66,7 +66,7 @@ final class BlenderConverterTests: XCTestCase {
             #!/bin/sh
             printf '%s\\n' "$@" > "\(argumentsDump.path)"
             env > "\(environmentDump.path)"
-            printf 'glTF\\002\\000\\000\\000\\014\\000\\000\\000' > "$SONOVO_BLEND_OUTPUT"
+            printf 'glTF\\002\\000\\000\\000\\060\\000\\000\\000\\034\\000\\000\\000JSON{"asset":{"version":"2.0"}} ' > "$SONOVO_BLEND_OUTPUT"
             echo "Blender 5.2.2 LTS"
             echo "SONOVO_EXPORT_OK"
             """
@@ -118,7 +118,7 @@ final class BlenderConverterTests: XCTestCase {
         let executable = try makeExecutable(
             script: """
             #!/bin/sh
-            printf 'glTF\\002\\000\\000\\000\\014\\000\\000\\000' > "$SONOVO_BLEND_OUTPUT"
+            printf 'glTF\\002\\000\\000\\000\\060\\000\\000\\000\\034\\000\\000\\000JSON{"asset":{"version":"2.0"}} ' > "$SONOVO_BLEND_OUTPUT"
             echo "Blender 5.2.2 LTS"
             i=0
             while [ "$i" -lt 400 ]; do
@@ -165,7 +165,7 @@ final class BlenderConverterTests: XCTestCase {
         let executable = try makeExecutable(
             script: """
             #!/bin/sh
-            printf 'glTF\\002\\000\\000\\000\\014\\000\\000\\000' > "$SONOVO_BLEND_OUTPUT"
+            printf 'glTF\\002\\000\\000\\000\\060\\000\\000\\000\\034\\000\\000\\000JSON{"asset":{"version":"2.0"}} ' > "$SONOVO_BLEND_OUTPUT"
             exit 0
             """
         )
@@ -183,6 +183,75 @@ final class BlenderConverterTests: XCTestCase {
             }
         }
         XCTAssertTrue(try conversionDirectoryNames().subtracting(before).isEmpty)
+    }
+
+    func testHeaderOnlyGLBIsRejected() async throws {
+        let executable = try makeExecutable(
+            script: """
+            #!/bin/sh
+            printf 'glTF\\002\\000\\000\\000\\014\\000\\000\\000' > "$SONOVO_BLEND_OUTPUT"
+            echo "SONOVO_EXPORT_OK"
+            exit 0
+            """
+        )
+        let script = try makeReadableFile(name: "convert.py", text: "pass")
+        let blend = try makeReadableFile(name: "scene.blend", text: "BLENDER")
+        let converter = makeConverter(executable: executable, script: script)
+
+        do {
+            _ = try await converter.convert(source: blend)
+            XCTFail("Expected the conversion to fail")
+        } catch let error as BlenderConversionError {
+            guard case .invalidOutput = error else {
+                return XCTFail("Expected invalid output, got \(error)")
+            }
+        }
+    }
+
+    func testMalformedGLBJSONIsRejected() async throws {
+        let executable = try makeExecutable(
+            script: """
+            #!/bin/sh
+            printf 'glTF\\002\\000\\000\\000\\030\\000\\000\\000\\004\\000\\000\\000JSON{   ' > "$SONOVO_BLEND_OUTPUT"
+            echo "SONOVO_EXPORT_OK"
+            exit 0
+            """
+        )
+        let script = try makeReadableFile(name: "convert.py", text: "pass")
+        let blend = try makeReadableFile(name: "scene.blend", text: "BLENDER")
+        let converter = makeConverter(executable: executable, script: script)
+
+        do {
+            _ = try await converter.convert(source: blend)
+            XCTFail("Expected the conversion to fail")
+        } catch let error as BlenderConversionError {
+            guard case .invalidOutput = error else {
+                return XCTFail("Expected invalid output, got \(error)")
+            }
+        }
+    }
+
+    func testChunkExtendingPastTheFileIsRejected() async throws {
+        let executable = try makeExecutable(
+            script: """
+            #!/bin/sh
+            printf 'glTF\\002\\000\\000\\000\\030\\000\\000\\000\\144\\000\\000\\000JSON{}  ' > "$SONOVO_BLEND_OUTPUT"
+            echo "SONOVO_EXPORT_OK"
+            exit 0
+            """
+        )
+        let script = try makeReadableFile(name: "convert.py", text: "pass")
+        let blend = try makeReadableFile(name: "scene.blend", text: "BLENDER")
+        let converter = makeConverter(executable: executable, script: script)
+
+        do {
+            _ = try await converter.convert(source: blend)
+            XCTFail("Expected the conversion to fail")
+        } catch let error as BlenderConversionError {
+            guard case .invalidOutput = error else {
+                return XCTFail("Expected invalid output, got \(error)")
+            }
+        }
     }
 
     func testInvalidGLBIsRejected() async throws {

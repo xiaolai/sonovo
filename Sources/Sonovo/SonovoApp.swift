@@ -24,184 +24,12 @@ struct SonovoApp: App {
         )
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .saveItem) {
-                Button("Save") {
-                    Task { await state.saveSelectedDocument() }
-                }
-                .keyboardShortcut("s", modifiers: [.command])
-                .disabled(!state.canSaveSelectedDocument)
-                Button("Save As…") {
-                    Task { await state.markdown.saveSelectedAs() }
-                }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(
-                    state.selectedTab?.kind != .script
-                        || state.terminalPresentation == .full
-                )
-            }
-            CommandGroup(after: .newItem) {
-                Button("New Take") { state.newTake() }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-            }
-            SidebarCommands()
-            CommandGroup(after: .sidebar) {
-                Button("Toggle Inspector") { state.inspectorVisible.toggle() }
-                    .keyboardShortcut("i", modifiers: [.command, .option])
-            }
-            CommandMenu("Markdown") {
-                Button("New Document") {
-                    state.showMarkdownWorkspace()
-                    state.markdown.newDocument()
-                }
-                .keyboardShortcut("n", modifiers: [.command, .option])
-                Button("Open…") {
-                    state.showMarkdownWorkspace()
-                    state.markdown.presentOpenPanel()
-                }
-                .keyboardShortcut("o", modifiers: [.command])
-                Button("Open Folder…") {
-                    state.showMarkdownWorkspace()
-                    state.markdown.presentOpenFolderPanel()
-                }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
-                Divider()
-                Button("Toggle Source/Rendered") { state.markdown.toggleMode() }
-                    .keyboardShortcut("r", modifiers: [.command, .option])
-                Divider()
-                Group {
-                    Button("Bold") { state.markdown.performSelected(.toggleStrong) }
-                    Button("Italic") { state.markdown.performSelected(.toggleEmphasis) }
-                    Button("Inline Code") { state.markdown.performSelected(.toggleInlineCode) }
-                    Button("Strikethrough") { state.markdown.performSelected(.toggleStrikethrough) }
-                    Menu("Heading") {
-                        ForEach(1...6, id: \.self) { level in
-                            Button("Heading \(level)") {
-                                state.markdown.performSelected(.toggleHeading(level: level))
-                            }
-                        }
-                    }
-                    Button("Block Quote") { state.markdown.performSelected(.toggleBlockQuote) }
-                    Menu("List") {
-                        Button("Bullet") { state.markdown.performSelected(.toggleList(kind: .bullet)) }
-                        Button("Numbered") { state.markdown.performSelected(.toggleList(kind: .ordered)) }
-                        Button("Task") { state.markdown.performSelected(.toggleList(kind: .task)) }
-                    }
-                    Button("Insert Link") {
-                        state.markdown.performSelected(.insertLink(destination: ""))
-                    }
-                    Button("Insert Wiki Link") {
-                        state.markdown.performSelected(.insertWikiLink(target: "", alias: nil))
-                    }
-                    Button("Insert Details") {
-                        state.markdown.performSelected(.insertDetails(summary: "Details"))
-                    }
-                    Button("Insert TOC") { state.markdown.performSelected(.insertTOC) }
-                }
-                .disabled(!canFormatMarkdown)
-            }
-
-            CommandMenu("Subtitles") {
-                Button("Show Subtitle Editor") {
-                    state.showSubtitleWorkspace()
-                }
-                Button(
-                    state.subtitles.previewMode == .collapsed
-                        ? "Show Video"
-                        : "Hide Video"
-                ) {
-                    state.subtitles.togglePreviewMode()
-                }
-                Button("Open Subtitle…") {
-                    state.showSubtitleWorkspace()
-                    state.subtitles.presentOpenPanel()
-                }
-                .keyboardShortcut("o", modifiers: [.command, .option])
-                Button("Open Media…") {
-                    state.showSubtitleWorkspace()
-                    guard let document = state.subtitles.selectedDocument else {
-                        return
-                    }
-                    state.subtitles.presentOpenMediaPanel(for: document)
-                }
-                .disabled(state.subtitles.selectedDocument == nil)
-                Divider()
-                Button("Close Document") {
-                    Task { await state.subtitles.closeSelected() }
-                }
-                .disabled(state.subtitles.selectedDocument == nil)
-            }
-
-            CommandMenu("3D") {
-                Button("Show 3D Viewer") {
-                    state.showModel3DWorkspace()
-                }
-                Button("Open Model…") {
-                    state.showModel3DWorkspace()
-                    state.models.presentOpenPanel()
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
-                Divider()
-                Button("Reload Model") {
-                    state.models.reloadSelected()
-                }
-                .disabled(state.models.selectedDocument == nil)
-                Button("Convert with Blender…") {
-                    state.showModel3DWorkspace()
-                    state.models.convertSelectedWithBlender()
-                }
-                .disabled(
-                    state.models.selectedDocument?
-                        .format.canConvertWithBlender != true
-                        || state.models.blenderInstallation == nil
-                )
-                Divider()
-                Button("Close Model") {
-                    Task { await state.models.closeSelected() }
-                }
-                .disabled(state.models.selectedDocument == nil)
-            }
-
-            CommandMenu("Terminal") {
-                Button("Toggle Terminal") {
-                    state.terminalPresentation = state.terminalPresentation == .hidden ? .split : .hidden
-                }
-                .keyboardShortcut("`", modifiers: [.control])
-
-                Button("Terminal in Split") {
-                    state.terminalPresentation = .split
-                }
-
-                Button("Terminal Full Pane") {
-                    state.terminalPresentation = .full
-                }
-
-                Divider()
-
-                Button("New Terminal Tab") {
-                    state.terminalSessions.addSession()
-                    state.terminalPresentation = .split
-                }
-                .keyboardShortcut("t", modifiers: [.command])
-
-                Divider()
-
-                Picker("Dock", selection: $state.terminalDock) {
-                    ForEach(TerminalDock.allCases) { dock in
-                        Text(dock.label).tag(dock)
-                    }
-                }
-
-                Divider()
-
-                Button("Hide Terminal") {
-                    state.terminalPresentation = .hidden
-                }
-                .disabled(state.terminalPresentation == .hidden)
-
-                Button("Restart Shell") {
-                    NotificationCenter.default.post(name: .sonovoRestartTerminal, object: nil)
-                }
-            }
+            DocumentCommands(state: state)
+            MarkdownCommands(state: state)
+            SubtitleCommands(state: state)
+            Model3DCommands(state: state)
+            TerminalCommands(state: state)
+            ProjectCommands(state: state)
         }
 
         Settings {
@@ -209,15 +37,6 @@ struct SonovoApp: App {
                 .environment(state)
                 .background(WindowChromeConfigurator())
         }
-    }
-
-    /// Formatting commands act on the visible, editable Markdown source
-    /// editor. With another tab selected they would modify a hidden document.
-    private var canFormatMarkdown: Bool {
-        state.selectedAssetID == "script-md"
-            && state.terminalPresentation != .full
-            && state.markdown.selectedDocument?.mode == .source
-            && state.markdown.selectedDocument?.isReadOnly == false
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -250,10 +69,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSApp.activate(ignoringOtherApps: true)
 
+        // AppKit can rebuild a column's titlebar background when the window
+        // becomes key or finishes a live resize, which brings its hairline
+        // back. Reapply the chrome after those transitions.
+        for name in [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didResignKeyNotification,
+            NSWindow.didEndLiveResizeNotification
+        ] {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(refreshWindowChrome(_:)),
+                name: name,
+                object: nil
+            )
+        }
+
         DispatchQueue.main.async {
             for window in NSApp.windows {
                 configureWindowChrome(window)
             }
+        }
+    }
+
+    @objc private func refreshWindowChrome(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        applyToolbarChrome(window)
+        DispatchQueue.main.async { [weak window] in
+            guard let window else { return }
+            applyToolbarChrome(window)
         }
     }
 
@@ -262,10 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Runs only after the quit is approved. Doing this earlier would stop
-    /// model watchers and delete converted output even when a Markdown close
-    /// decision cancels the quit.
+    /// watchers and terminate terminals even when a save decision cancels the
+    /// quit.
     func applicationWillTerminate(_ notification: Notification) {
-        Model3DWorkspaceRegistry.active?.prepareForTermination()
+        AppStateRegistry.active?.prepareForTermination()
     }
 
     private var terminationPending = false
@@ -273,58 +117,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
-        let subtitles = SubtitleWorkspaceRegistry.active
-        let markdown = MarkdownWorkspaceRegistry.active
-        let subtitleDirty = subtitles?.hasDirtyDocuments ?? false
-        let markdownDirty = markdown?.hasDirtyDocuments ?? false
-        guard subtitleDirty || markdownDirty else {
+        guard let state = AppStateRegistry.active,
+              state.hasDirtyDocuments else {
             return .terminateNow
         }
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
 
+        // Every project is flushed, active first. A pending save decision
+        // cancels the quit and leaves the failing project active; the user
+        // resolves it and quits again. No project is left unwatched or
+        // half-saved by this path.
         Task { @MainActor [weak self] in
             guard let self else { return }
-
-            // Subtitle documents always have a path: flush them first, and
-            // refuse the quit outright if one cannot be saved. There is no
-            // second unsaved-changes decision for them.
-            if let subtitles, subtitles.hasDirtyDocuments {
-                let saved = await subtitles.flushAllForTermination()
-                guard saved else {
-                    self.terminationPending = false
-                    sender.reply(toApplicationShouldTerminate: false)
-                    return
-                }
-            }
-
-            guard let markdown, markdown.hasDirtyDocuments else {
-                self.terminationPending = false
-                sender.reply(toApplicationShouldTerminate: true)
-                return
-            }
-
-            let canTerminate = await markdown.flushAllForTermination()
-            if canTerminate {
-                self.terminationPending = false
-                sender.reply(toApplicationShouldTerminate: true)
-                return
-            }
-            guard markdown.pendingClose != nil else {
-                // The flush failed without a decision to ask about; there is
-                // nothing left to wait for.
-                self.terminationPending = false
-                sender.reply(toApplicationShouldTerminate: false)
-                return
-            }
-            // A document needs a decision. Reply only after the user answers
-            // the close alert, so Save or Discard can resume the quit instead
-            // of cancelling it silently.
-            markdown.onTerminationResolved = { [weak self] allowed in
-                guard let self else { return }
-                self.terminationPending = false
-                sender.reply(toApplicationShouldTerminate: allowed)
-            }
+            let allowed = await state.flushAllBeforeClose()
+            self.terminationPending = false
+            sender.reply(toApplicationShouldTerminate: allowed)
         }
         return .terminateLater
     }
@@ -332,8 +140,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 
 private func configureWindowChrome(_ window: NSWindow) {
+    applyToolbarChrome(window)
+    // SwiftUI can install the toolbar after the window first appears; the
+    // separator returns unless the setting is applied once it exists.
+    DispatchQueue.main.async { [weak window] in
+        guard let window else { return }
+        applyToolbarChrome(window)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak window] in
+        guard let window else { return }
+        applyToolbarChrome(window)
+    }
+}
+
+
+
+private func applyToolbarChrome(_ window: NSWindow) {
     window.titlebarSeparatorStyle = .none
     window.toolbar?.showsBaselineSeparator = false
+    hideTitlebarHairlines(in: window.contentView?.superview)
+}
+
+/// macOS 26 keeps a half-point separator layer inside each split column's
+/// titlebar background, even with `titlebarSeparatorStyle = .none`. Hiding
+/// those thin solid layers removes the line; the titlebar material, glass,
+/// and controls are untouched. Matching is structural and fails closed.
+private func hideTitlebarHairlines(in view: NSView?) {
+    guard let view else { return }
+    if String(describing: type(of: view)) == "NSTitlebarBackgroundView" {
+        hideHairlineLayers(in: view.layer)
+    }
+    for subview in view.subviews {
+        hideTitlebarHairlines(in: subview)
+    }
+}
+
+private func hideHairlineLayers(in layer: CALayer?) {
+    guard let layer else { return }
+    if layer.frame.height > 0,
+       layer.frame.height <= 1,
+       layer.backgroundColor != nil {
+        layer.isHidden = true
+    }
+    for sublayer in layer.sublayers ?? [] {
+        hideHairlineLayers(in: sublayer)
+    }
 }
 
 private struct WindowChromeConfigurator: NSViewRepresentable {

@@ -34,34 +34,27 @@ struct MainWindow: View {
         .background(
             WindowCloseGuard { await state.flushAllBeforeClose() }
         )
-        .navigationTitle("\(state.production.title) — \(state.production.episode)")
+        .navigationTitle(state.windowTitle)
         .navigationSubtitle(state.activityText)
         .alert(
             "Unsaved Changes",
             isPresented: Binding(
-                get: { state.markdown.pendingClose != nil },
+                get: { state.pendingCloseDocument != nil },
                 set: { presented in
-                    if !presented { state.markdown.dismissCloseAlert() }
+                    if !presented { state.pendingCloseOwner?.markdown.dismissCloseAlert() }
                 }
             )
         ) {
             Button("Save") {
-                guard let document = state.markdown.pendingClose else {
-                    return
-                }
-                // A save can fail; show the document and its error instead
-                // of failing silently behind a non-Markdown tab.
-                state.revealMarkdownDocument(document)
-                Task { await state.markdown.saveAndClose(document) }
+                // The owner may not be the active project; AppState resolves
+                // it and reveals the document before saving.
+                state.savePendingClose()
             }
             Button("Discard", role: .destructive) {
-                guard let document = state.markdown.pendingClose else {
-                    return
-                }
-                state.markdown.discardAndClose(document)
+                state.discardPendingClose()
             }
             Button("Cancel", role: .cancel) {
-                state.markdown.cancelPendingClose()
+                state.cancelPendingClose()
             }
         } message: {
             Text("This document has unsaved changes.")

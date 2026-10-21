@@ -2,11 +2,16 @@ import SwiftUI
 
 struct DeliveryView: View {
     let state: AppState
+    let project: Project
+
+    private var selectedAsset: ProductionAsset? {
+        state.selectedAsset(in: project)
+    }
 
     @State private var isRendering = false
 
     var body: some View {
-        if let asset = state.selectedAsset {
+        if let asset = selectedAsset {
             content(asset)
         } else {
             EmptyEditorView()

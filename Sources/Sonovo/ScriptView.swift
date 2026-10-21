@@ -4,10 +4,10 @@ import SwiftUI
 /// prototype is gone: source is the document, and both modes project the same
 /// parsed model.
 struct ScriptView: View {
-    @Bindable var state: AppState
+    let project: Project
 
     var body: some View {
-        MarkdownWorkspaceView(workspace: state.markdown)
+        MarkdownWorkspaceView(workspace: project.markdown)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
