@@ -28,6 +28,318 @@ final class CodeSyntaxHighlighterTests: XCTestCase {
         XCTAssertTrue(tokens.contains { $0.kind == .comment })
     }
 
+    func testShellQuoteStateResumesAcrossLines() {
+        let double = CodeSyntaxHighlighter.lex(
+            text: "echo \"one\ntwo\"\necho done\n",
+            language: .shell,
+            revision: 1
+        )
+        XCTAssertEqual(
+            double.lines[0].endState,
+            .multilineString(delimiter: "\"")
+        )
+        XCTAssertEqual(
+            double.lines[1].stateAtStart,
+            .multilineString(delimiter: "\"")
+        )
+        XCTAssertEqual(double.lines[1].endState, .normal)
+
+        let single = CodeSyntaxHighlighter.lex(
+            text: "echo 'one\ntwo'\n",
+            language: .shell,
+            revision: 1
+        )
+        XCTAssertEqual(
+            single.lines[0].endState,
+            .multilineString(delimiter: "'")
+        )
+        XCTAssertEqual(single.lines[1].endState, .normal)
+    }
+
+    func testJavaScriptRegexAfterCommentAndControlCondition() {
+        let text = "if (ok) /[/*]/.test(s);\n"
+            + "const re = /* note */ /[/*]/;\n"
+            + "if (s === \")\") /[/*]/.test(s);\n"
+            + "if /* note */ (ok) /[/*]/.test(s);\n"
+            + "class C {} /[/*]/.test(s);\n"
+            + "if (/[)]/.test(s)) /[/*]/.test(s);\n"
+            + "for await (const x of xs) /[/*]/.test(x);\n"
+            + "if (\n// )\nok) /[/*]/.test(s);\n"
+            + "x++ / 2 / 3;\n"
+            + "export default /[/*]/;\n"
+            + "if (ok) /* note */ {} /[/*]/.test(s);\n"
+            + "if (\n/[)]/.test(s)\n) /[/*]/.test(s);\n"
+            + "if (\n\"//\" && (\ntrue)\n) /[/*]/.test(s);\n"
+            + "label: {} /[/*]/.test(s);\n"
+            + "try {} catch {} /[/*]/.test(s);\n"
+            + "const chars = [.../[/*]/.source];\n"
+            + "const x =\u{00A0}/[/*]/;\n"
+            + "break outer\n/[/*]/.test(s);\n"
+            + "const n = function(){} / /[/*]/.source;\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        for line in snapshot.lines.indices {
+            XCTAssertEqual(
+                snapshot.lines[line].endState,
+                .normal,
+                "line \(line) must not open a comment"
+            )
+        }
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        XCTAssertTrue(
+            tokens.contains {
+                $0.kind == .string && $0.range.location == 8
+            },
+            "the regex literal after the condition is one string token"
+        )
+        let secondLineStart = ("if (ok) /[/*]/.test(s);\n" as NSString).length
+        XCTAssertTrue(
+            tokens.contains {
+                $0.kind == .string && $0.range.location > secondLineStart
+            },
+            "the regex literal after the comment is one string token"
+        )
+        let divisionLine = (text as NSString).range(of: "x++ / 2 / 3;")
+        let offending = tokens.filter {
+            $0.kind == .string
+                && $0.range.location >= divisionLine.location
+                && $0.range.location < NSMaxRange(divisionLine)
+        }
+        XCTAssertTrue(
+            offending.isEmpty,
+            "postfix increment is followed by division, not a regex: \(offending)"
+        )
+    }
+
+    func testJavaScriptObjectLiteralBraceIsDivision() {
+        let text = "const n = {} / 2 / 3;\nif (ok) {} /[/*]/.test(s);\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        XCTAssertEqual(snapshot.lines[0].endState, .normal)
+        XCTAssertEqual(snapshot.lines[1].endState, .normal)
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        let secondLineStart = ("const n = {} / 2 / 3;\n" as NSString).length
+        XCTAssertFalse(
+            tokens.contains {
+                $0.kind == .string && $0.range.location < secondLineStart
+            },
+            "object-literal division is not a regex"
+        )
+        XCTAssertTrue(
+            tokens.contains {
+                $0.kind == .string && $0.range.location > secondLineStart
+            },
+            "a regex after a statement block is recognized"
+        )
+    }
+
+    func testRelexMatchesFullPassWithCrossLineLiterals() {
+        let text = "if (\n/[)]/.test(s)\n) /[/*]/.test(s);\nlet x = 1;\n"
+        let full = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        let edited = text.replacingOccurrences(
+            of: "let x = 1;",
+            with: "let x = 2;"
+        )
+        let incremental = CodeSyntaxHighlighter.relex(
+            previous: full,
+            text: edited,
+            language: .javascript,
+            revision: 2,
+            editedLine: 3
+        )
+        let expected = CodeSyntaxHighlighter.lex(
+            text: edited,
+            language: .javascript,
+            revision: 2
+        )
+        XCTAssertEqual(incremental.lines.count, expected.lines.count)
+        for index in incremental.lines.indices {
+            XCTAssertEqual(
+                incremental.lines[index].endState,
+                expected.lines[index].endState,
+                "line \(index) end state"
+            )
+            XCTAssertEqual(
+                incremental.lines[index].tokens,
+                expected.lines[index].tokens,
+                "line \(index) tokens"
+            )
+        }
+    }
+
+    func testContinuedDivisionAtLineStart() {
+        let text = "a\n/ b /* note */;\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        XCTAssertEqual(snapshot.lines[1].endState, .normal)
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        XCTAssertFalse(
+            tokens.contains { $0.kind == .string },
+            "a leading slash continues division; it is not a regex"
+        )
+        XCTAssertTrue(
+            tokens.contains { $0.kind == .comment },
+            "the /* comment still opens"
+        )
+    }
+
+    func testRegexAfterPreviousLineComment() {
+        let text = "// note\n/[/*]/.test(s);\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        XCTAssertEqual(snapshot.lines[1].endState, .normal)
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        XCTAssertTrue(
+            tokens.contains {
+                $0.kind == .string && $0.range.location == 8
+            },
+            "a regex statement after a line comment is one string token"
+        )
+    }
+
+    func testRegexFollowedByDivision() {
+        let text = "/a/ / 2 / 3;\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        XCTAssertEqual(snapshot.lines[0].endState, .normal)
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        XCTAssertEqual(
+            tokens.filter { $0.kind == .string }.count,
+            1,
+            "only the regex itself is a string token; the rest is division"
+        )
+    }
+
+    func testRegexAfterPreviousLineKeyword() {
+        let text = "typeof\n/[/*]/;\ndebugger\n/[/*]/;\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        XCTAssertEqual(snapshot.lines[1].endState, .normal)
+        XCTAssertEqual(snapshot.lines[3].endState, .normal)
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        XCTAssertTrue(
+            tokens.contains {
+                $0.kind == .string && $0.range.location == 7
+            },
+            "typeof on the previous line still introduces a regex"
+        )
+        XCTAssertTrue(
+            tokens.contains {
+                $0.kind == .string
+                    && $0.range.location
+                        == ("typeof\n/[/*]/;\ndebugger\n" as NSString).length
+            },
+            "debugger on the previous line still introduces a regex"
+        )
+    }
+
+    func testKeywordPropertyIsDivision() {
+        let text = "obj.return / 2 / 3;\n"
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: text,
+            language: .javascript,
+            revision: 1
+        )
+        XCTAssertEqual(snapshot.lines[0].endState, .normal)
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(
+                location: 0,
+                length: (text as NSString).length
+            )
+        )
+        XCTAssertFalse(
+            tokens.contains { $0.kind == .string },
+            "a keyword property name is still an operand"
+        )
+    }
+
+    func testRelexInvalidatesCrossLineRegexContext() {
+        let firstText = "x\n/[/*]/;\n"
+        let first = CodeSyntaxHighlighter.lex(
+            text: firstText,
+            language: .javascript,
+            revision: 1
+        )
+        let editedText = "void\n/[/*]/;\n"
+        let incremental = CodeSyntaxHighlighter.relex(
+            previous: first,
+            text: editedText,
+            language: .javascript,
+            revision: 2,
+            editedLine: 0
+        )
+        let expected = CodeSyntaxHighlighter.lex(
+            text: editedText,
+            language: .javascript,
+            revision: 2
+        )
+        XCTAssertEqual(incremental.lines[1].endState, .normal)
+        for index in incremental.lines.indices {
+            XCTAssertEqual(
+                incremental.lines[index].endState,
+                expected.lines[index].endState,
+                "line \(index) end state"
+            )
+            XCTAssertEqual(
+                incremental.lines[index].tokens,
+                expected.lines[index].tokens,
+                "line \(index) tokens"
+            )
+        }
+    }
+
     func testBlockCommentStateCrossesLines() {
         let text = "/*\n x\n*/\nlet a = 1\n"
         let snapshot = CodeSyntaxHighlighter.lex(

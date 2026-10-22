@@ -1,5 +1,3 @@
-import Foundation
-
 /// One namespace for every Markdown limit.
 ///
 /// Limits live here so the parser, augmenter, and viewer cannot drift apart

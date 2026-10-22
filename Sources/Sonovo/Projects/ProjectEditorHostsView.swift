@@ -25,19 +25,22 @@ final class ProjectEditorHostContext {
     var displayScale: CGFloat
     var canvasInset: CGFloat
     var canvasRadius: CGFloat
+    var workspaceTheme: WorkspaceTheme
 
     init(
         isVisible: Bool = false,
         colorScheme: ColorScheme,
         displayScale: CGFloat,
         canvasInset: CGFloat,
-        canvasRadius: CGFloat
+        canvasRadius: CGFloat,
+        workspaceTheme: WorkspaceTheme
     ) {
         self.isVisible = isVisible
         self.colorScheme = colorScheme
         self.displayScale = displayScale
         self.canvasInset = canvasInset
         self.canvasRadius = canvasRadius
+        self.workspaceTheme = workspaceTheme
     }
 }
 
@@ -67,6 +70,10 @@ struct ProjectEditorRoot: View {
         .environment(\.projectIsVisible, context.isVisible)
         .environment(\.colorScheme, context.colorScheme)
         .environment(\.displayScale, context.displayScale)
+        // This root is its own NSHostingView; environment values from the
+        // window do not cross into it.
+        .environment(\.workspaceTheme, context.workspaceTheme)
+        .tint(context.workspaceTheme.accent)
         .onAppear {
             project.code.setProjectVisible(context.isVisible)
         }
@@ -108,7 +115,8 @@ final class ProjectEditorHostRegistry {
         colorScheme: ColorScheme,
         displayScale: CGFloat,
         canvasInset: CGFloat,
-        canvasRadius: CGFloat
+        canvasRadius: CGFloat,
+        workspaceTheme: WorkspaceTheme
     ) -> Entry {
         let key = ObjectIdentifier(project)
         if let existing = entries[key] {
@@ -116,13 +124,15 @@ final class ProjectEditorHostRegistry {
             existing.context.displayScale = displayScale
             existing.context.canvasInset = canvasInset
             existing.context.canvasRadius = canvasRadius
+            existing.context.workspaceTheme = workspaceTheme
             return existing
         }
         let context = ProjectEditorHostContext(
             colorScheme: colorScheme,
             displayScale: displayScale,
             canvasInset: canvasInset,
-            canvasRadius: canvasRadius
+            canvasRadius: canvasRadius,
+            workspaceTheme: workspaceTheme
         )
         let entry = Entry(
             project: project,
@@ -137,13 +147,15 @@ final class ProjectEditorHostRegistry {
         colorScheme: ColorScheme,
         displayScale: CGFloat,
         canvasInset: CGFloat,
-        canvasRadius: CGFloat
+        canvasRadius: CGFloat,
+        workspaceTheme: WorkspaceTheme
     ) {
         for entry in entries.values {
             entry.context.colorScheme = colorScheme
             entry.context.displayScale = displayScale
             entry.context.canvasInset = canvasInset
             entry.context.canvasRadius = canvasRadius
+            entry.context.workspaceTheme = workspaceTheme
         }
     }
 
@@ -173,6 +185,7 @@ final class ProjectEditorHostContainer: NSView {
     private var displayScale: CGFloat
     private var canvasInset: CGFloat
     private var canvasRadius: CGFloat
+    private var workspaceTheme: WorkspaceTheme
     private weak var visibleEntryHost: NSView?
 
     init(
@@ -181,12 +194,14 @@ final class ProjectEditorHostContainer: NSView {
         displayScale: CGFloat,
         canvasInset: CGFloat,
         canvasRadius: CGFloat,
+        workspaceTheme: WorkspaceTheme,
         hostFactory: ((Project, ProjectEditorHostContext) -> NSView)? = nil
     ) {
         self.colorScheme = colorScheme
         self.displayScale = displayScale
         self.canvasInset = canvasInset
         self.canvasRadius = canvasRadius
+        self.workspaceTheme = workspaceTheme
         registry = ProjectEditorHostRegistry(
             makeHost: hostFactory ?? { project, context in
                 let host = NSHostingView(
@@ -213,7 +228,8 @@ final class ProjectEditorHostContainer: NSView {
         colorScheme: ColorScheme,
         displayScale: CGFloat,
         canvasInset: CGFloat,
-        canvasRadius: CGFloat
+        canvasRadius: CGFloat,
+        workspaceTheme: WorkspaceTheme
     ) {
         self.projects = projects
         self.activeProject = active
@@ -221,12 +237,14 @@ final class ProjectEditorHostContainer: NSView {
         self.displayScale = displayScale
         self.canvasInset = canvasInset
         self.canvasRadius = canvasRadius
+        self.workspaceTheme = workspaceTheme
         registry.prune(keeping: projects)
         registry.update(
             colorScheme: colorScheme,
             displayScale: displayScale,
             canvasInset: canvasInset,
-            canvasRadius: canvasRadius
+            canvasRadius: canvasRadius,
+            workspaceTheme: workspaceTheme
         )
         updateVisibility()
     }
@@ -244,7 +262,8 @@ final class ProjectEditorHostContainer: NSView {
                 colorScheme: colorScheme,
                 displayScale: displayScale,
                 canvasInset: canvasInset,
-                canvasRadius: canvasRadius
+                canvasRadius: canvasRadius,
+                workspaceTheme: workspaceTheme
             )
         }
         updateVisibility()
@@ -258,7 +277,8 @@ final class ProjectEditorHostContainer: NSView {
                 colorScheme: colorScheme,
                 displayScale: displayScale,
                 canvasInset: canvasInset,
-                canvasRadius: canvasRadius
+                canvasRadius: canvasRadius,
+                workspaceTheme: workspaceTheme
             )
         }
     }
@@ -274,16 +294,16 @@ final class ProjectEditorHostContainer: NSView {
                 colorScheme: colorScheme,
                 displayScale: displayScale,
                 canvasInset: canvasInset,
-                canvasRadius: canvasRadius
+                canvasRadius: canvasRadius,
+                workspaceTheme: workspaceTheme
             )
         }
     }
 
     func tearDown() {
         hideAll()
-        for entry in registry.entries.values {
-            entry.host.removeFromSuperview()
-        }
+        // `registry.removeAll()` owns host removal; repeating the traversal
+        // here removed the same views twice.
         registry.removeAll()
     }
 
@@ -300,7 +320,8 @@ final class ProjectEditorHostContainer: NSView {
             colorScheme: colorScheme,
             displayScale: displayScale,
             canvasInset: canvasInset,
-            canvasRadius: canvasRadius
+            canvasRadius: canvasRadius,
+            workspaceTheme: workspaceTheme
         )
 
         if let visibleEntryHost, visibleEntryHost !== entry.host {
@@ -354,6 +375,7 @@ struct ProjectEditorHostsView: NSViewRepresentable {
     let active: Project
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.workspaceTheme) private var workspaceTheme
     @AppStorage("sonovo.canvasInset")
     private var canvasInset = AppTheme.Canvas.comfortableInset
     @AppStorage("sonovo.canvasRadius")
@@ -365,7 +387,8 @@ struct ProjectEditorHostsView: NSViewRepresentable {
             colorScheme: colorScheme,
             displayScale: displayScale,
             canvasInset: CGFloat(canvasInset),
-            canvasRadius: CGFloat(canvasRadius)
+            canvasRadius: CGFloat(canvasRadius),
+            workspaceTheme: workspaceTheme
         )
     }
 
@@ -379,7 +402,8 @@ struct ProjectEditorHostsView: NSViewRepresentable {
             colorScheme: colorScheme,
             displayScale: displayScale,
             canvasInset: CGFloat(canvasInset),
-            canvasRadius: CGFloat(canvasRadius)
+            canvasRadius: CGFloat(canvasRadius),
+            workspaceTheme: workspaceTheme
         )
     }
 

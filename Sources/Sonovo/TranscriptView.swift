@@ -82,7 +82,9 @@ struct TranscriptView: View {
     }
 
     private func transcriptRow(_ segment: TranscriptSegment) -> some View {
-        let isSelected = state.selectedTranscriptID == segment.id
+        let isSelected = state.followPlayhead
+            ? state.currentTranscript?.id == segment.id
+            : state.selectedTranscriptID == segment.id
 
         return HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
             Text(segment.timecode)

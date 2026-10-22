@@ -95,6 +95,7 @@ private struct LocalDocumentWebView: NSViewRepresentable {
         webView.underPageBackgroundColor = .textBackgroundColor
         webView.isInspectable = isDebugBuild
         context.coordinator.attach(webView)
+        context.coordinator.watchDirectory(root)
         context.coordinator.load(pageURL: pageURL)
         return webView
     }
@@ -119,6 +120,7 @@ private struct LocalDocumentWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         private let onFailure: (String) -> Void
         private weak var webView: WKWebView?
+        private var directoryWatcher: WorkspaceDirectoryWatcher?
 
         init(onFailure: @escaping (String) -> Void) {
             self.onFailure = onFailure
@@ -126,6 +128,21 @@ private struct LocalDocumentWebView: NSViewRepresentable {
 
         func attach(_ webView: WKWebView) {
             self.webView = webView
+        }
+
+        /// Reloads when the page or any sibling resource changes. The
+        /// document's own revision covers the page; a referenced stylesheet
+        /// or image has no revision of its own.
+        func watchDirectory(_ url: URL) {
+            let watcher = WorkspaceDirectoryWatcher(path: url.path) {
+                [weak self] in
+                Task { @MainActor in
+                    self?.webView?.reload()
+                }
+            }
+            if watcher.start() {
+                directoryWatcher = watcher
+            }
         }
 
         func load(pageURL: URL) {
@@ -249,6 +266,8 @@ private struct LocalDocumentWebView: NSViewRepresentable {
         }
 
         func teardown() {
+            directoryWatcher?.stop()
+            directoryWatcher = nil
             webView?.stopLoading()
             webView?.navigationDelegate = nil
             webView?.uiDelegate = nil

@@ -71,7 +71,9 @@ struct TerminalPane: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .sonovoRestartTerminal)) { _ in
-            store.selectedSession?.view.restart()
+            if let session = store.selectedSession {
+                store.restart(session)
+            }
         }
     }
 
@@ -101,7 +103,9 @@ struct TerminalPane: View {
             .accessibilityLabel("Terminal Dock")
 
             BarIconButton(systemName: "arrow.clockwise", help: "Restart shell") {
-                store.selectedSession?.view.restart()
+                if let session = store.selectedSession {
+                    store.restart(session)
+                }
             }
             .disabled(store.selectedSession == nil)
             .focusable(false)

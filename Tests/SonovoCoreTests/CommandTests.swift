@@ -511,6 +511,47 @@ struct CommandTests {
         #expect(trailingSpace.source == "")
     }
 
+    @Test("Escaped markers are literal, not delimiters to unwrap")
+    func escapedMarkers() throws {
+        let italic = try apply(
+            .toggleEmphasis,
+            to: "\\*hello*",
+            selection: 2..<7
+        )
+        #expect(italic.source == "\\**hello**")
+    }
+
+    @Test("An empty list marker toggles off instead of doubling")
+    func emptyListMarker() throws {
+        let result = try apply(
+            .toggleList(kind: .bullet),
+            to: "-",
+            selection: 1..<1
+        )
+        #expect(result.source == "")
+    }
+
+    @Test("ATX closing hashes are syntax, not content")
+    func atxClosingHashes() throws {
+        let result = try apply(
+            .toggleHeading(level: 2),
+            to: "## Title ##",
+            selection: 0..<11
+        )
+        #expect(result.source == "Title")
+    }
+
+    @Test("A changed range never splits a surrogate pair")
+    func surrogateChangedRange() {
+        let result = MarkdownCommandResult(
+            source: "😁",
+            selection: 0..<0,
+            actionName: "Edit",
+            previousSource: "😀"
+        )
+        #expect(result.changedRange == 0..<2)
+    }
+
     @Test("Task formatting preserves checked state in a mixed selection")
     func taskCheckedState() throws {
         let result = try apply(

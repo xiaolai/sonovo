@@ -721,7 +721,13 @@ private struct MarkdownImageView: View {
             }
         }
         .task(id: taskKey) {
-            await loadImage()
+            // The destination string does not change when the file is
+            // replaced on disk. Re-check metadata while the image is mounted
+            // so an external edit is visible without reopening the document.
+            while !Task.isCancelled {
+                await loadImage()
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 
@@ -751,12 +757,14 @@ private struct MarkdownImageView: View {
         let identity: String? = await Task.detached(
             priority: .userInitiated
         ) {
-            let values = try? url.resourceValues(
+            guard let values = try? url.resourceValues(
                 forKeys: [.contentModificationDateKey, .fileSizeKey]
-            )
-            let modified = values?.contentModificationDate?
+            ) else {
+                return nil
+            }
+            let modified = values.contentModificationDate?
                 .timeIntervalSince1970 ?? 0
-            return "\(url.path)|\(modified)|\(values?.fileSize ?? 0)"
+            return "\(url.path)|\(modified)|\(values.fileSize ?? 0)"
         }.value
 
         // A destination change cancels this task; the old load must not

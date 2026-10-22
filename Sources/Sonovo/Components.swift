@@ -87,10 +87,3 @@ struct InspectorSection<Content: View>: View {
     }
 }
 
-struct Hairline: View {
-    var body: some View {
-        Rectangle()
-            .fill(Color.appSeparator)
-            .frame(height: AppTheme.BorderWidth.hairline)
-    }
-}

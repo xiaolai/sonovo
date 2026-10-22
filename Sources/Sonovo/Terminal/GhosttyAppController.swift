@@ -96,13 +96,38 @@ final class GhosttyAppController {
         config = newConfig
         currentThemeIsDark = isDark
 
-        withExtendedLifetime(previous) {
-            GhosttyFFI.appUpdateConfig(app, config: newConfig)
-        }
-
+        GhosttyFFI.appUpdateConfig(app, config: newConfig)
         for view in surfaces.allObjects {
             guard let surface = view.surface else { continue }
             GhosttyFFI.surfaceUpdateConfig(surface, config: newConfig)
+        }
+        // The app and surfaces have taken the new configuration; the old
+        // opaque allocation is no longer referenced. `withExtendedLifetime`
+        // kept it alive but never freed it, leaking one config per theme
+        // change.
+        if let previous {
+            GhosttyFFI.configFree(previous)
+        }
+    }
+
+    /// Rebuilds the configuration after a terminal preference changed. New
+    /// surfaces use the new font and shell; existing surfaces take the font
+    /// immediately (their shell process is already running).
+    func reloadTerminalPreferences() {
+        guard let app else { return }
+        guard let newConfig = makeConfig(isDark: currentThemeIsDark) else {
+            logger.warning("Ghostty preference reload failed")
+            return
+        }
+        let previous = config
+        config = newConfig
+        GhosttyFFI.appUpdateConfig(app, config: newConfig)
+        for view in surfaces.allObjects {
+            guard let surface = view.surface else { continue }
+            GhosttyFFI.surfaceUpdateConfig(surface, config: newConfig)
+        }
+        if let previous {
+            GhosttyFFI.configFree(previous)
         }
     }
 
@@ -128,6 +153,12 @@ final class GhosttyAppController {
 
         GhosttyFFI.configLoadDefaultFiles(config)
         GhosttyFFI.configLoadRecursiveFiles(config)
+
+        // User choices from Settings override the defaults but sit before
+        // the bundled color theme, which only sets colors.
+        if let overrides = TerminalPreferences.overrideConfigURL() {
+            GhosttyFFI.configLoadFile(config, path: overrides.path)
+        }
 
         let themeName = isDark ? "dark" : "light"
         if let themeURL = Bundle.module.url(
@@ -211,9 +242,28 @@ private func sonovoGhosttyConfirmReadClipboard(
     let contents = String(cString: string)
     MainActor.assumeIsolated {
         let view = Unmanaged<GhosttyTerminalView>.fromOpaque(pointer).takeUnretainedValue()
+        guard view.surface != nil else { return }
+        // Clipboard reads are exfiltration: never approve one silently.
+        let allowed = confirmClipboardAccess(
+            title: "Allow the terminal to read the clipboard?",
+            detail: "A program running in the terminal requested the "
+                + "clipboard contents."
+        )
+        // The modal loop can close the view and free its surface. Re-read
+        // it afterwards instead of completing against the stale pointer;
+        // a surface that is gone has no request left to complete.
         guard let surface = view.surface else { return }
-        contents.withCString { cString in
-            GhosttyFFI.surfaceCompleteClipboardRequest(surface, data: cString, state: safeState, confirmed: true)
+        // Ghostty re-prompts when a denial is completed with
+        // `confirmed: false`; the reference app completes every confirmation
+        // with empty contents and `confirmed: true` instead.
+        let response = allowed ? contents : ""
+        response.withCString { cString in
+            GhosttyFFI.surfaceCompleteClipboardRequest(
+                surface,
+                data: cString,
+                state: safeState,
+                confirmed: true
+            )
         }
     }
 }
@@ -242,10 +292,31 @@ private func sonovoGhosttyWriteClipboard(
     guard let value else { return }
 
     MainActor.assumeIsolated {
+        if confirm,
+           !confirmClipboardAccess(
+               title: "Allow the terminal to replace the clipboard?",
+               detail: "A program running in the terminal wants to write "
+                   + "to the clipboard."
+           ) {
+            return
+        }
         let pasteboard = clipboard(for: location)
         _ = pasteboard.clearContents()
         pasteboard.setString(value, forType: .string)
     }
+}
+
+/// A modal confirmation for a terminal clipboard request. The request is
+/// denied unless the user explicitly allows it.
+@MainActor
+private func confirmClipboardAccess(title: String, detail: String) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = title
+    alert.informativeText = detail
+    alert.addButton(withTitle: "Allow")
+    alert.addButton(withTitle: "Deny")
+    return alert.runModal() == .alertFirstButtonReturn
 }
 
 private func sonovoGhosttyCloseSurface(

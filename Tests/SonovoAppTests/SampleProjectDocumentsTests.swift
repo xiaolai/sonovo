@@ -38,18 +38,14 @@ final class SampleProjectDocumentsTests: XCTestCase {
             destinationDirectory: destination
         )
 
-        let first = try XCTUnwrap(
-            project.documentURL(named: "tidewater-script.md")
-        )
+        let first = try project.documentURL(named: "tidewater-script.md")
         XCTAssertEqual(
             try String(contentsOf: first, encoding: .utf8),
             "original"
         )
         try Data("edited".utf8).write(to: first)
 
-        let second = try XCTUnwrap(
-            project.documentURL(named: "tidewater-script.md")
-        )
+        let second = try project.documentURL(named: "tidewater-script.md")
         XCTAssertEqual(second, first)
         XCTAssertEqual(
             try String(contentsOf: second, encoding: .utf8),
@@ -69,6 +65,11 @@ final class SampleProjectDocumentsTests: XCTestCase {
                 isDirectory: true
             )
         )
-        XCTAssertNil(project.documentURL(named: "missing.md"))
+        XCTAssertThrowsError(try project.documentURL(named: "missing.md")) {
+            XCTAssertEqual(
+                $0 as? SampleDocumentError,
+                .sourceUnavailable("missing.md")
+            )
+        }
     }
 }

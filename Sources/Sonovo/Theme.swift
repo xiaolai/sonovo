@@ -601,6 +601,10 @@ enum AppTheme {
         /// surface: hue distinguishes tracks, and the map is drawn on the
         /// panel or the video overlay rather than used for text.
         static let cueTracks: [Color] = [.blue, .teal, .indigo, .purple, .pink, .orange, .green]
+        /// Settings theme bases. The default palette follows the system
+        /// accent color; these two are fixed hues.
+        static let slateAccent = Color(red: 0.36, green: 0.48, blue: 0.62)
+        static let emberAccent = Color(red: 0.82, green: 0.46, blue: 0.22)
         // Keep these in sync with the Ghostty theme files. They match
         // NSColor.textBackgroundColor, the main editor surface.
         static let terminalLight = Color.white
@@ -721,18 +725,68 @@ extension View {
         inset: CGFloat = CGFloat(AppTheme.Canvas.comfortableInset),
         radius: CGFloat = CGFloat(AppTheme.Canvas.roundedRadius)
     ) -> some View {
-        background(
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(Color.appCanvas)
-        )
-        .clipShape(
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-        )
-        .padding(inset)
+        modifier(CanvasSurfaceStyle(inset: inset, radius: radius))
     }
 
     func appShadow(_ token: AppTheme.ShadowToken) -> some View {
         shadow(color: token.color, radius: token.radius, x: token.x, y: token.y)
+    }
+}
+
+/// The workspace palette selected in Settings. The accent tints standard
+/// controls; the wash colors the editor canvas. Intensity controls how far
+/// the canvas moves from the base surface.
+struct WorkspaceTheme: Equatable, Sendable {
+    var accent: Color
+    var wash: Color
+    var backgroundIntensity: Double
+
+    /// The default palette used outside the window's environment.
+    static let standard = WorkspaceTheme(
+        accent: Color.accentColor,
+        wash: Color.clear,
+        backgroundIntensity: 0
+    )
+}
+
+private struct WorkspaceThemeKey: EnvironmentKey {
+    static let defaultValue = WorkspaceTheme.standard
+}
+
+extension EnvironmentValues {
+    var workspaceTheme: WorkspaceTheme {
+        get { self[WorkspaceThemeKey.self] }
+        set { self[WorkspaceThemeKey.self] = newValue }
+    }
+}
+
+private struct CanvasSurfaceStyle: ViewModifier {
+    let inset: CGFloat
+    let radius: CGFloat
+
+    @Environment(\.workspaceTheme) private var theme
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(Color.appCanvas)
+                    .overlay(
+                        RoundedRectangle(
+                            cornerRadius: radius,
+                            style: .continuous
+                        )
+                        .fill(
+                            theme.wash.opacity(
+                                0.015 + theme.backgroundIntensity * 0.06
+                            )
+                        )
+                    )
+            )
+            .clipShape(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+            )
+            .padding(inset)
     }
 }
 

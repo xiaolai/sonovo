@@ -158,10 +158,12 @@ struct SubtitleCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: [.command, .option])
             Button("Open Media…") {
-                state.showSubtitleWorkspace()
+                // Capture the document before revealing the workspace; the
+                // reveal can select a different subtitle tab.
                 guard let document = state.subtitles.selectedDocument else {
                     return
                 }
+                state.showSubtitleWorkspace()
                 state.subtitles.presentOpenMediaPanel(for: document)
             }
             .disabled(state.subtitles.selectedDocument == nil)
@@ -195,8 +197,13 @@ struct Model3DCommands: Commands {
             }
             .disabled(state.models.selectedDocument == nil)
             Button("Convert with Blender…") {
+                // The reveal can change the selected model tab; convert the
+                // one the enabled state was evaluated against.
+                guard let document = state.models.selectedDocument else {
+                    return
+                }
                 state.showModel3DWorkspace()
-                state.models.convertSelectedWithBlender()
+                state.models.convert(document)
             }
             .disabled(
                 state.models.selectedDocument?

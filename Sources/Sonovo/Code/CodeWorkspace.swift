@@ -58,6 +58,10 @@ final class CodeWorkspace {
     /// Whether any workspace of the project already owns a document at the
     /// path. `open` has no document yet, so it cannot exclude an id.
     var isPathOwnedAnywhere: ((String) -> Bool)?
+    /// Whether the project's selected editor tab currently renders this
+    /// workspace. A selected Markdown or media tab hides every code document
+    /// even though the code workspace keeps its selection.
+    var isEditorTabSelected: (() -> Bool)?
     /// Reserves a Save As destination across every workspace of the project.
     /// Returns false when another reservation already holds it.
     var reserveDestination: ((String, UUID) -> Bool)?
@@ -364,8 +368,29 @@ final class CodeWorkspace {
         }
         do {
             if item.status == .deleted {
+                // The scan's verdict can be stale. Never erase review history
+                // for a file that reappeared before the click.
+                let url = item.url
+                let exists = await Task.detached {
+                    FileManager.default.fileExists(atPath: url.path)
+                }.value
+                guard !exists else {
+                    reviewQueueError = "The file is back on disk; the "
+                        + "queue was refreshed instead."
+                    await refreshReviewQueue()
+                    return
+                }
                 try await store.remove(path: item.path)
             } else {
+                // The queue's URL was scanned earlier. Reapply the same path
+                // policy the scanner uses before reading its bytes, so a
+                // symlink swapped in after the scan cannot leak an
+                // outside-root file into the review store.
+                guard ProjectPathPolicy.isAllowed(item.url, in: root) else {
+                    reviewQueueError = "The file is no longer inside the "
+                        + "project."
+                    return
+                }
                 let reader = self.reader
                 let url = item.url
                 let bounded = try await Task.detached {
@@ -427,14 +452,28 @@ final class CodeWorkspace {
 
     /// Clears the in-memory and persisted decision for a document's path.
     func clearReviewDecision(in document: CodeDocument) async {
+        guard let root = workspaceRoot else {
+            document.clearReviewDecision()
+            return
+        }
+        // Capture identity before the await. A concurrent Save As can move
+        // the document to a new path; clearing the new path would erase the
+        // wrong history.
+        let path = document.relativePath(relativeTo: root)
+        let identity = document.fileURL
+        let generation = document.identityGeneration
         document.clearReviewDecision()
-        guard let root = workspaceRoot else { return }
         guard let store = await ensureReviewStore(for: root) else {
             lastError = "The project changed before the review decision "
                 + "was cleared."
             return
         }
-        let path = document.relativePath(relativeTo: workspaceRoot)
+        guard document.identityGeneration == generation,
+              document.fileURL == identity else {
+            lastError = "The document moved before its saved review "
+                + "decision was cleared."
+            return
+        }
         do {
             try await store.clearDecisions(path: path)
         } catch {
@@ -506,6 +545,12 @@ final class CodeWorkspace {
             store: store,
             reader: reader
         )
+        document.currentProjectVisibility = { [weak self, weak document] in
+            guard let self, let document else { return false }
+            return self.isProjectVisible
+                && (self.isEditorTabSelected?() ?? true)
+                && self.selectedDocumentID == document.id
+        }
         documents.append(document)
         select(document)
         startWatcher(for: document)
@@ -825,6 +870,8 @@ final class CodeWorkspace {
             guard let self, let document else { return }
             let change = await document.checkExternalChange(
                 projectVisible: self.isProjectVisible
+                    && (self.isEditorTabSelected?() ?? true)
+                    && self.selectedDocumentID == id
             )
             switch change {
             case .none:

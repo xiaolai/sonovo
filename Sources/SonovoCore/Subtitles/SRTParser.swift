@@ -155,6 +155,10 @@ enum SRTParser {
                 coordinateLine: coordinateLine,
                 style: nil
             )
+            guard parts.cues.count < SubtitleLimits.maxCueCount else {
+                parts.truncated = true
+                break
+            }
             parts.cues.append(cue)
             ordinal += 1
             index = next
@@ -181,11 +185,22 @@ enum SRTParser {
 
 
     private static func isCoordinateLine(_ text: String) -> Bool {
-        let upper = text.uppercased()
-        return upper.hasPrefix("X1:")
-            && (upper.contains("X2:")
-                || upper.contains("Y1:")
-                || upper.contains("Y2:"))
+        // A coordinate record is exactly four labelled integers and nothing
+        // else. Dialogue that merely mentions the labels stays cue text.
+        let tokens = text.split(whereSeparator: { $0.isWhitespace })
+        let labels = ["X1:", "X2:", "Y1:", "Y2:"]
+        guard tokens.count == labels.count else { return false }
+        for (token, label) in zip(tokens, labels) {
+            let upper = token.uppercased()
+            guard upper.hasPrefix(label) else { return false }
+            var value = Substring(upper.dropFirst(label.count))
+            if value.first == "-" { value = value.dropFirst() }
+            guard !value.isEmpty,
+                  value.allSatisfy({ ("0"..."9").contains($0) }) else {
+                return false
+            }
+        }
+        return true
     }
 
     struct Timing {

@@ -26,11 +26,15 @@ public struct LoadedSubtitle: Sendable {
 
 public enum SubtitleFileStoreError: Error, Equatable, CustomStringConvertible {
     case unsupportedFormat
+    case fileTooLarge(byteCount: Int)
 
     public var description: String {
         switch self {
         case .unsupportedFormat:
             "The file is not SRT, WebVTT, ASS, or SSA subtitles."
+        case let .fileTooLarge(byteCount):
+            "The subtitle file is \(byteCount) bytes; the reading limit is "
+                + "\(SubtitleLimits.maxReadBytes) bytes."
         }
     }
 }
@@ -45,7 +49,19 @@ public struct SubtitleFileStore: Sendable {
     }
 
     public func read(_ url: URL) throws -> LoadedSubtitle {
-        let data = try Data(contentsOf: url)
+        // Check the size before allocating the file. The editable threshold
+        // only decides read-only state; it is not a memory bound.
+        let reported = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            ?? 0
+        guard reported <= SubtitleLimits.maxReadBytes else {
+            throw SubtitleFileStoreError.fileTooLarge(byteCount: reported)
+        }
+        // The metadata check above does not bound a file that grows between
+        // the check and the read. Read at most cap + 1 bytes.
+        let data = try Self.readBounded(url)
+        guard data.count <= SubtitleLimits.maxReadBytes else {
+            throw SubtitleFileStoreError.fileTooLarge(byteCount: data.count)
+        }
         let contents = try SubtitleEncoding.decode(data)
         guard let format = SubtitleFormat.detect(
             url: url,
@@ -60,6 +76,21 @@ public struct SubtitleFileStore: Sendable {
             format: format,
             isLarge: data.count > SubtitleLimits.maxEditableBytes
         )
+    }
+
+    private static func readBounded(_ url: URL) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let cap = SubtitleLimits.maxReadBytes + 1
+        var data = Data()
+        while data.count < cap {
+            let chunk = try handle.read(
+                upToCount: min(1 << 18, cap - data.count)
+            )
+            guard let chunk, !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        return data
     }
 
     /// Returns `nil` when the file does not exist.

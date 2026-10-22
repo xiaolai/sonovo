@@ -75,6 +75,9 @@ public enum SubtitleTimecode {
         guard minutes < 60 else { return nil }
         let seconds = secondsAndFraction / 1000
         guard seconds < 60 else { return nil }
+        // Bound the hour count before multiplying, so a malformed timestamp
+        // cannot trap on integer overflow.
+        guard hours <= maximumMilliseconds / 3_600_000 else { return nil }
 
         let total = (hours * 3600 + minutes * 60 + seconds) * 1000
             + secondsAndFraction % 1000
@@ -93,7 +96,7 @@ public enum SubtitleTimecode {
         let separator: Character
         if let decimalSeparator {
             guard trimmed.contains(decimalSeparator) else {
-                return parseNonNegativeInteger(trimmed).map { $0 * 1000 }
+                return parseWholeSeconds(trimmed)
             }
             separator = decimalSeparator
         } else if trimmed.contains(".") {
@@ -101,7 +104,7 @@ public enum SubtitleTimecode {
         } else if trimmed.contains(",") {
             separator = ","
         } else {
-            return parseNonNegativeInteger(trimmed).map { $0 * 1000 }
+            return parseWholeSeconds(trimmed)
         }
 
         let pieces = trimmed.split(
@@ -112,16 +115,32 @@ public enum SubtitleTimecode {
               let seconds = parseNonNegativeInteger(pieces[0]),
               !pieces[1].isEmpty,
               pieces[1].count <= 3,
-              pieces[1].allSatisfy({ $0.isNumber }) else {
+              pieces[1].utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+              let parsedFraction = Int(pieces[1]) else {
             return nil
         }
-        var fraction = Int(pieces[1]) ?? 0
+        // Bound before multiplying; a long digit string is not a timestamp.
+        guard seconds <= maximumMilliseconds / 1000 else { return nil }
+        var fraction = parsedFraction
         switch pieces[1].count {
         case 1: fraction *= 100
         case 2: fraction *= 10
         default: break
         }
-        return seconds * 1000 + fraction
+        let total = seconds * 1000 + fraction
+        guard total <= maximumMilliseconds else { return nil }
+        return total
+    }
+
+    /// Whole seconds as milliseconds, bounded before multiplication.
+    private static func parseWholeSeconds<T: StringProtocol>(
+        _ raw: T
+    ) -> Int? {
+        guard let seconds = parseNonNegativeInteger(raw),
+              seconds <= maximumMilliseconds / 1000 else {
+            return nil
+        }
+        return seconds * 1000
     }
 
     private static func parseNonNegativeInteger<T: StringProtocol>(

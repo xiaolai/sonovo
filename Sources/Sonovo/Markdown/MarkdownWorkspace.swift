@@ -60,6 +60,8 @@ final class MarkdownWorkspace {
     private var reservedDestinations: Set<String> = []
     nonisolated(unsafe) private var workspaceWatcher: WorkspaceDirectoryWatcher?
     private var workspaceScanTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var watcherRetryTask: Task<Void, Never>?
     private var workspaceScanGeneration = 0
     nonisolated(unsafe) private var fileChangeObserver: NSObjectProtocol?
 
@@ -68,6 +70,30 @@ final class MarkdownWorkspace {
             NotificationCenter.default.removeObserver(fileChangeObserver)
         }
         workspaceWatcher?.stop()
+    }
+
+    /// Releases every retained editor, watcher, and cached parse for a
+    /// project that is closing. The shared editor cache is process-wide, so
+    /// a closed project's controllers would otherwise live until quit.
+    func shutdown() {
+        for document in documents {
+            document.markClosed()
+            watchers[document.id]?.stop()
+            editorCache.remove(for: document.id)
+            autosave.forget(document.id)
+            let id = document.id
+            Task { await parseService.release(documentID: id) }
+        }
+        documents.removeAll()
+        watchers.removeAll()
+        scrollTargets.removeAll()
+        pendingClose = nil
+        workspaceWatcher?.stop()
+        workspaceWatcher = nil
+        workspaceScanTask?.cancel()
+        workspaceScanTask = nil
+        watcherRetryTask?.cancel()
+        watcherRetryTask = nil
     }
 
     var selectedDocument: MarkdownDocument? {
@@ -417,10 +443,14 @@ final class MarkdownWorkspace {
     // MARK: - Commands
 
     func controller(for document: MarkdownDocument) -> MarkdownEditorController {
-        editorCache.entry(
+        let controller = editorCache.entry(
             for: document,
             parseService: parseService
         ).controller
+        controller.onCommandError = { [weak self] message in
+            self?.lastError = message
+        }
+        return controller
     }
 
     func perform(_ command: MarkdownCommandKind, on document: MarkdownDocument) {
@@ -630,18 +660,58 @@ final class MarkdownWorkspace {
         workspaceScanTask = nil
         workspaceRoot = root
         workspaceWatcher?.stop()
+        watcherRetryTask?.cancel()
 
-        // Basename wiki resolution must see files added to nested folders
-        // while the workspace is open.
-        let watcher = WorkspaceDirectoryWatcher(path: root.path) { [weak self] in
+        startWorkspaceWatcher(for: root)
+
+        await rescanWorkspaceIndex(root: root)
+    }
+
+    /// Starts the folder watcher, retrying a failed start while this folder
+    /// remains the workspace. FSEvents can fail transiently (for example
+    /// during a volume mount), and requiring the user to reopen the folder
+    /// would silently leave the index stale.
+    private func startWorkspaceWatcher(for root: URL) {
+        let watcher = WorkspaceDirectoryWatcher(path: root.path) {
+            [weak self] in
             Task { @MainActor in
                 self?.scheduleWorkspaceRescan()
             }
         }
-        watcher.start()
-        workspaceWatcher = watcher
-
-        await rescanWorkspaceIndex(root: root)
+        if watcher.start() {
+            workspaceWatcher = watcher
+            return
+        }
+        workspaceWatcher = nil
+        lastError = "This folder could not be watched for changes. "
+            + "Retrying automatically."
+        watcherRetryTask = Task { @MainActor [weak self] in
+            var delayMilliseconds = 1_000
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    for: .milliseconds(delayMilliseconds)
+                )
+                guard let self, !Task.isCancelled,
+                      self.workspaceRoot == root else {
+                    return
+                }
+                let retry = WorkspaceDirectoryWatcher(path: root.path) {
+                    [weak self] in
+                    Task { @MainActor in
+                        self?.scheduleWorkspaceRescan()
+                    }
+                }
+                if retry.start() {
+                    self.workspaceWatcher = retry
+                    self.lastError = nil
+                    // Events during the failed period were missed; rebuild
+                    // the index now that the watcher is live again.
+                    self.scheduleWorkspaceRescan()
+                    return
+                }
+                delayMilliseconds = min(delayMilliseconds * 2, 30_000)
+            }
+        }
     }
 
     /// Rebuilds the index off the main actor. A scan that finishes after a

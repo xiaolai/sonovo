@@ -70,9 +70,21 @@ final class MediaPlaybackModel {
     /// resolves frame durations to under a microsecond.
     nonisolated static let seekTimescale: CMTimeScale = 600_000
 
+    private var preferenceObserver: NSObjectProtocol?
+
     init() {
         player.actionAtItemEnd = .pause
+        applyPreferences()
         installTimeObserver()
+        preferenceObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyPreferences()
+            }
+        }
         controlObservation = player.observe(
             \.timeControlStatus,
             options: [.new]
@@ -84,8 +96,19 @@ final class MediaPlaybackModel {
         }
     }
 
+    /// Routes audio to the output device chosen in Settings. A missing or
+    /// unknown device falls back to the system default (nil).
+    private func applyPreferences() {
+        let uid = Preferences.audioDeviceUID
+        guard player.audioOutputDeviceUniqueID != uid else { return }
+        player.audioOutputDeviceUniqueID = uid
+    }
+
     isolated deinit {
         loadTask?.cancel()
+        if let preferenceObserver {
+            NotificationCenter.default.removeObserver(preferenceObserver)
+        }
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
         }
@@ -314,11 +337,9 @@ final class MediaPlaybackModel {
     /// The single seek path. An exact CMTime is passed through unchanged so
     /// a frame boundary is not re-rounded to the general-purpose timescale.
     private func seek(to time: CMTime, seconds clamped: Double) async {
-        guard state == .ready else {
-            elapsed = clamped
-            timecode.elapsed = clamped
-            return
-        }
+        // A seek before the item is ready has no player to act on; moving
+        // the readout would claim a position that was never applied.
+        guard state == .ready else { return }
         seekGeneration &+= 1
         let generation = seekGeneration
         lastRequestedSeekTarget = clamped
@@ -369,6 +390,7 @@ final class MediaPlaybackModel {
     }
 
     func stepFrames(_ delta: Int) {
+        guard state == .ready else { return }
         // Frame stepping is an exact-frame claim; it requires the whole
         // track's timing to have been measured as constant.
         guard isFrameRateVerified else { return }
@@ -407,17 +429,24 @@ final class MediaPlaybackModel {
         // Record the target synchronously. Two quick commands otherwise both
         // read the same base before either queued seek task starts.
         lastRequestedSeekTarget = bounded
+        let generation = loadGeneration
         Task { @MainActor [weak self] in
-            await self?.seek(to: boundedTime, seconds: bounded)
+            // A queued command must not seek the item that replaced the one
+            // it was issued against.
+            guard let self, self.loadGeneration == generation else { return }
+            await self.seek(to: boundedTime, seconds: bounded)
         }
     }
 
     func skip(by seconds: Double) {
+        guard state == .ready else { return }
         let base = lastRequestedSeekTarget ?? elapsed
         let target = min(max(base + seconds, 0), max(duration, 0))
         lastRequestedSeekTarget = target
+        let generation = loadGeneration
         Task { @MainActor [weak self] in
-            await self?.seek(to: target)
+            guard let self, self.loadGeneration == generation else { return }
+            await self.seek(to: target)
         }
     }
 

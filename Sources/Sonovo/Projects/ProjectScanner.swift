@@ -35,6 +35,7 @@ struct ProjectScanner: Sendable {
         .isDirectoryKey,
         .isRegularFileKey,
         .isSymbolicLinkKey,
+        .isPackageKey,
         .fileSizeKey,
         .contentModificationDateKey,
         .fileResourceIdentifierKey
@@ -80,30 +81,35 @@ struct ProjectScanner: Sendable {
         var truncated = false
         var isPartial = false
 
-        // Enumerate lazily. The previous per-directory arrays materialized a
-        // whole directory before the visited cap could stop it; the
-        // enumerator produces one URL at a time, so the cap bounds memory as
-        // well as work. Assets are sorted at the end, keeping the index
-        // deterministic without sorting every directory along the way.
-        let enumerator = FileManager.default.enumerator(
-            at: canonicalRoot,
-            includingPropertiesForKeys: Array(Self.resourceKeys),
-            options: [.skipsHiddenFiles, .skipsPackageDescendants],
-            errorHandler: { _, _ in
+        // Walk directories in a fixed order. `FileManager.enumerator` yields
+        // entries in an unspecified order, so which assets survive the
+        // visited and asset caps would change between scans. Sorting each
+        // directory's names before pushing it makes both the index and the
+        // subset deterministic. Only one directory's names are held at a
+        // time; metadata is read per entry after the cap check.
+        var stack: [(url: URL, depth: Int)] = [(canonicalRoot, 0)]
+        scanLoop: while let directory = stack.popLast() {
+            let names: [String]
+            do {
+                names = try FileManager.default.contentsOfDirectory(
+                    atPath: directory.url.path
+                )
+            } catch {
+                // A directory that cannot be read makes the index partial;
+                // reconciliation must not treat its files as deleted.
                 isPartial = true
-                return true
+                continue
             }
-        )
-
-        if let enumerator {
-            scanLoop: for case let entry as URL in enumerator {
+            let sorted = names.sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending
+            }
+            for name in sorted where !name.hasPrefix(".") {
+                let entry = directory.url.appendingPathComponent(name)
                 visited += 1
                 if visited > limits.maximumVisitedEntries {
                     truncated = true
-                    break
+                    break scanLoop
                 }
-                let depth = entry.pathComponents.count
-                    - canonicalRoot.pathComponents.count
                 guard let values = try? entry.resourceValues(
                     forKeys: Self.resourceKeys
                 ) else {
@@ -118,17 +124,20 @@ struct ProjectScanner: Sendable {
 
                 if isDirectory {
                     if isSymbolicLink {
-                        enumerator.skipDescendants()
+                        continue
+                    }
+                    if values.isPackage == true {
                         continue
                     }
                     if Self.ignoredDirectories.contains(entry.lastPathComponent) {
-                        enumerator.skipDescendants()
                         continue
                     }
-                    if depth >= limits.maximumDepth {
-                        enumerator.skipDescendants()
+                    let childDepth = directory.depth + 1
+                    if childDepth >= limits.maximumDepth {
                         truncated = true
+                        continue
                     }
+                    stack.append((entry, childDepth))
                     continue
                 }
 
@@ -153,7 +162,7 @@ struct ProjectScanner: Sendable {
                 }
                 guard resolvedValues?.isRegularFile == true,
                       let kind = Self.kind(
-                        forFilename: entry.lastPathComponent
+                        forFilename: resolved.lastPathComponent
                       ) else {
                     continue
                 }
@@ -169,7 +178,7 @@ struct ProjectScanner: Sendable {
                     ProjectAsset(
                         id: path,
                         url: resolved,
-                        name: entry.lastPathComponent,
+                        name: resolved.lastPathComponent,
                         relativePath: String(
                             path.dropFirst(rootPath.count)
                         ),
@@ -188,8 +197,6 @@ struct ProjectScanner: Sendable {
                     break scanLoop
                 }
             }
-        } else {
-            isPartial = true
         }
 
         assets.sort {

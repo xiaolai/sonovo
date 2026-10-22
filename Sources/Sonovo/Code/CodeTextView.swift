@@ -68,6 +68,12 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     }
 
     private var symbolCache: SymbolCache?
+    private struct SymbolScan {
+        let revision: UInt64
+        let language: CodeLanguage
+        let task: Task<[CodeSymbol], Never>
+    }
+    private var sharedSymbolScan: SymbolScan?
 
     private final class WeakController: @unchecked Sendable {
         weak var value: CodeEditorController?
@@ -470,6 +476,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     /// visible range. Attributes never touch text or undo history.
     func applyHighlight(_ snapshot: CodeLexSnapshot) {
         guard snapshot.revision == document.revision else { return }
+        guard snapshot.language == document.language else { return }
         guard !textView.hasMarkedText() else { return }
         guard let storage = textView.textStorage else { return }
 
@@ -634,6 +641,23 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         at index: Int,
         in ns: NSString
     ) -> Int? {
+        // The lexer is the authority on strings and comments. Only use it
+        // when it describes the text on screen.
+        let snapshot: CodeLexSnapshot? = {
+            guard let snapshot = highlightSnapshot,
+                  snapshot.revision == document.revision,
+                  snapshot.language == document.language else {
+                return nil
+            }
+            return snapshot
+        }()
+        func isLiteral(_ offset: Int) -> Bool {
+            guard let kind = snapshot?.tokenKind(at: offset) else {
+                return false
+            }
+            return kind == .string || kind == .comment
+        }
+        if isLiteral(index) { return nil }
         let isOpening = Self.openingBrackets.contains(bracket)
         let paired: unichar
         switch bracket {
@@ -649,6 +673,10 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         var depth = 0
         var cursor = index
         while cursor >= 0, cursor < ns.length {
+            if isLiteral(cursor) {
+                cursor += isOpening ? 1 : -1
+                continue
+            }
             let unit = ns.character(at: cursor)
             if unit == bracket {
                 depth += 1
@@ -736,6 +764,63 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
 
     // MARK: - Symbols
 
+    /// The outline scan for the current revision, when the controller has
+    /// already produced one. The symbol sheet reuses it instead of running a
+    /// second full lex.
+    func cachedSymbols() -> [CodeSymbol]? {
+        guard let cache = symbolCache,
+              cache.revision == document.revision,
+              cache.language == document.language else {
+            return nil
+        }
+        return cache.symbols
+    }
+
+    /// The outline for the current revision. The viewer's symbol sheet and
+    /// the breadcrumb share one scan instead of running a full lex each.
+    func symbolsForCurrentRevision() async -> [CodeSymbol]? {
+        let language = document.language
+        guard language.supportsOutline else { return nil }
+        let revision = document.revision
+        if let cache = symbolCache,
+           cache.revision == revision,
+           cache.language == language {
+            return cache.symbols
+        }
+        let task: Task<[CodeSymbol], Never>
+        if let shared = sharedSymbolScan,
+           shared.revision == revision,
+           shared.language == language {
+            task = shared.task
+        } else {
+            let source = textView.string
+            symbolScanCount += 1
+            task = Task.detached(priority: .utility) {
+                CodeSymbolIndex.symbols(in: source, language: language)
+            }
+            sharedSymbolScan = SymbolScan(
+                revision: revision,
+                language: language,
+                task: task
+            )
+        }
+        let symbols = await task.value
+        if sharedSymbolScan?.revision == revision,
+           sharedSymbolScan?.language == language {
+            sharedSymbolScan = nil
+        }
+        guard document.revision == revision,
+              document.language == language else {
+            return nil
+        }
+        symbolCache = SymbolCache(
+            revision: revision,
+            language: language,
+            symbols: symbols
+        )
+        return symbols
+    }
+
     private func refreshSymbol() {
         symbolTask?.cancel()
         let language = document.language
@@ -754,31 +839,15 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             symbolName = CodeSymbolIndex.symbol(at: line, in: cache.symbols)?.name
             return
         }
-        let source = textView.string
         symbolTask = Task { @MainActor [weak self] in
             // Wait for the cursor to settle; moving through a line should
             // not launch a symbol scan per keystroke.
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled, let self else { return }
-            self.symbolScanCount += 1
-            let worker = Task.detached(priority: .utility) {
-                CodeSymbolIndex.symbols(in: source, language: language)
-            }
-            let symbols = await withTaskCancellationHandler {
-                await worker.value
-            } onCancel: {
-                worker.cancel()
-            }
-            guard !Task.isCancelled,
-                  self.document.revision == revision,
-                  self.document.language == language else {
+            guard let symbols = await self.symbolsForCurrentRevision() else {
                 return
             }
-            self.symbolCache = SymbolCache(
-                revision: revision,
-                language: language,
-                symbols: symbols
-            )
+            guard !Task.isCancelled else { return }
             self.symbolName = CodeSymbolIndex.symbol(
                 at: line,
                 in: symbols

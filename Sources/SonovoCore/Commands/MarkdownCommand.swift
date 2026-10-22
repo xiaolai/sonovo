@@ -88,7 +88,29 @@ public struct MarkdownCommandResult: Sendable, Equatable {
                 == b.character(at: b.length - 1 - suffix) {
             suffix += 1
         }
-        return prefix..<(b.length - suffix)
+        var lower = prefix
+        var upper = b.length - suffix
+        // Never return a boundary inside a UTF-16 surrogate pair. The editor
+        // replaces the changed range, and half a pair corrupts the text.
+        if lower > 0, lower < b.length,
+           isHighSurrogate(b.character(at: lower - 1)),
+           isLowSurrogate(b.character(at: lower)) {
+            lower -= 1
+        }
+        if upper > 0, upper < b.length,
+           isHighSurrogate(b.character(at: upper - 1)),
+           isLowSurrogate(b.character(at: upper)) {
+            upper += 1
+        }
+        return lower..<upper
+    }
+
+    private static func isHighSurrogate(_ value: unichar) -> Bool {
+        value >= 0xD800 && value <= 0xDBFF
+    }
+
+    private static func isLowSurrogate(_ value: unichar) -> Bool {
+        value >= 0xDC00 && value <= 0xDFFF
     }
 }
 
@@ -320,7 +342,12 @@ public struct MarkdownCommandRegistry: Sendable {
             afterRun += 1
             probe += 1
         }
-        if beforeRun == afterRun, unwrapRuns.contains(beforeRun) {
+        if beforeRun == afterRun,
+           unwrapRuns.contains(beforeRun),
+           // The run's first marker decides whether the delimiter is
+           // escaped, not its last one.
+           !isEscaped(core.location - beforeRun, in: ns),
+           !isEscaped(core.location + core.length, in: ns) {
             let before = NSRange(
                 location: core.location - markerLength,
                 length: markerLength
@@ -356,7 +383,12 @@ public struct MarkdownCommandRegistry: Sendable {
         }
         if core.length >= markerLength * 2,
            selectedPrefixRun == selectedSuffixRun,
-           unwrapRuns.contains(selectedPrefixRun) {
+           unwrapRuns.contains(selectedPrefixRun),
+           !isEscaped(core.location, in: ns),
+           !isEscaped(
+               core.location + core.length - selectedSuffixRun,
+               in: ns
+           ) {
             let inner = NSRange(
                 location: core.location + markerLength,
                 length: core.length - markerLength * 2
@@ -430,9 +462,15 @@ public struct MarkdownCommandRegistry: Sendable {
             probe += 1
         }
 
+        let openerStart = core.location - beforeRun
+            - (beforePadding ? 1 : 0)
+        let closerStart = core.location + core.length
+            + (afterPadding ? 1 : 0)
         if beforeRun > 0,
            beforeRun == afterRun,
            beforePadding == afterPadding,
+           !isEscaped(openerStart, in: ns),
+           !isEscaped(closerStart, in: ns),
            !containsBacktickRun(ofLength: beforeRun, in: ns, range: core) {
             let padding = beforePadding ? 1 : 0
             let beforeStart = core.location - beforeRun - padding
@@ -468,6 +506,7 @@ public struct MarkdownCommandRegistry: Sendable {
         }
         let text = ns.substring(with: core)
         if leading > 0, leading == trailing, core.length >= leading * 2,
+           !isEscaped(core.location, in: ns),
            !containsBacktickRun(
                ofLength: leading,
                in: ns,
@@ -651,7 +690,52 @@ public struct MarkdownCommandRegistry: Sendable {
     ) -> String {
         let range = match.range(at: 3)
         guard range.location != NSNotFound else { return "" }
-        return rest.substring(with: range)
+        var content = rest.substring(with: range)
+        while let last = content.last, last == " " || last == "\t" {
+            content.removeLast()
+        }
+        // An optional ATX closing sequence is a run of `#` preceded by
+        // whitespace and not backslash-escaped. It is syntax, not content.
+        var hashStart = content.endIndex
+        while hashStart > content.startIndex {
+            let previous = content.index(before: hashStart)
+            guard content[previous] == "#" else { break }
+            hashStart = previous
+        }
+        if hashStart < content.endIndex {
+            if hashStart == content.startIndex {
+                content = ""
+            } else {
+                let before = content.index(before: hashStart)
+                let precededBySpace = content[before] == " "
+                    || content[before] == "\t"
+                // A backslash before the hash run would leave no preceding
+                // whitespace, which already fails this test. An escaped
+                // space before the run does not escape the hashes.
+                if precededBySpace {
+                    content = String(content[..<before])
+                    while let last = content.last,
+                          last == " " || last == "\t" {
+                        content.removeLast()
+                    }
+                }
+            }
+        }
+        return content
+    }
+
+    /// Whether the character at `index` is escaped by an odd run of
+    /// backslashes. A marker after a backslash is literal text, not a
+    /// delimiter this command may remove.
+    private func isEscaped(_ index: Int, in ns: NSString) -> Bool {
+        guard index >= 0, index < ns.length else { return false }
+        var backslashes = 0
+        var probe = index - 1
+        while probe >= 0, ns.character(at: probe) == 0x5C {
+            backslashes += 1
+            probe -= 1
+        }
+        return backslashes % 2 == 1
     }
 
     /// Whether `range` contains a run of exactly `length` backticks. A code
@@ -726,8 +810,11 @@ public struct MarkdownCommandRegistry: Sendable {
         let selection = try validatedSelection(context)
         let (block, lines) = lines(ns, covering: selection)
 
+        // A list marker may be followed by no content at all (`-`, `1.`);
+        // requiring whitespace missed those empty items and added a second
+        // marker instead of toggling the existing one off.
         let markerPattern = try NSRegularExpression(
-            pattern: #"^(\s*)([-*+]|[0-9]{1,9}[.)])([ \t]+)(\[[ xX]\](?:[ \t]+|$))?"#
+            pattern: #"^(\s*)([-*+]|[0-9]{1,9}[.)])([ \t]+|$)(\[[ xX]\](?:[ \t]+|$))?"#
         )
 
         func marker(of line: String) -> (matchedKind: MarkdownListKind?, rest: String, indent: String)? {

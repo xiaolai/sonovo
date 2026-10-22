@@ -55,10 +55,19 @@ enum WebVTTParser {
                 lines[blockStart],
                 in: ns
             )
-            let upper = firstText.uppercased()
-            if upper.hasPrefix("NOTE")
-                || upper.hasPrefix("STYLE")
-                || upper.hasPrefix("REGION") {
+            // WebVTT block keywords are uppercase and must be followed by a
+            // boundary. `NOTEBOOK` is a cue identifier, not a NOTE block.
+            // STYLE/REGION can also begin a cue identifier when a timing
+            // line follows.
+            let nextLine = blockStart + 1 < blockEnd
+                ? SubtitleLineIndex.trimmed(lines[blockStart + 1], in: ns)
+                : ""
+            let isCue = firstText.contains("-->") || nextLine.contains("-->")
+            if Self.isBlockKeyword(firstText, "NOTE")
+                || (!isCue && (
+                    Self.isBlockKeyword(firstText, "STYLE")
+                        || Self.isBlockKeyword(firstText, "REGION")
+                )) {
                 index = blockEnd
                 continue
             }
@@ -155,6 +164,10 @@ enum WebVTTParser {
                 )
             }
 
+            guard parts.cues.count < SubtitleLimits.maxCueCount else {
+                parts.truncated = true
+                break
+            }
             parts.cues.append(
                 SubtitleCue(
                     ordinal: ordinal,
@@ -186,4 +199,12 @@ enum WebVTTParser {
         return parts
     }
 
+    private static func isBlockKeyword(
+        _ text: String,
+        _ keyword: String
+    ) -> Bool {
+        text == keyword
+            || text.hasPrefix(keyword + " ")
+            || text.hasPrefix(keyword + "\t")
+    }
 }

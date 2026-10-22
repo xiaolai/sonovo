@@ -287,32 +287,33 @@ private struct ProjectAssetRow: View {
 
 private struct FileTreeView: View {
     @Bindable var state: AppState
+    @State private var expanded: Set<String> = []
 
     var body: some View {
         if state.liveProject.isDemo {
-            List(SampleContent.fileTree, children: \.children) { node in
-                HStack(spacing: AppTheme.Spacing.sm) {
-                    Image(systemName: node.icon)
-                        .font(.system(size: AppTheme.TypeScale.body))
-                        .foregroundStyle(.secondary)
-                        .frame(width: AppTheme.IconSize.row)
-
-                    Text(node.name)
-                        .font(.system(size: AppTheme.TypeScale.body))
-                        .lineLimit(1)
-
-                    Spacer(minLength: AppTheme.Spacing.xs)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if let assetID = node.assetID {
-                        state.openAsset(assetID)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: AppTheme.Spacing.zero) {
+                        ForEach(SampleContent.fileTree) { node in
+                            FileTreeNodeRow(
+                                state: state,
+                                node: node,
+                                level: 0,
+                                expanded: $expanded
+                            )
+                        }
                     }
+                    .padding(.vertical, AppTheme.Spacing.xs)
                 }
-                .help(node.assetID == nil ? node.name : "Open \(node.name)")
+                .onAppear {
+                    // The Files navigator can mount after "Show in Files"
+                    // already set the selection; no change event follows.
+                    reveal(state.selectedAssetID, proxy: proxy)
+                }
+                .onChange(of: state.selectedAssetID) { _, assetID in
+                    reveal(assetID, proxy: proxy)
+                }
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
         } else {
             ContentUnavailableView(
                 "Project Files",
@@ -323,6 +324,155 @@ private struct FileTreeView: View {
                 )
             )
             .frame(maxHeight: .infinity)
+        }
+    }
+
+    /// "Show in Files" must reveal a node inside a collapsed folder, then
+    /// scroll to it once the expansion renders.
+    private func reveal(_ assetID: String?, proxy: ScrollViewProxy) {
+        guard let assetID,
+              let nodeID = Self.nodeID(
+                  forAsset: assetID,
+                  in: SampleContent.fileTree
+              ) else {
+            return
+        }
+        if let ancestors = Self.ancestors(
+            ofAsset: assetID,
+            in: SampleContent.fileTree
+        ) {
+            expanded.formUnion(ancestors)
+        }
+        DispatchQueue.main.async {
+            withAnimation {
+                proxy.scrollTo(nodeID, anchor: .center)
+            }
+        }
+    }
+
+    private static func nodeID(
+        forAsset assetID: String,
+        in nodes: [FileNode]
+    ) -> String? {
+        for node in nodes {
+            if node.assetID == assetID { return node.id }
+            if let children = node.children,
+               let found = nodeID(forAsset: assetID, in: children) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    /// The folder IDs that contain the asset, outermost first.
+    private static func ancestors(
+        ofAsset assetID: String,
+        in nodes: [FileNode]
+    ) -> Set<String>? {
+        var path: [String] = []
+
+        func walk(_ nodes: [FileNode]) -> Bool {
+            for node in nodes {
+                if node.assetID == assetID { return true }
+                guard let children = node.children else { continue }
+                path.append(node.id)
+                if walk(children) { return true }
+                path.removeLast()
+            }
+            return false
+        }
+
+        return walk(nodes) ? Set(path) : nil
+    }
+}
+
+/// One row of the demo file tree. Folders toggle; files open.
+private struct FileTreeNodeRow: View {
+    let state: AppState
+    let node: FileNode
+    let level: Int
+    @Binding var expanded: Set<String>
+
+    private var isSelected: Bool {
+        node.assetID != nil && node.assetID == state.selectedAssetID
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.zero) {
+            HStack(spacing: AppTheme.Spacing.sm) {
+                if node.children != nil {
+                    Image(
+                        systemName: expanded.contains(node.id)
+                            ? "chevron.down"
+                            : "chevron.right"
+                    )
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.xxs,
+                            weight: .semibold
+                        )
+                    )
+                    .foregroundStyle(.secondary)
+                    .frame(width: AppTheme.IconSize.row)
+                } else {
+                    Color.clear
+                        .frame(width: AppTheme.IconSize.row)
+                }
+
+                Image(systemName: node.icon)
+                    .font(.system(size: AppTheme.TypeScale.body))
+                    .foregroundStyle(.secondary)
+                    .frame(width: AppTheme.IconSize.row)
+
+                Text(node.name)
+                    .font(.system(size: AppTheme.TypeScale.body))
+                    .lineLimit(1)
+
+                Spacer(minLength: AppTheme.Spacing.xs)
+            }
+            .padding(.leading, AppTheme.Spacing.sm)
+            .padding(.vertical, AppTheme.Spacing.xxs)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(
+                    cornerRadius: AppTheme.Radius.micro,
+                    style: .continuous
+                )
+                .fill(
+                    isSelected
+                        ? Color.accentColor.opacity(AppTheme.Opacity.tint)
+                        : Color.clear
+                )
+            )
+            .padding(.leading, CGFloat(level) * AppTheme.Spacing.md)
+            .onTapGesture {
+                if node.children != nil {
+                    toggle()
+                } else if let assetID = node.assetID {
+                    state.openAsset(assetID)
+                }
+            }
+            .help(node.assetID == nil ? node.name : "Open \(node.name)")
+
+            if expanded.contains(node.id), let children = node.children {
+                ForEach(children) { child in
+                    FileTreeNodeRow(
+                        state: state,
+                        node: child,
+                        level: level + 1,
+                        expanded: $expanded
+                    )
+                }
+            }
+        }
+        .id(node.id)
+    }
+
+    private func toggle() {
+        if expanded.contains(node.id) {
+            expanded.remove(node.id)
+        } else {
+            expanded.insert(node.id)
         }
     }
 }

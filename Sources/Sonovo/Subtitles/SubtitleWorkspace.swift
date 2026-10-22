@@ -76,7 +76,7 @@ final class SubtitleWorkspace {
     }
 
     var hasDirtyDocuments: Bool {
-        documents.contains(where: \.isDirty)
+        documents.contains { $0.isDirty || $0.hasPendingDraft }
     }
 
     init(
@@ -201,6 +201,28 @@ final class SubtitleWorkspace {
         }
     }
 
+    /// Applies a typed draft; nil means the cue changed underneath it.
+    @discardableResult
+    func applyDraft(
+        text: String,
+        ordinal: Int,
+        baseText: String,
+        revision: UInt64,
+        to document: SubtitleDocument
+    ) async -> SubtitleEditResult? {
+        do {
+            return try await document.applyDraft(
+                ordinal: ordinal,
+                text: text,
+                baseText: baseText,
+                revision: revision
+            )
+        } catch {
+            lastError = "Edit failed: \(error)"
+            return nil
+        }
+    }
+
     func seek(toMilliseconds milliseconds: Int) {
         guard player.isReady else { return }
         player.seek(toMilliseconds: max(0, milliseconds))
@@ -239,7 +261,18 @@ final class SubtitleWorkspace {
 
     func save(_ document: SubtitleDocument) async {
         do {
-            try await document.save()
+            // A Save while a cue draft is open must include the words on
+            // screen; the draft is not part of the source yet.
+            if document.hasPendingDraft {
+                guard await document.commitPendingDraft() else {
+                    lastError = "Save failed: the cue draft conflicts with "
+                        + "the file on disk."
+                    return
+                }
+            }
+            // A user Save is explicit: it may recreate a file deleted on
+            // disk. Autosave keeps the automatic mode and refuses.
+            try await document.save(mode: .explicitOverwrite)
             autosave.didSave(document.id)
             lastError = nil
         } catch {
@@ -254,7 +287,8 @@ final class SubtitleWorkspace {
 
     func flushAllForTermination() async -> Bool {
         for _ in 0..<3 {
-            for document in documents where document.isDirty {
+            for document in documents
+            where document.isDirty || document.hasPendingDraft {
                 let outcome = await document.flushForClose()
                 if case let .needsDecision(blocker) = outcome {
                     selectedDocumentID = document.id
@@ -262,12 +296,16 @@ final class SubtitleWorkspace {
                     return false
                 }
             }
-            if !documents.contains(where: \.isDirty) {
+            if !documents.contains(where: {
+                $0.isDirty || $0.hasPendingDraft
+            }) {
                 return true
             }
         }
         lastError = "Some subtitle files could not be saved before closing."
-        return !documents.contains(where: \.isDirty)
+        return !documents.contains(where: {
+            $0.isDirty || $0.hasPendingDraft
+        })
     }
 
     // MARK: - Media

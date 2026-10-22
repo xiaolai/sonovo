@@ -64,6 +64,12 @@ struct CodeLexLine: Sendable, Equatable {
     let tokens: [CodeLexToken]
     /// The line exceeded the 20k UTF-8 byte cap and was not tokenized.
     let isPlain: Bool
+    /// The significant-token context entering this line. Regex-versus-
+    /// division depends on the last non-comment token above the line, so an
+    /// incremental pass may copy a line only when this context is unchanged.
+    let startContext: UInt64
+    /// The context this line leaves for the next one.
+    let endContext: UInt64
 }
 
 /// An immutable lexing result for one revision of one document.
@@ -80,6 +86,19 @@ struct CodeLexSnapshot: Sendable, Equatable {
 
     var longLineCount: Int {
         lines.reduce(0) { $0 + ($1.isPlain ? 1 : 0) }
+    }
+
+    /// The lexical role at a UTF-16 offset, when a token covers it.
+    func tokenKind(at offset: Int) -> CodeTokenKind? {
+        guard !lines.isEmpty else { return nil }
+        let lineIndex = lineNumber(at: offset) - 1
+        guard lines.indices.contains(lineIndex) else { return nil }
+        let line = lines[lineIndex]
+        let local = offset - line.start
+        guard local >= 0 else { return nil }
+        return line.tokens.first {
+            local >= $0.offset && local < $0.offset + $0.length
+        }?.kind
     }
 
     /// The 1-based line number containing a UTF-16 offset.
@@ -128,6 +147,42 @@ struct CodeLexSnapshot: Sendable, Equatable {
     }
 }
 
+/// Literal (string/comment/regex) token ranges from the lines already lexed
+/// in this pass. A control condition can span lines, and a `)` inside a
+/// literal on an earlier line must not count as code when matching
+/// parentheses. Ranges are absolute and appended in source order.
+private final class LiteralRangeHistory {
+    private(set) var ranges: [Range<Int>] = []
+    private var kinds: [CodeTokenKind] = []
+
+    func append(tokens: [CodeLexToken], lineStart: Int) {
+        for token in tokens
+        where token.kind == .string || token.kind == .comment {
+            let lower = lineStart + token.offset
+            ranges.append(lower..<(lower + token.length))
+            kinds.append(token.kind)
+        }
+    }
+
+    /// The literal range (and its kind) containing `offset`, when one exists.
+    func containing(_ offset: Int) -> (range: Range<Int>, kind: CodeTokenKind)? {
+        var low = 0
+        var high = ranges.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            if ranges[mid].lowerBound <= offset {
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        guard high >= 0 else { return nil }
+        let range = ranges[high]
+        guard range.upperBound > offset else { return nil }
+        return (range, kinds[high])
+    }
+}
+
 /// A line-state lexer with checkpoints.
 ///
 /// The first pass lexes every line. Later passes start at the edited line and
@@ -147,16 +202,27 @@ enum CodeSyntaxHighlighter {
         var lines: [CodeLexLine] = []
         lines.reserveCapacity(ranges.count)
         var state = CodeLineState.normal
+        var context: UInt64 = 0
+        let history = LiteralRangeHistory()
         for range in ranges {
             if Task.isCancelled { break }
             let startState = state
+            let startContext = context
             let result = lexLine(
                 units,
                 range: range,
                 state: startState,
-                spec: spec
+                spec: spec,
+                history: history
             )
             state = result.endState
+            let endContext = contextAfter(
+                tokens: result.tokens,
+                units: units,
+                lineStart: range.start,
+                previous: startContext
+            )
+            context = endContext
             lines.append(
                 CodeLexLine(
                     start: range.start,
@@ -165,9 +231,12 @@ enum CodeSyntaxHighlighter {
                     stateAtStart: startState,
                     endState: result.endState,
                     tokens: result.tokens,
-                    isPlain: result.isPlain
+                    isPlain: result.isPlain,
+                    startContext: startContext,
+                    endContext: endContext
                 )
             )
+            history.append(tokens: result.tokens, lineStart: range.start)
         }
         return CodeLexSnapshot(
             revision: revision,
@@ -215,8 +284,15 @@ enum CodeSyntaxHighlighter {
             : CodeLineState.normal
         var lines: [CodeLexLine] = []
         lines.reserveCapacity(ranges.count)
+        let history = LiteralRangeHistory()
+        var context: UInt64 = 0
         if start > 0, previous.lines.count >= start {
-            lines.append(contentsOf: previous.lines.prefix(start))
+            let prefix = previous.lines.prefix(start)
+            lines.append(contentsOf: prefix)
+            for line in prefix {
+                history.append(tokens: line.tokens, lineStart: line.start)
+            }
+            context = prefix.last?.endContext ?? 0
         }
         var candidate = start + 1 - delta
         var reprocessed = 0
@@ -230,7 +306,8 @@ enum CodeSyntaxHighlighter {
             if candidate >= 0,
                candidate < previous.lines.count,
                previous.lines[candidate].hash == lineHash,
-               previous.lines[candidate].stateAtStart == state {
+               previous.lines[candidate].stateAtStart == state,
+               previous.lines[candidate].startContext == context {
                 let copied = previous.lines[candidate]
                 lines.append(
                     CodeLexLine(
@@ -240,17 +317,29 @@ enum CodeSyntaxHighlighter {
                         stateAtStart: state,
                         endState: copied.endState,
                         tokens: copied.tokens,
-                        isPlain: copied.isPlain
+                        isPlain: copied.isPlain,
+                        startContext: context,
+                        endContext: copied.endContext
                     )
                 )
                 state = copied.endState
+                context = copied.endContext
+                history.append(tokens: copied.tokens, lineStart: range.start)
                 candidate += 1
             } else {
+                let startContext = context
                 let result = lexLine(
                     units,
                     range: range,
                     state: state,
-                    spec: spec
+                    spec: spec,
+                    history: history
+                )
+                let endContext = contextAfter(
+                    tokens: result.tokens,
+                    units: units,
+                    lineStart: range.start,
+                    previous: startContext
                 )
                 lines.append(
                     CodeLexLine(
@@ -260,10 +349,14 @@ enum CodeSyntaxHighlighter {
                         stateAtStart: state,
                         endState: result.endState,
                         tokens: result.tokens,
-                        isPlain: result.isPlain
+                        isPlain: result.isPlain,
+                        startContext: startContext,
+                        endContext: endContext
                     )
                 )
                 state = result.endState
+                context = endContext
+                history.append(tokens: result.tokens, lineStart: range.start)
                 reprocessed += 1
                 // After a relexed line, the untouched remainder of the old
                 // file is aligned by the line-count delta.
@@ -321,6 +414,44 @@ enum CodeSyntaxHighlighter {
         return value
     }
 
+    /// The regex context after a line. Only what can change the next line's
+    /// regex decision is part of the key: a keyword's spelling, a generic
+    /// operand marker for literals and identifiers, and the final character
+    /// of punctuation. Comments are transparent; a blank or comment-only
+    /// line keeps the incoming context.
+    private static func contextAfter(
+        tokens: [CodeLexToken],
+        units: [unichar],
+        lineStart: Int,
+        previous: UInt64
+    ) -> UInt64 {
+        guard let token = tokens.last(where: { $0.kind != .comment }),
+              token.length > 0 else {
+            return previous
+        }
+        let start = lineStart + token.offset
+        let end = start + token.length
+        guard start >= 0, end <= units.count else { return previous }
+        switch token.kind {
+        case .keyword:
+            var value = FNV.offset
+            for index in start..<end {
+                value = FNV.step(value, units[index])
+            }
+            return value
+        case .identifier, .typeName, .number, .function, .property:
+            // Any operand ends the expression the same way.
+            return FNV.step(FNV.offset, 0x01)
+        case .string:
+            // A quoted string or a regex literal: both are operands.
+            return FNV.step(FNV.offset, 0x02)
+        case .punctuation, .markup:
+            return FNV.step(FNV.offset, units[end - 1])
+        case .comment:
+            return previous
+        }
+    }
+
     // MARK: - One line
 
     private struct LineResult {
@@ -333,7 +464,8 @@ enum CodeSyntaxHighlighter {
         _ units: [unichar],
         range: LineRange,
         state: CodeLineState,
-        spec: CompiledSyntax
+        spec: CompiledSyntax,
+        history: LiteralRangeHistory
     ) -> LineResult {
         let start = range.start
         let end = range.contentEnd
@@ -346,7 +478,8 @@ enum CodeSyntaxHighlighter {
                 units: units,
                 start: start,
                 end: end,
-                spec: spec
+                spec: spec,
+                history: history
             )
             scanner.suppressTokens = true
             scanner.run(state: state)
@@ -361,7 +494,8 @@ enum CodeSyntaxHighlighter {
             units: units,
             start: start,
             end: end,
-            spec: spec
+            spec: spec,
+            history: history
         )
         scanner.run(state: state)
         return LineResult(
@@ -437,6 +571,8 @@ private struct CompiledSyntax {
     let hashCommentRequiresBoundary: Bool
     let rawStrings: CodeRawStringStyle?
     let heredocs: [CodeHeredocStyle]
+    let multilineQuoteStrings: Bool
+    let regexLiterals: Bool
     let keywords: Set<String>
     let typeKeywords: Set<String>
     let keywordHashes: Set<UInt64>
@@ -463,6 +599,8 @@ private struct CompiledSyntax {
                 escapes: $0.escapes
             )
         }
+        multilineQuoteStrings = spec.multilineQuoteStrings
+        regexLiterals = spec.regexLiterals
         backtickStrings = spec.backtickStrings
         backtickEscapes = spec.backtickEscapes
         singleQuoteEscapes = spec.singleQuoteEscapes
@@ -518,16 +656,24 @@ private struct LineScanner {
     let start: Int
     let end: Int
     let spec: CompiledSyntax
+    let history: LiteralRangeHistory
     var tokens: [CodeLexToken] = []
     var endState = CodeLineState.normal
     /// Long lines advance the state machine without producing attributes.
     var suppressTokens = false
 
-    init(units: [unichar], start: Int, end: Int, spec: CompiledSyntax) {
+    init(
+        units: [unichar],
+        start: Int,
+        end: Int,
+        spec: CompiledSyntax,
+        history: LiteralRangeHistory
+    ) {
         self.units = units
         self.start = start
         self.end = end
         self.spec = spec
+        self.history = history
         tokens.reserveCapacity(8)
     }
 
@@ -572,6 +718,31 @@ private struct LineScanner {
                     close: close,
                     nested: nested
                 )
+                return true
+            }
+            endState = .normal
+        case .multilineString(let delimiter) where spec.multilineQuoteStrings
+            && (delimiter == "\"" || delimiter == "'"):
+            // A shell-style quote that survives a newline. This case must
+            // precede the generic multiline-string case, which would
+            // otherwise consume the quote state for specs that also list
+            // quotes as multiline delimiters.
+            let quote = unichar(delimiter.utf16.first ?? 0)
+            let escapeAware = quote == 0x22
+                ? spec.doubleQuoteEscapes
+                : spec.singleQuoteEscapes
+            let closed = scanUntil(
+                from: &index,
+                terminator: [quote],
+                escapeAware: escapeAware
+            )
+            appendToken(
+                offset: 0,
+                length: index - start,
+                kind: .string
+            )
+            if !closed {
+                endState = .multilineString(delimiter: delimiter)
                 return true
             }
             endState = .normal
@@ -704,6 +875,19 @@ private struct LineScanner {
                     kind: .comment
                 )
                 index = end
+                continue
+            }
+
+            if spec.regexLiterals, units[index] == 0x2F,
+               canStartRegex(at: index),
+               let regexEnd = scanRegexLiteral(from: index) {
+                let openIndex = index
+                index = regexEnd
+                appendToken(
+                    offset: openIndex - start,
+                    length: index - openIndex,
+                    kind: .string
+                )
                 continue
             }
 
@@ -850,7 +1034,14 @@ private struct LineScanner {
                     kind: .string
                 )
                 if !closed {
-                    endState = .normal
+                    if spec.multilineQuoteStrings,
+                       let scalar = UnicodeScalar(quote) {
+                        endState = .multilineString(
+                            delimiter: String(Character(scalar))
+                        )
+                    } else {
+                        endState = .normal
+                    }
                     return
                 }
                 continue
@@ -1407,6 +1598,437 @@ private struct LineScanner {
     }
 
     // MARK: - Character classes
+
+    /// A `/` starts a regex only in expression position. After an identifier
+    /// or a closing bracket it is division. Block comments between the two
+    /// are transparent: `const re = /* note */ /x/` is still after `=`.
+    /// JavaScript whitespace, including the Unicode spaces a source file
+    /// can carry between an operator and a regex literal.
+    private func isLayoutWhitespace(_ unit: unichar) -> Bool {
+        unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
+            || unit == 0xA0 || unit == 0x1680
+            || (0x2000...0x200A).contains(unit)
+            || unit == 0x2028 || unit == 0x2029
+            || unit == 0x202F || unit == 0x205F || unit == 0x3000
+            || unit == 0xFEFF
+    }
+
+    private func canStartRegex(at index: Int) -> Bool {
+        var probe = index - 1
+        while probe >= 0 {
+            while probe >= 0, isLayoutWhitespace(units[probe]) {
+                probe -= 1
+            }
+            guard probe >= 0 else { return true }
+            // A comment on this or an earlier line is transparent; the
+            // previous code token on the other side decides.
+            if let commentStart = commentTokenStart(containing: probe) {
+                probe = commentStart - 1
+                continue
+            }
+            // Skip a block comment ending at `probe`.
+            if probe >= 1,
+               units[probe] == 0x2F, units[probe - 1] == 0x2A {
+                var back = probe - 2
+                var found = false
+                while back >= 1 {
+                    if units[back] == 0x2A, units[back - 1] == 0x2F {
+                        probe = back - 2
+                        found = true
+                        break
+                    }
+                    back -= 1
+                }
+                if !found { return true }
+                continue
+            }
+            break
+        }
+        guard probe >= 0 else { return true }
+        let previous = units[probe]
+        // A slash that ends a regex literal is an operand: `/a/ / 2` is
+        // division. The token lookup covers earlier lines too.
+        if previous == 0x2F, literalTokenStart(containing: probe) != nil {
+            return false
+        }
+        let expressionOperators: Set<unichar> = [
+            0x3D, 0x28, 0x5B, 0x7B, 0x2C, 0x3B, 0x3A, 0x21, 0x26,
+            0x7C, 0x3F, 0x2B, 0x2D, 0x2A, 0x25, 0x5E, 0x7E, 0x3C, 0x3E,
+            // A regex may follow division (`x / /re/`) or a spread
+            // (`[.../re/]`); `//` comments are matched before this point.
+            0x2F, 0x2E
+        ]
+        // `x++ / 2` is division after a postfix increment, not a regex after
+        // a binary plus.
+        if (previous == 0x2B || previous == 0x2D),
+           probe >= 1, units[probe - 1] == previous {
+            return false
+        }
+        if expressionOperators.contains(previous) { return true }
+        if previous == 0x7D {
+            // A closing block brace ends a statement (`if (ok) {} /re/`),
+            // but an object literal's brace is followed by division
+            // (`const n = {} / 2 / 3`).
+            return closesBlock(at: probe)
+        }
+        if previous == 0x29 {
+            // `if (ok) /[/*]/.test(s);` — a regex may follow the closing
+            // parenthesis of a control condition, unlike a call.
+            return closesControlCondition(at: probe)
+        }
+        if isIdentifierContinue(previous) {
+            var wordStart = probe
+            while wordStart > 0,
+                  isIdentifierContinue(units[wordStart - 1]) {
+                wordStart -= 1
+            }
+            let word = String(
+                decoding: units[wordStart...probe],
+                as: UTF16.self
+            )
+            if wordStart > 0, units[wordStart - 1] == 0x2E {
+                // `obj.return` is a property name, not a keyword; the slash
+                // after it is division.
+                return false
+            }
+            // `break outer` and `continue outer` end at the newline; a
+            // regex on the following line is a new statement.
+            var sawLineBreak = false
+            var scan = probe + 1
+            while scan < index {
+                if units[scan] == 0x0A || units[scan] == 0x0D {
+                    sawLineBreak = true
+                    break
+                }
+                scan += 1
+            }
+            if sawLineBreak {
+                var earlier = wordStart
+                while earlier > 0,
+                      isLayoutWhitespace(units[earlier - 1]) {
+                    earlier -= 1
+                }
+                var earlierStart = earlier
+                while earlierStart > 0,
+                      isIdentifierContinue(units[earlierStart - 1]) {
+                    earlierStart -= 1
+                }
+                let earlierWord = String(
+                    decoding: units[earlierStart..<earlier],
+                    as: UTF16.self
+                )
+                if earlierWord == "break" || earlierWord == "continue" {
+                    return true
+                }
+            }
+            return [
+                "return", "case", "typeof", "delete", "void", "new",
+                "in", "of", "instanceof", "yield", "await", "throw",
+                "else", "do", "default", "debugger", "break", "continue"
+            ].contains(word)
+        }
+        return false
+    }
+
+    /// Whether the `)` at `closeIndex` closes an `if`/`while`/`for`/`with`/
+    /// `switch`/`catch` condition. Nested parentheses are matched by depth.
+    /// The scan may cross into earlier lines: a condition can span them.
+    private func closesControlCondition(at closeIndex: Int) -> Bool {
+        var probe = closeIndex - 1
+        var depth = 1
+        while probe >= 0 {
+            // Skip string and comment tokens whole. Their parentheses and
+            // braces are literal, and the current line already knows where
+            // they are: `if (/[)]/.test(s)) /re/` closes a condition.
+            if let tokenStart = literalTokenStart(containing: probe) {
+                probe = tokenStart - 1
+                continue
+            }
+            let unit = units[probe]
+            // Parentheses inside a quoted string do not count either:
+            // `if (s === ")") /re/` closes a condition.
+            if unit == 0x22 || unit == 0x27 {
+                var back = probe - 1
+                while back >= 0,
+                      units[back] != unit, units[back] != 0x0A {
+                    back -= 1
+                }
+                if back >= 0, units[back] == unit {
+                    probe = back - 1
+                    continue
+                }
+            }
+            if unit == 0x29 {
+                depth += 1
+            } else if unit == 0x28 {
+                depth -= 1
+                if depth == 0 {
+                    var wordEnd = probe
+                    while wordEnd > 0 {
+                        while wordEnd > 0,
+                              isLayoutWhitespace(units[wordEnd - 1]) {
+                            wordEnd -= 1
+                        }
+                        // A comment between the keyword and `(` does not
+                        // change the condition: `if /* note */ (ok)`.
+                        if wordEnd >= 2,
+                           units[wordEnd - 1] == 0x2F,
+                           units[wordEnd - 2] == 0x2A {
+                            var back = wordEnd - 3
+                            var found = false
+                            while back >= 1 {
+                                if units[back] == 0x2A,
+                                   units[back - 1] == 0x2F {
+                                    wordEnd = back - 1
+                                    found = true
+                                    break
+                                }
+                                back -= 1
+                            }
+                            if found { continue }
+                        }
+                        break
+                    }
+                    var wordStart = wordEnd
+                    while wordStart > 0,
+                          isIdentifierContinue(units[wordStart - 1]) {
+                        wordStart -= 1
+                    }
+                    let word = String(
+                        decoding: units[wordStart..<wordEnd],
+                        as: UTF16.self
+                    )
+                    return [
+                        "if", "while", "for", "with", "switch", "catch",
+                        "await"
+                    ].contains(word)
+                }
+            }
+            probe -= 1
+        }
+        return false
+    }
+
+    /// Whether the `}` at `closeIndex` closes a statement block rather than
+    /// an object literal. Walks back to the matching `{` and inspects what
+    /// precedes it: `) {` is a control or function body, `else {`/`try {`/
+    /// `finally {`/`do {` are blocks, and a statement-start `{` is a block.
+    /// `= {`, `({`, `return {`, `[ {`, and `, {` are object literals.
+    private func closesBlock(at closeIndex: Int) -> Bool {
+        var probe = closeIndex - 1
+        var depth = 1
+        while probe >= 0 {
+            if let tokenStart = literalTokenStart(containing: probe) {
+                probe = tokenStart - 1
+                continue
+            }
+            let unit = units[probe]
+            if unit == 0x7D {
+                depth += 1
+            } else if unit == 0x7B {
+                depth -= 1
+                if depth == 0 {
+                    var before = probe - 1
+                    while before >= 0 {
+                        while before >= 0,
+                              isLayoutWhitespace(units[before]) {
+                            before -= 1
+                        }
+                        guard before >= 0 else { return true }
+                        // `if (ok) /* note */ {}` — a block comment between
+                        // the condition and the brace is transparent.
+                        if before >= 1,
+                           units[before] == 0x2F,
+                           units[before - 1] == 0x2A {
+                            var back = before - 2
+                            var found = false
+                            while back >= 1 {
+                                if units[back] == 0x2A,
+                                   units[back - 1] == 0x2F {
+                                    before = back - 2
+                                    found = true
+                                    break
+                                }
+                                back -= 1
+                            }
+                            if found { continue }
+                        }
+                        break
+                    }
+                    guard before >= 0 else { return true }
+                    let previous = units[before]
+                    if previous == 0x29 {
+                        // A function expression is an operand
+                        // (`const n = function(){} / 2`); a declaration or
+                        // control block ends a statement.
+                        return !isFunctionExpressionBody(at: before)
+                    }
+                    if isIdentifierContinue(previous) {
+                        var wordStart = before
+                        while wordStart > 0,
+                              isIdentifierContinue(units[wordStart - 1]) {
+                            wordStart -= 1
+                        }
+                        let word = String(
+                            decoding: units[wordStart...before],
+                            as: UTF16.self
+                        )
+                        // `class C {` and `namespace N {` end in a bare
+                        // identifier. Keywords that precede an object
+                        // literal keep their brace an object.
+                        return ![
+                            "return", "yield", "await", "in", "of",
+                            "typeof", "new", "delete", "void", "case",
+                            "throw"
+                        ].contains(word)
+                    }
+                    return previous == 0x3B
+                        || previous == 0x7B
+                        || previous == 0x7D
+                        // `label: {}` and `case x: {}` start blocks.
+                        || previous == 0x3A
+                }
+            }
+            probe -= 1
+        }
+        return false
+    }
+
+    /// Whether the `)` at `closeParen` closes a `function` parameter list
+    /// whose body is an expression operand. A declaration is followed by a
+    /// statement boundary, so a slash after its body starts a regex.
+    private func isFunctionExpressionBody(at closeParen: Int) -> Bool {
+        var probe = closeParen - 1
+        var depth = 1
+        while probe >= 0 {
+            if units[probe] == 0x29 {
+                depth += 1
+            } else if units[probe] == 0x28 {
+                depth -= 1
+                if depth == 0 { break }
+            }
+            probe -= 1
+        }
+        guard probe >= 0 else { return false }
+        var before = probe
+        while before > 0, isLayoutWhitespace(units[before - 1]) {
+            before -= 1
+        }
+        var wordStart = before
+        while wordStart > 0, isIdentifierContinue(units[wordStart - 1]) {
+            wordStart -= 1
+        }
+        let word = String(
+            decoding: units[wordStart..<before],
+            as: UTF16.self
+        )
+        let functionStart: Int
+        if word == "function" {
+            functionStart = wordStart
+        } else if !word.isEmpty {
+            var keywordEnd = wordStart
+            while keywordEnd > 0,
+                  isLayoutWhitespace(units[keywordEnd - 1]) {
+                keywordEnd -= 1
+            }
+            var keywordStart = keywordEnd
+            while keywordStart > 0,
+                  isIdentifierContinue(units[keywordStart - 1]) {
+                keywordStart -= 1
+            }
+            let keyword = String(
+                decoding: units[keywordStart..<keywordEnd],
+                as: UTF16.self
+            )
+            guard keyword == "function" else { return false }
+            functionStart = keywordStart
+        } else {
+            return false
+        }
+        var lead = functionStart
+        while lead > 0, isLayoutWhitespace(units[lead - 1]) {
+            lead -= 1
+        }
+        guard lead > 0 else { return false }
+        let previous = units[lead - 1]
+        return previous == 0x3D || previous == 0x28 || previous == 0x2C
+            || previous == 0x3A || previous == 0x5B || previous == 0x21
+            || previous == 0x3F || previous == 0x26 || previous == 0x7C
+            || previous == 0x3E
+    }
+
+    /// The absolute start of a string or comment token containing `absolute`,
+    /// or nil. Keywords and numbers are not skipped: the backward scan needs
+    /// to read control keywords.
+    private func literalTokenStart(containing absolute: Int) -> Int? {
+        if let earlier = history.containing(absolute) {
+            return earlier.range.lowerBound
+        }
+        let local = absolute - start
+        guard local >= 0 else { return nil }
+        guard let token = tokens.last(where: {
+            ($0.kind == .string || $0.kind == .comment)
+                && $0.offset <= local
+                && local < $0.offset + $0.length
+        }) else {
+            return nil
+        }
+        return start + token.offset
+    }
+
+    /// The start of a comment token containing `absolute`, or nil. A string
+    /// is an operand and must not be skipped when deciding regex context; a
+    /// comment is transparent.
+    private func commentTokenStart(containing absolute: Int) -> Int? {
+        if let earlier = history.containing(absolute),
+           earlier.kind == .comment {
+            return earlier.range.lowerBound
+        }
+        let local = absolute - start
+        guard local >= 0 else { return nil }
+        guard let token = tokens.last(where: {
+            $0.kind == .comment
+                && $0.offset <= local
+                && local < $0.offset + $0.length
+        }) else {
+            return nil
+        }
+        return start + token.offset
+    }
+
+    /// End of a slash-delimited regex literal, or nil when the line does not
+    /// close one. Character classes may contain `/` and `*` that are not
+    /// comment bytes.
+    private func scanRegexLiteral(from index: Int) -> Int? {
+        var probe = index + 1
+        guard probe < end else { return nil }
+        if units[probe] == 0x2F || units[probe] == 0x2A { return nil }
+        var inClass = false
+        while probe < end {
+            let unit = units[probe]
+            if unit == 0x5C {
+                probe += 2
+                continue
+            }
+            if unit == 0x5B {
+                inClass = true
+            } else if unit == 0x5D {
+                inClass = false
+            } else if unit == 0x2F, !inClass {
+                probe += 1
+                while probe < end {
+                    let flag = units[probe]
+                    let isLetter = (flag >= 0x41 && flag <= 0x5A)
+                        || (flag >= 0x61 && flag <= 0x7A)
+                    guard isLetter else { break }
+                    probe += 1
+                }
+                return probe
+            }
+            probe += 1
+        }
+        return nil
+    }
 
     private func isIdentifierStart(_ unit: unichar) -> Bool {
         if unit == 0x5F || unit == 0x24 { return true }

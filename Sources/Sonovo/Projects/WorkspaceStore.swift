@@ -8,6 +8,8 @@ protocol WorkspacePersisting: AnyObject {
     var recentPaths: [String] { get set }
     var selections: [String: String] { get set }
     var volumeIdentifiers: [String: String] { get set }
+    /// Asset IDs of the file tabs each project had open.
+    var openTabs: [String: [String]] { get set }
 }
 
 final class UserDefaultsWorkspaceStore: WorkspacePersisting {
@@ -17,6 +19,7 @@ final class UserDefaultsWorkspaceStore: WorkspacePersisting {
         static let recent = "sonovo.workspace.recent"
         static let selection = "sonovo.workspace.selection"
         static let volumes = "sonovo.workspace.volumes"
+        static let openTabs = "sonovo.workspace.openTabs"
     }
 
     private let defaults: UserDefaults
@@ -49,6 +52,14 @@ final class UserDefaultsWorkspaceStore: WorkspacePersisting {
         get { defaults.dictionary(forKey: Key.volumes) as? [String: String] ?? [:] }
         set { defaults.set(newValue, forKey: Key.volumes) }
     }
+
+    var openTabs: [String: [String]] {
+        get {
+            defaults.dictionary(forKey: Key.openTabs) as? [String: [String]]
+                ?? [:]
+        }
+        set { defaults.set(newValue, forKey: Key.openTabs) }
+    }
 }
 
 final class InMemoryWorkspaceStore: WorkspacePersisting {
@@ -57,4 +68,5 @@ final class InMemoryWorkspaceStore: WorkspacePersisting {
     var recentPaths: [String] = []
     var selections: [String: String] = [:]
     var volumeIdentifiers: [String: String] = [:]
+    var openTabs: [String: [String]] = [:]
 }

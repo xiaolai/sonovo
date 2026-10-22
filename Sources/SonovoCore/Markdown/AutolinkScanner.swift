@@ -233,12 +233,34 @@ enum AutolinkScanner {
         guard scheme != nil else { return nil }
 
         let bodyStart = start + schemeLength
+        // An authority that begins with a path/query/fragment delimiter is
+        // empty. Reject it before scanning the rest of a long suffix: a
+        // repeated invalid prefix would otherwise make the scan quadratic.
+        guard bodyStart < characters.count,
+              !"/?#".contains(characters[bodyStart]) else {
+            return nil
+        }
+        // Validate the authority before scanning the whole suffix. An
+        // invalid authority repeated N times must not rescan the remaining
+        // text for each candidate.
+        var authorityProbe = bodyStart
+        while authorityProbe < characters.count,
+              !"/?#\"'<>".contains(characters[authorityProbe]),
+              !characters[authorityProbe].isWhitespace {
+            authorityProbe += 1
+        }
+        var earlyAuthority = String(
+            characters[bodyStart..<authorityProbe]
+        )
+        earlyAuthority = trimTrailingPunctuation(earlyAuthority)
+        guard isValidAuthority(earlyAuthority) else { return nil }
+
         let end = runEnd(characters, from: bodyStart)
         guard end > bodyStart else { return nil }
 
         let raw = String(characters[start..<end])
         let trimmed = trimTrailingPunctuation(raw)
-        guard trimmed.count > schemeLength + 1 else { return nil }
+        guard trimmed.count > schemeLength else { return nil }
         guard let schemeRange = trimmed.range(of: "://") else {
             return nil
         }
@@ -275,7 +297,11 @@ enum AutolinkScanner {
         // The `www.` prefix is part of the hostname; `www.foo` has two labels.
         let hostEnd = trimmed.firstIndex(where: { "/?#".contains($0) })
             ?? trimmed.endIndex
-        let host = String(trimmed[trimmed.startIndex..<hostEnd])
+        let authority = String(trimmed[trimmed.startIndex..<hostEnd])
+        // A WWW autolink can carry a port. Validate the hostname, not the
+        // combined host:port string.
+        let host = authority.split(separator: ":", maxSplits: 1)
+            .first.map(String.init) ?? ""
         guard isValidDomain(host) else { return nil }
 
         return makeMatch(
@@ -461,8 +487,20 @@ enum AutolinkScanner {
         let host = authority.split(separator: ":", maxSplits: 1)
             .first.map(String.init) ?? ""
         guard !host.isEmpty else { return false }
-        guard host.contains(".") else { return true } // localhost
+        guard host.contains(".") else {
+            // A single-label authority (localhost) still has to be a valid
+            // hostname: no underscores, and at least one letter or digit.
+            return isValidHostLabel(host)
+        }
         return isValidDomain(host)
+    }
+
+    /// A single DNS label: letters, numbers, and hyphens; no underscores.
+    private static func isValidHostLabel(_ label: String) -> Bool {
+        guard !label.isEmpty else { return false }
+        return label.allSatisfy {
+            $0.isLetter || $0.isNumber || $0 == "-" || !$0.isASCII
+        }
     }
 
     private static func isValidDomain(_ host: String) -> Bool {

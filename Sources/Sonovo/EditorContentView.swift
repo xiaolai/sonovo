@@ -35,7 +35,7 @@ struct EditorContentView: View {
         case .model3d:
             Model3DWorkspaceView(project: project)
         case .html:
-            HTMLPreviewView(state: state)
+            HTMLPreviewView()
         case .delivery:
             DeliveryView(state: state, project: project)
         case .code:
@@ -95,10 +95,10 @@ struct EditorContentView: View {
                         && ViewerRouter.route(for: $0) == .image
                 }
             )
-            .id(
-                "\(asset.id)-\(asset.revision.token)-"
-                    + comparisonToken(excluding: asset)
-            )
+            // The viewer's identity follows only the displayed image. An
+            // unrelated candidate's revision must not reset zoom/pan or
+            // dismiss an active comparison.
+            .id("\(asset.id)-\(asset.revision.token)")
         case .pdf:
             PDFDocumentView(asset: asset)
                 .id("\(asset.id)-\(asset.revision.token)")
@@ -112,19 +112,6 @@ struct EditorContentView: View {
             MetadataAssetView(asset: asset)
                 .id("\(asset.id)-\(asset.revision.token)")
         }
-    }
-
-    /// A compact identity for the comparison candidates' revisions. Hashing
-    /// keeps the SwiftUI identity short without dropping any candidate.
-    private func comparisonToken(excluding asset: ProjectAsset) -> String {
-        var hasher = Hasher()
-        for candidate in project.assets
-        where candidate.id != asset.id
-            && ViewerRouter.route(for: candidate) == .image {
-            hasher.combine(candidate.id)
-            hasher.combine(candidate.revision.token)
-        }
-        return String(hasher.finalize())
     }
 
     @ViewBuilder

@@ -71,6 +71,19 @@ final class ImageDocumentModel {
         }
     }
 
+    /// Re-reads the file, discarding the cached decode. Used when the
+    /// underlying asset's revision changes on disk.
+    func reload() async {
+        loadTask?.cancel()
+        loadTask = nil
+        loadToken &+= 1
+        state = .idle
+        image = nil
+        metadata = nil
+        isDownsampled = false
+        await load()
+    }
+
     private enum LoadOutcome {
         case finished
         case cancelled
@@ -96,11 +109,10 @@ final class ImageDocumentModel {
             }
             loadTask = task
         }
-        let result = await withTaskCancellationHandler {
-            await task.value
-        } onCancel: {
-            task.cancel()
-        }
+        // Wait for the shared decode even if this caller is cancelled. A
+        // waiter must not cancel work that other visible viewers are still
+        // awaiting; the decode is bounded and publishes once.
+        let result = await task.value
         // A waiter from the previous decode can resume after a retry has
         // started; only the current token may publish.
         guard token == loadToken else { return .finished }

@@ -1,5 +1,3 @@
-import Foundation
-
 /// Namespace for the testable Markdown core.
 ///
 /// `SonovoCore` depends on Foundation and the system file APIs only. It never

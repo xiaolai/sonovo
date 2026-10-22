@@ -2,7 +2,6 @@ import Foundation
 
 /// One LF-terminated line of canonical subtitle source, in UTF-16 offsets.
 struct SubtitleLine: Equatable {
-    let number: Int
     let content: Range<Int>
     let full: Range<Int>
 }
@@ -11,7 +10,6 @@ enum SubtitleLineIndex {
     static func lines(in ns: NSString) -> [SubtitleLine] {
         var result: [SubtitleLine] = []
         var index = 0
-        var number = 0
         while index < ns.length {
             let newline = ns.range(
                 of: "\n",
@@ -26,13 +24,11 @@ enum SubtitleLineIndex {
                 : newline.location + 1
             result.append(
                 SubtitleLine(
-                    number: number,
                     content: index..<contentEnd,
                     full: index..<fullEnd
                 )
             )
             index = fullEnd
-            number += 1
         }
         return result
     }
@@ -50,14 +46,6 @@ enum SubtitleLineIndex {
 
     static func isBlank(_ line: SubtitleLine, in ns: NSString) -> Bool {
         trimmed(line, in: ns).isEmpty
-    }
-
-    /// The trimmed range of a line's content, used as a replacement target.
-    static func trimmedRange(
-        _ line: SubtitleLine,
-        in ns: NSString
-    ) -> Range<Int> {
-        trimmedRange(line.content, in: ns)
     }
 
     /// The non-whitespace part of an arbitrary UTF-16 range.

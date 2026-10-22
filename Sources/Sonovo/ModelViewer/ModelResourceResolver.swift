@@ -99,6 +99,12 @@ struct ModelResourceResolver: Sendable {
         }
 
         let fileComponents = Array(decoded.dropFirst())
+        // Hidden path components are never served. The requested path and
+        // the resolved target are checked separately: a visible symlink must
+        // not expose a hidden file inside the root.
+        guard !fileComponents.contains(where: { $0.hasPrefix(".") }) else {
+            return .forbidden
+        }
         guard let extensionName = fileComponents.last?
             .split(separator: ".", omittingEmptySubsequences: false)
             .last
@@ -123,9 +129,16 @@ struct ModelResourceResolver: Sendable {
             return .forbidden
         }
 
+        let relative = String(target.path.dropFirst(rootPath.count))
+        guard !relative.split(separator: "/").contains(where: {
+            $0.hasPrefix(".")
+        }) else {
+            return .forbidden
+        }
+        let resolvedExtension = target.pathExtension.lowercased()
         let allowedExtension = route == .viewer
-            ? Self.viewerExtensions.contains(fileExtension)
-            : Self.assetExtensions.contains(fileExtension)
+            ? Self.viewerExtensions.contains(resolvedExtension)
+            : Self.assetExtensions.contains(resolvedExtension)
         let isPrimaryFile = route == .asset
             && primaryFile.map {
                 $0.resolvingSymlinksInPath().standardizedFileURL.path

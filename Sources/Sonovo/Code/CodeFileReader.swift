@@ -114,12 +114,12 @@ struct CodeFileReader: Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw CocoaError(.fileReadNoSuchFile)
         }
-        // Refuse special files before opening: opening a FIFO can block
-        // indefinitely, and the byte cap cannot bound that.
-        guard Self.isRegularFile(url) else {
+        // Open non-blocking and validate the opened descriptor. A separate
+        // check followed by an open could be swapped for a FIFO in between,
+        // and opening that FIFO would block indefinitely.
+        guard let handle = try Self.openRegularFile(url) else {
             return .refused(.unreadable("this is not a regular file"))
         }
-        let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
         let data = try readBoundedBytes(handle, cap: maximumBytes)
@@ -133,12 +133,12 @@ struct CodeFileReader: Sendable {
             )
         }
 
-        let decodeOutcome = Self.decodeBounded(data)
-        guard case .text(let contents) = decodeOutcome else {
-            if case .refused(let refusal) = decodeOutcome {
-                return .refused(refusal)
-            }
-            return .refused(.unreadable("this file could not be decoded"))
+        let contents: MarkdownFileContents
+        switch Self.decodeBounded(data) {
+        case .text(let decoded):
+            contents = decoded
+        case .refused(let refusal):
+            return .refused(refusal)
         }
 
         return .loaded(
@@ -167,10 +167,9 @@ struct CodeFileReader: Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return .absent
         }
-        guard Self.isRegularFile(url) else {
+        guard let handle = try Self.openRegularFile(url) else {
             return .notRegular
         }
-        let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         let cap = maximumBytes ?? self.maximumBytes
         let data = try readBoundedBytes(handle, cap: cap)
@@ -225,12 +224,27 @@ struct CodeFileReader: Sendable {
         return .text(contents)
     }
 
-    /// `stat` follows a symlink, so a link to a regular file is accepted and
-    /// a directory, FIFO, socket, or device is refused.
-    private static func isRegularFile(_ url: URL) -> Bool {
+    /// Opens a regular file without blocking, then validates the opened
+    /// descriptor. `stat` follows a symlink, so a link to a regular file is
+    /// accepted and a directory, FIFO, socket, or device is refused.
+    private static func openRegularFile(_ url: URL) throws -> FileHandle? {
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            return nil
+        }
         var info = stat()
-        guard stat(url.path, &info) == 0 else { return false }
-        return (info.st_mode & S_IFMT) == S_IFREG
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG else {
+            close(descriptor)
+            return nil
+        }
+        return FileHandle(
+            fileDescriptor: descriptor,
+            closeOnDealloc: true
+        )
     }
 
     /// The byte-order mark, when the bytes start with one this viewer cannot

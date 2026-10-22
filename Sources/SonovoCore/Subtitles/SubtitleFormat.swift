@@ -54,10 +54,47 @@ public enum SubtitleFormat: String, Sendable, CaseIterable, Hashable {
         let upperSource = ns.length <= 512_000
             ? source.uppercased()
             : ns.substring(to: min(ns.length, 512_000)).uppercased()
-        if upperSource.contains("[SCRIPT INFO]")
-            || upperSource.contains("[EVENTS]") {
-            if upperSource.contains("[V4 STYLES]"),
-               !upperSource.contains("[V4+ STYLES]") {
+        // Section headers and dialogue lines are structural; the same text
+        // inside an SRT cue is not. Walk the sections in order: a timing line
+        // before any section header proves the file is SRT, and dialogue only
+        // counts inside `[Events]` after its `Format:` declaration.
+        let lines = upperSource.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        ).map { $0.trimmingCharacters(in: .whitespaces) }
+        var sawScriptInfo = false
+        var sawEvents = false
+        var inEvents = false
+        var sawEventsFormat = false
+        var sawEventsDialogue = false
+        for line in lines.prefix(2_000) {
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("[") {
+                inEvents = line.hasPrefix("[EVENTS]")
+                sawEvents = sawEvents || inEvents
+                sawScriptInfo = sawScriptInfo
+                    || line.hasPrefix("[SCRIPT INFO]")
+                continue
+            }
+            if !sawScriptInfo, !sawEvents {
+                if isSRTTimingLine(line) { break }
+                continue
+            }
+            guard inEvents else { continue }
+            if line.hasPrefix("FORMAT:") {
+                sawEventsFormat = true
+            } else if line.hasPrefix("DIALOGUE:"), sawEventsFormat {
+                sawEventsDialogue = true
+                break
+            }
+        }
+        // A header-only ASS file is valid. An SRT file that contains a line
+        // spelling a section header is not: it has cue timing and no ASS
+        // dialogue structure.
+        if sawScriptInfo || sawEvents,
+           sawEventsDialogue || !hasSRTTimingLine(in: ns) {
+            if lines.contains(where: { $0.hasPrefix("[V4 STYLES]") }),
+               !lines.contains(where: { $0.hasPrefix("[V4+ STYLES]") }) {
                 return .ssa
             }
             return .ass
@@ -103,6 +140,10 @@ public enum SubtitleFormat: String, Sendable, CaseIterable, Hashable {
         return ""
     }
 
+    private static func isSRTTimingLine(_ line: String) -> Bool {
+        line.contains("-->") && (line.contains(",") || line.contains("."))
+    }
+
     private static func hasSRTTimingLine(in ns: NSString) -> Bool {
         var index = 0
         var inspected = 0
@@ -111,8 +152,7 @@ public enum SubtitleFormat: String, Sendable, CaseIterable, Hashable {
                 for: NSRange(location: index, length: 0)
             )
             let line = ns.substring(with: lineRange)
-            if line.contains("-->"),
-               line.contains(",") || line.contains(".") {
+            if isSRTTimingLine(line) {
                 return true
             }
             index = NSMaxRange(lineRange)

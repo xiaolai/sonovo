@@ -2,8 +2,6 @@ import SwiftUI
 import WebKit
 
 struct HTMLPreviewView: View {
-    let state: AppState
-
     var body: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
             browserBar

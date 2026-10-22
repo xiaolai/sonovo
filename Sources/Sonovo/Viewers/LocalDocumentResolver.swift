@@ -189,8 +189,10 @@ struct LocalDocumentResolver: Sendable {
     static func mimeType(for fileExtension: String) -> String {
         switch fileExtension {
         case "svg": "image/svg+xml"
-        case "html", "htm": "text/html; charset=utf-8"
-        case "css": "text/css; charset=utf-8"
+        // Do not force UTF-8 on text documents: their own meta charset,
+        // @charset, or XML declaration may specify another encoding.
+        case "html", "htm": "text/html"
+        case "css": "text/css"
         case "png": "image/png"
         case "jpg", "jpeg": "image/jpeg"
         case "gif": "image/gif"
@@ -202,7 +204,7 @@ struct LocalDocumentResolver: Sendable {
         case "otf": "font/otf"
         case "woff": "font/woff"
         case "woff2": "font/woff2"
-        case "xml": "application/xml; charset=utf-8"
+        case "xml": "application/xml"
         case "json": "application/json; charset=utf-8"
         default: "application/octet-stream"
         }

@@ -6,6 +6,11 @@ struct SonovoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var state = AppState()
     @AppStorage("sonovo.appearance") private var appearance = "system"
+    @AppStorage("sonovo.theme") private var theme = "Standard"
+    @AppStorage("sonovo.foregroundIntensity") private var foregroundIntensity =
+        AppTheme.Preferences.foregroundIntensityDefault
+    @AppStorage("sonovo.backgroundIntensity") private var backgroundIntensity =
+        AppTheme.Preferences.backgroundIntensityDefault
 
     var body: some Scene {
         // One window, one AppState. A WindowGroup would give every window the
@@ -14,6 +19,8 @@ struct SonovoApp: App {
         Window("Sonovo", id: "main") {
             MainWindow(state: state)
                 .environment(state)
+                .environment(\.workspaceTheme, workspaceTheme)
+                .tint(workspaceTheme.accent)
                 .preferredColorScheme(preferredColorScheme)
                 .frame(minWidth: AppTheme.Layout.windowMinWidth, minHeight: AppTheme.Layout.windowMinHeight)
                 .background(WindowChromeConfigurator())
@@ -33,10 +40,33 @@ struct SonovoApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView(state: state)
                 .environment(state)
                 .background(WindowChromeConfigurator())
         }
+    }
+
+    /// Themes are a named accent plus a canvas wash. The intensity sliders
+    /// persist and scale the wash; the accent also tints standard controls.
+    private var workspaceTheme: WorkspaceTheme {
+        let base: Color
+        switch theme {
+        case "Slate":
+            base = AppTheme.Palette.slateAccent
+        case "Ember":
+            base = AppTheme.Palette.emberAccent
+        default:
+            base = Color.accentColor
+        }
+        let accent = base.mix(
+            with: .white,
+            by: foregroundIntensity * 0.18
+        )
+        return WorkspaceTheme(
+            accent: accent,
+            wash: base,
+            backgroundIntensity: backgroundIntensity
+        )
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -99,6 +129,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let window else { return }
             applyToolbarChrome(window)
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        GhosttyAppController.shared.setFocus(true)
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        GhosttyAppController.shared.setFocus(false)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

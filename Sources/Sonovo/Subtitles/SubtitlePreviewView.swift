@@ -387,7 +387,6 @@ struct SubtitlePlayerBar: View {
 private struct PlayerIconButton: View {
     let systemName: String
     let help: String
-    var isSelected = false
     let tint: Color
     let action: () -> Void
 
@@ -399,9 +398,7 @@ private struct PlayerIconButton: View {
                     width: AppTheme.ControlSize.medium,
                     height: AppTheme.ControlSize.regular
                 )
-                .foregroundStyle(
-                    isSelected ? Color.accentColor : tint
-                )
+                .foregroundStyle(tint)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

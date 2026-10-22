@@ -280,7 +280,8 @@ actor CodeReviewStore {
         try mutate {
             for baseline in baselines {
                 var keepsContent = false
-                if let bytes = baseline.bytes {
+                if let bytes = baseline.bytes,
+                   objectBytes + bytes.count <= Self.objectBudget {
                     do {
                         try storeBlob(DiskSnapshot(bytes: bytes))
                         keepsContent = true

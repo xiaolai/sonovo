@@ -95,8 +95,8 @@ public enum SubtitleEditor {
         let escaped: String
         let replacement: String
         if parse.format.isASSFamily {
-            escaped = assEscaped(sanitized)
-            replacement = escaped
+            escaped = sanitized
+            replacement = sanitized
         } else if cue.rawText.isEmpty {
             escaped = sanitized
             replacement = sanitized.isEmpty ? "" : "\n" + sanitized
@@ -138,11 +138,28 @@ public enum SubtitleEditor {
         guard let cue = parse.cue(ordinal: ordinal) else {
             throw SubtitleEditError.cueNotFound(ordinal)
         }
-        guard start >= 0, end > start else {
+        guard start >= 0, end > start,
+              start <= SubtitleTimecode.maximumMilliseconds,
+              end <= SubtitleTimecode.maximumMilliseconds else {
             throw SubtitleEditError.invalidTiming(
                 startMilliseconds: start,
                 endMilliseconds: end
             )
+        }
+        // ASS/SSA store centiseconds. Validate after that quantization so a
+        // sub-centisecond range cannot collapse into start == end on disk.
+        if parse.format.isASSFamily {
+            // Match the formatter exactly: round to centiseconds, cap at the
+            // format maximum, then compare in centisecond units.
+            let max = SubtitleTimecode.maximumMilliseconds
+            let startCentis = min(max, ((start + 5) / 10) * 10) / 10
+            let endCentis = min(max, ((end + 5) / 10) * 10) / 10
+            guard endCentis > startCentis else {
+                throw SubtitleEditError.invalidTiming(
+                    startMilliseconds: start,
+                    endMilliseconds: end
+                )
+            }
         }
         guard let startRange = cue.startRange,
               let endRange = cue.endRange else {
@@ -190,6 +207,15 @@ public enum SubtitleEditor {
         normalized = normalized.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
+        // A line containing only spaces or tabs is blank to the parser and
+        // would still end an SRT/VTT cue. Clear it before collapsing blank
+        // lines.
+        normalized = normalized
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                line.allSatisfy(\.isWhitespace) ? "" : String(line)
+            }
+            .joined(separator: "\n")
         // A blank line would end an SRT/VTT cue; collapse it to one newline.
         while normalized.contains("\n\n") {
             normalized = normalized.replacingOccurrences(
@@ -198,11 +224,6 @@ public enum SubtitleEditor {
             )
         }
         return normalized
-    }
-
-    private static func assEscaped(_ text: String) -> String {
-        text.replacingOccurrences(of: "\n", with: "\\N")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Ranges

@@ -717,26 +717,9 @@ extension String {
     /// Returns the slice covered by local UTF-16 offsets.
     ///
     /// Both helpers share one failure result (an empty string) so callers do
-    /// not have to handle two different failure conventions.
+    /// not have to handle two different failure conventions. The extraction
+    /// itself is shared with `SourceMap.text(in:)`.
     func utf16Slice(_ range: Range<Int>) -> String {
-        guard
-            range.lowerBound >= 0,
-            range.upperBound <= utf16.count,
-            let lower = utf16.index(
-                utf16.startIndex,
-                offsetBy: range.lowerBound,
-                limitedBy: utf16.endIndex
-            ),
-            let upper = utf16.index(
-                utf16.startIndex,
-                offsetBy: range.upperBound,
-                limitedBy: utf16.endIndex
-            ),
-            let lowerScalar = lower.samePosition(in: unicodeScalars),
-            let upperScalar = upper.samePosition(in: unicodeScalars)
-        else {
-            return ""
-        }
-        return String(unicodeScalars[lowerScalar..<upperScalar])
+        SourceMap.slice(self, utf16Offsets: range) ?? ""
     }
 }

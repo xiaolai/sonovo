@@ -26,17 +26,65 @@ public enum SubtitleText {
     }
 
     private static func assPlainText(_ raw: String) -> String {
-        var text = raw
-        // Override blocks, including drawing commands, are not readable text.
-        while let start = text.firstIndex(of: "{"),
-              let end = text[start...].firstIndex(of: "}") {
-            text.removeSubrange(start...end)
+        // Override blocks are markup. Drawing mode (`\p1`) also makes the
+        // text between overrides a vector command, not readable words.
+        var text = ""
+        var index = raw.startIndex
+        var drawing = 0
+        while index < raw.endIndex {
+            if raw[index] == "{" {
+                if let end = raw[index...].firstIndex(of: "}") {
+                    let block = raw[raw.index(after: index)..<end]
+                    if let mode = drawingMode(in: block) {
+                        drawing = mode
+                    }
+                    index = raw.index(after: end)
+                    continue
+                }
+            }
+            if drawing == 0 {
+                text.append(raw[index])
+            }
+            index = raw.index(after: index)
         }
         text = text
             .replacingOccurrences(of: "\\N", with: "\n")
             .replacingOccurrences(of: "\\n", with: "\n")
             .replacingOccurrences(of: "\\h", with: " ")
         return cleanup(text)
+    }
+
+    /// The last `\pN` tag in an override block, or nil when the block does
+    /// not change drawing mode.
+    private static func drawingMode(
+        in block: Substring
+    ) -> Int? {
+        var mode: Int?
+        var index = block.startIndex
+        while index < block.endIndex {
+            guard block[index] == "\\" else {
+                index = block.index(after: index)
+                continue
+            }
+            let tag = block.index(after: index)
+            guard tag < block.endIndex, block[tag] == "p" else {
+                index = tag
+                continue
+            }
+            var probe = block.index(after: tag)
+            var digits = ""
+            while probe < block.endIndex, block[probe].isNumber {
+                digits.append(block[probe])
+                probe = block.index(after: probe)
+            }
+            // `\pos(...)` starts with `\p` but is a position tag, not a
+            // drawing-mode switch. Only a numeric `\pN` changes mode.
+            if !digits.isEmpty, let parsed = Int(digits) {
+                mode = parsed
+            }
+            index = probe
+        }
+        return mode
     }
 
     private static func markupPlainText(_ raw: String) -> String {
@@ -59,26 +107,42 @@ public enum SubtitleText {
 
     private static func decodeEntities(_ text: String) -> String {
         guard text.contains("&") else { return text }
+        let characters = Array(text)
         var result = ""
         result.reserveCapacity(text.count)
-        var index = text.startIndex
+        var index = 0
 
-        while index < text.endIndex {
-            guard text[index] == "&",
-                  let semicolon = text[index...].firstIndex(of: ";"),
-                  text.distance(from: index, to: semicolon) <= 12 else {
-                result.append(text[index])
-                index = text.index(after: index)
+        while index < characters.count {
+            guard characters[index] == "&" else {
+                result.append(characters[index])
+                index += 1
+                continue
+            }
+            // Bound the semicolon search. Searching the whole remainder for
+            // every `&` without a semicolon was quadratic on long cues.
+            let limit = min(index + 13, characters.count)
+            var semicolon: Int?
+            var probe = index + 1
+            while probe < limit {
+                if characters[probe] == ";" {
+                    semicolon = probe
+                    break
+                }
+                probe += 1
+            }
+            guard let semicolon else {
+                result.append("&")
+                index += 1
                 continue
             }
 
-            let entity = String(text[text.index(after: index)..<semicolon])
+            let entity = String(characters[(index + 1)..<semicolon])
             if let decoded = decodeEntity(entity) {
                 result.append(decoded)
-                index = text.index(after: semicolon)
+                index = semicolon + 1
             } else {
-                result.append(text[index])
-                index = text.index(after: index)
+                result.append("&")
+                index += 1
             }
         }
         return result

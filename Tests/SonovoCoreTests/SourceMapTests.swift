@@ -4,6 +4,25 @@ import Testing
 
 @Suite("Source map")
 struct SourceMapTests {
+    @Test("Removed line prefixes keep original offsets and columns")
+    func removedLinePrefixes() {
+        // The original document had "> " before the second line; parsing
+        // strips it. Line 2 therefore starts at original offset 15.
+        let map = SourceMap(
+            source: "ab\ncd",
+            baseOffset: 10,
+            linePrefixRemovals: [0, 2]
+        )
+        #expect(map.position(atUTF16Offset: 15)?.line == 2)
+        #expect(map.position(atUTF16Offset: 15)?.column == 2)
+        #expect(map.position(atUTF16Offset: 17)?.offset == 17)
+        let range = SourceRange(
+            start: SourcePosition(line: 2, column: 2, offset: 15),
+            end: SourcePosition(line: 2, column: 4, offset: 17)
+        )
+        #expect(map.text(in: range) == "cd")
+    }
+
     @Test("Maps ASCII columns")
     func asciiColumns() {
         let map = SourceMap(source: "abc\ndef\n")

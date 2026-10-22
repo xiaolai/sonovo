@@ -270,12 +270,15 @@ struct CodeProjectSearch: Sendable {
             if data.contains(0) {
                 continue
             }
-            guard let text = String(data: data, encoding: .utf8) else {
+            // Search the same canonical text the editor displays. A lone CR
+            // becomes an LF there, so counting only LF on the raw bytes
+            // reports the wrong line.
+            guard let contents = try? MarkdownEncoding.decode(data) else {
                 continue
             }
 
             filesSearched += 1
-            let ns = text as NSString
+            let ns = contents.canonicalText as NSString
             let lineStarts = lineStartOffsets(in: ns)
             var searchStart = 0
             while searchStart < ns.length {

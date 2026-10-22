@@ -170,7 +170,7 @@ enum SampleHTML {
         <div>
             <div class="eyebrow">Tidewater · Episode 01</div>
             <h1>The Harbor at Six</h1>
-            <div class="meta">8 scenes · Storyboard · Generated 2 min ago</div>
+            <div class="meta">6 scenes · Storyboard · Generated 2 min ago</div>
         </div>
         <span class="badge">STORYBOARD</span>
     </header>
@@ -227,7 +227,7 @@ enum SampleHTML {
     </div>
 
     <footer>
-        <span>Storyboard · 8 scenes</span>
+        <span>Storyboard · 6 scenes</span>
         <span>Local preview · No network</span>
     </footer>
     </body>

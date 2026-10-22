@@ -52,7 +52,10 @@ final class PDFDocumentModel {
         loadGeneration &+= 1
         let generation = loadGeneration
         state = .loading
-        removeFindObservers()
+        // A search belongs to the document being replaced. Resolve its
+        // waiter and clear the results before the new PDF takes over, or the
+        // old selections stay attached to a document nobody displays.
+        resetSearch()
         let url = self.url
         // Parse off the main actor. The document is created and handed back
         // through an explicit unchecked wrapper; it is used only on the
@@ -73,6 +76,10 @@ final class PDFDocumentModel {
             state = .failed("This PDF could not be opened.")
             return
         }
+        // A search may have started against the retained old document while
+        // this parse was suspended. It belongs to the document being
+        // replaced, so its observers and waiter must not survive adoption.
+        resetSearch()
         self.document = document
         pageCount = document.pageCount
         state = document.isLocked ? .locked : .ready
@@ -150,6 +157,16 @@ final class PDFDocumentModel {
             searchContinuation = nil
             continuation.resume(returning: 0)
         }
+    }
+
+    /// Invalidates any in-flight search and clears its results, so nothing
+    /// from the old document can be published.
+    private func resetSearch() {
+        searchGeneration &+= 1
+        cancelFind()
+        searchResults = []
+        searchIndex = 0
+        pendingResults = []
     }
 
     private func installFindObservers(for document: PDFDocument) {

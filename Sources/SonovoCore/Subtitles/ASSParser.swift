@@ -37,7 +37,6 @@ enum ASSParser {
                     ) {
                         eventsFields = fields(
                             in: valueRange,
-                            line: line,
                             ns: ns
                         ).map { $0.lowercased() }
                     }
@@ -112,6 +111,10 @@ enum ASSParser {
                         }
                     }
                 }
+                guard parts.cues.count < SubtitleLimits.maxCueCount else {
+                    parts.truncated = true
+                    break
+                }
                 parts.cues.append(cue)
                 ordinal += 1
                 continue
@@ -122,7 +125,6 @@ enum ASSParser {
                     if let valueRange = valueRange(for: line, ns: ns) {
                         styleFields = fields(
                             in: valueRange,
-                            line: line,
                             ns: ns
                         ).map { $0.lowercased() }
                     }
@@ -133,7 +135,6 @@ enum ASSParser {
                        let valueRange = valueRange(for: line, ns: ns) {
                         let rawFields = fields(
                             in: valueRange,
-                            line: line,
                             ns: ns
                         )
                         let nameIndex = styleFields?.firstIndex(of: "name")
@@ -342,7 +343,6 @@ enum ASSParser {
     /// field contains a comma.
     private static func fields(
         in valueRange: Range<Int>,
-        line: SubtitleLine,
         ns: NSString
     ) -> [String] {
         let raw = ns.substring(with: NSRange(

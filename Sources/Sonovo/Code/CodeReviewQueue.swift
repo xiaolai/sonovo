@@ -331,20 +331,27 @@ enum CodeReviewInventory {
         }
 
         if !establishesBaseline {
-            for cursor in cursors.values where !seen.contains(cursor.path) {
-                let url = canonicalRoot.appendingPathComponent(cursor.path)
-                let decision = decisions.last { $0.path == cursor.path }
+            // A reviewed file can have a decision without a baseline cursor
+            // (a newly added file). Deletion must be reported for those too,
+            // not only for paths that once had a cursor.
+            var trackedPaths = Set(cursors.keys)
+            for decision in decisions {
+                trackedPaths.insert(decision.path)
+            }
+            for path in trackedPaths where !seen.contains(path) {
+                let url = canonicalRoot.appendingPathComponent(path)
+                let decision = decisions.last { $0.path == path }
                 guard deletionConfirmed(url) else {
                     unavailable += 1
                     continue
                 }
                 items.append(
                     CodeReviewQueueItem(
-                        path: cursor.path,
+                        path: path,
                         url: url,
                         status: .deleted,
                         currentHash: nil,
-                        baseline: cursor,
+                        baseline: cursors[path],
                         decision: decision,
                         canReviewContent: false
                     )

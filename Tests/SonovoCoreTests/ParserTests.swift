@@ -364,6 +364,63 @@ struct ParserTests {
         #expect(links == ["https://example.com"])
     }
 
+    @Test("HTML suppression requires a tag boundary and case-insensitive close")
+    func nestingGuardHTMLBoundary() {
+        let deep = String(repeating: "> ", count: 130) + "deep\n"
+        // `<scripture>` is not `<script>`; as a standalone tag it is a type-7
+        // HTML block only until the blank line.
+        #expect(NestingGuard.exceedsLimit("<scripture>\n\n" + deep, limit: 100))
+        // A raw script block ends at `</SCRIPT>`.
+        #expect(
+            !NestingGuard.exceedsLimit(
+                "<script>\n" + deep + "</SCRIPT>\n",
+                limit: 100
+            )
+        )
+    }
+
+    @Test("A container-scoped fence ends with its container")
+    func nestingGuardFenceScope() {
+        let source = "> ```\n> code\n\n"
+            + String(repeating: "> ", count: 130) + "deep\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+
+        // A top-level fence absorbs an indented unquoted line.
+        let topLevel = "  ```\n"
+            + String(repeating: "> ", count: 130) + "\n  ```\n"
+        #expect(!NestingGuard.exceedsLimit(topLevel, limit: 100))
+    }
+
+    @Test("Single-label and port authorities follow the GFM rules")
+    func autolinkAuthorityEdges() {
+        let parsed = MarkdownParser.parseCanonical(
+            "http://a www.example.com:8080/x http://foo_bar"
+        )
+        var destinations: [String] = []
+        func collect(_ inlines: [Inline]) {
+            for inline in inlines {
+                switch inline {
+                case let .link(destination, _, children, _):
+                    destinations.append(destination)
+                    collect(children)
+                case let .emphasis(children, _), let .strong(children, _),
+                     let .strikethrough(children, _):
+                    collect(children)
+                default:
+                    break
+                }
+            }
+        }
+        for block in parsed.ast.blocks {
+            if case let .paragraph(inlines, _) = block {
+                collect(inlines)
+            }
+        }
+        #expect(destinations.contains("http://a"))
+        #expect(destinations.contains("http://www.example.com:8080/x"))
+        #expect(!destinations.contains("http://foo_bar"))
+    }
+
     @Test("Parses the large product fixture")
     func largeFixture() throws {
         let url = try #require(

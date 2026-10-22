@@ -8,6 +8,7 @@ struct ImageDocumentView: View {
 
     @State private var model: ImageDocumentModel
     @State private var comparison: ComparisonModel?
+    @State private var loadedComparisonRevision: AssetRevision?
     @State private var showComparisonPicker = false
     @State private var zoom: CGFloat = 1
     @State private var lastZoom: CGFloat = 1
@@ -26,14 +27,32 @@ struct ImageDocumentView: View {
     }
 
     var body: some View {
-        if let comparison {
-            ComparisonView(
-                model: comparison,
-                onClose: { self.comparison = nil }
-            )
-        } else {
-            singleView
+        Group {
+            if let comparison {
+                ComparisonView(
+                    model: comparison,
+                    onClose: { self.comparison = nil }
+                )
+            } else {
+                singleView
+            }
         }
+        .onChange(of: comparisonCandidateRevision) { _, revision in
+            guard let comparison, let revision,
+                  revision != loadedComparisonRevision else { return }
+            loadedComparisonRevision = revision
+            // Replace the decoded pixels without discarding the comparison's
+            // mode, zoom, or wipe position.
+            Task { await comparison.trailing.reload() }
+        }
+    }
+
+    /// The revision of the compared image as the project currently knows it.
+    private var comparisonCandidateRevision: AssetRevision? {
+        guard let comparison else { return nil }
+        return comparisonCandidates.first {
+            $0.id == comparison.trailingAsset.id
+        }?.revision
     }
 
     private var singleView: some View {
@@ -52,6 +71,7 @@ struct ImageDocumentView: View {
                 candidates: comparisonCandidates,
                 onSelect: { candidate in
                     showComparisonPicker = false
+                    loadedComparisonRevision = candidate.revision
                     comparison = ComparisonModel(
                         leading: asset,
                         trailing: candidate,

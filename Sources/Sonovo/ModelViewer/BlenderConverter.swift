@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 enum Model3DTemporaryFiles {
@@ -44,7 +45,6 @@ struct BlenderInstallation: Equatable, Sendable {
 struct BlendConversionResult: Sendable {
     let outputURL: URL
     let temporaryDirectory: URL
-    let installation: BlenderInstallation
     let version: String?
     let log: String
     var warnings: [String] = []
@@ -238,14 +238,21 @@ final class BlenderConverter: BlendConverting {
         let log = ConversionLog()
         let ioQueue = DispatchQueue(label: "sonovo.blender-io")
 
+        // Drain in the readability handler itself. Queuing the blocking
+        // `availableData` read behind the shared I/O queue let repeated
+        // notifications block that queue, starving the other pipe.
         standardOutput.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
             ioQueue.async {
-                log.append(handle.availableData)
+                log.append(data)
             }
         }
         standardError.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
             ioQueue.async {
-                log.append(handle.availableData)
+                log.append(data)
             }
         }
 
@@ -294,7 +301,6 @@ final class BlenderConverter: BlendConverting {
         return BlendConversionResult(
             outputURL: outputURL,
             temporaryDirectory: directory,
-            installation: installation,
             version: log.version,
             log: logText,
             warnings: Self.warnings(from: logText)
@@ -364,12 +370,18 @@ final class BlenderConverter: BlendConverting {
                     outputPipe.fileHandleForReading.readabilityHandler = nil
                     errorPipe.fileHandleForReading.readabilityHandler = nil
                     ioQueue.sync {
+                        // A surviving child can inherit these pipes and keep
+                        // them open forever. Drain only what is already
+                        // buffered, without waiting for an EOF that may never
+                        // arrive, then close.
                         log.append(
-                            outputPipe.fileHandleForReading.readDataToEndOfFile()
+                            Self.drainAvailable(outputPipe.fileHandleForReading)
                         )
                         log.append(
-                            errorPipe.fileHandleForReading.readDataToEndOfFile()
+                            Self.drainAvailable(errorPipe.fileHandleForReading)
                         )
+                        try? outputPipe.fileHandleForReading.close()
+                        try? errorPipe.fileHandleForReading.close()
                     }
                     guard gateway.claim() else { return }
                     if timedOut.value {
@@ -415,6 +427,43 @@ final class BlenderConverter: BlendConverting {
             // the handler has run, no signal is sent.
             box.killIfUnfinished()
         }
+    }
+
+    /// Reads bytes already buffered in a pipe without blocking.
+    private static func drainAvailable(_ handle: FileHandle) -> Data {
+        let descriptor = handle.fileDescriptor
+        // Give the writer's final bytes a moment to reach the pipe. The
+        // process has already exited; a surviving descendant that holds the
+        // pipe open without writing still costs at most this bound.
+        var pollDescriptor = pollfd(
+            fd: descriptor,
+            events: Int16(POLLIN),
+            revents: 0
+        )
+        _ = poll(&pollDescriptor, 1, 50)
+        let flags = fcntl(descriptor, F_GETFL)
+        if flags >= 0 {
+            _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        // A descendant that keeps writing can hold the pipe open
+        // indefinitely. Bound the drain by both time and bytes, keeping the
+        // tail because the sentinel the caller looks for is written last.
+        let deadline = Date().addingTimeInterval(1)
+        let maximumBytes = 1 << 20
+        while Date() < deadline {
+            let count = read(descriptor, &buffer, buffer.count)
+            guard count > 0 else { break }
+            data.append(contentsOf: buffer[0..<count])
+            if data.count > maximumBytes * 2 {
+                data = Data(data.suffix(maximumBytes))
+            }
+        }
+        if data.count > maximumBytes {
+            data = Data(data.suffix(maximumBytes))
+        }
+        return data
     }
 
     private func cleanup(_ directory: URL) {

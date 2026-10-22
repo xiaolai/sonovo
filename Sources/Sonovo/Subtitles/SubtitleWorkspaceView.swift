@@ -68,6 +68,24 @@ struct SubtitleWorkspaceView: View {
             Text("Text and timing edits preserve every other byte of the file.")
                 .font(.system(size: AppTheme.TypeScale.xxs))
                 .foregroundStyle(.tertiary)
+
+            if let error = workspace.lastError {
+                VStack(spacing: AppTheme.Spacing.xs) {
+                    HStack(alignment: .top, spacing: AppTheme.Spacing.xs) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(AppTheme.Palette.warning)
+                        Text(error)
+                            .font(.system(size: AppTheme.TypeScale.sm))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    Button("Dismiss") {
+                        workspace.dismissError()
+                    }
+                    .buttonStyle(.link)
+                }
+                .frame(maxWidth: AppTheme.Layout.emptyDescriptionMaxWidth)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -101,6 +119,13 @@ private struct SubtitleDocumentPage: View {
     @State private var editingOrdinal: Int?
     @State private var draftText = ""
     @State private var draftBaseText = ""
+    /// The document revision the draft was opened against. A commit is
+    /// refused if the document changed underneath it.
+    @State private var draftRevision: UInt64 = 0
+    /// A serial number for draft handoffs. A commit that finishes after a
+    /// newer draft opened must not restore or overwrite the newer one.
+    @State private var draftGeneration: UInt64 = 0
+    @State private var draftConflict: String?
     @FocusState private var focusedCue: Int?
     /// A queued focus request must not land after the project is hidden.
     @State private var canFocus = true
@@ -121,18 +146,12 @@ private struct SubtitleDocumentPage: View {
                 // The page is leaving (another document, tab, or project).
                 // Commit the draft to the document it was typed into, never
                 // to whatever ordinal the next document happens to have.
-                guard let ordinal = editingOrdinal else { return }
-                editingOrdinal = nil
-                focusedCue = nil
-                let text = draftText
+                guard editingOrdinal != nil else { return }
                 Task { @MainActor in
                     guard !document.isClosed, !document.isReadOnly else {
                         return
                     }
-                    _ = await workspace.apply(
-                        .setText(ordinal: ordinal, text: text),
-                        to: document
-                    )
+                    _ = await commitDraft(document)
                 }
             }
     }
@@ -166,6 +185,15 @@ private struct SubtitleDocumentPage: View {
                     systemImage: "arrow.clockwise",
                     tint: AppTheme.Palette.info,
                     dismiss: workspace.dismissReloadNotice
+                )
+            }
+
+            if let draftConflict {
+                banner(
+                    text: draftConflict,
+                    systemImage: "exclamationmark.bubble",
+                    tint: AppTheme.Palette.warning,
+                    dismiss: { self.draftConflict = nil }
                 )
             }
 
@@ -209,12 +237,26 @@ private struct SubtitleDocumentPage: View {
         .onChange(of: document.parsedRevision) {
             reconcileState(document)
         }
+        .onChange(of: document.pendingDraft) { _, draft in
+            // A Save commits the mirrored draft while this view is still
+            // editing. Re-attach it, or later keystrokes would update
+            // nothing and close/termination would lose them.
+            guard draft == nil, let ordinal = editingOrdinal else { return }
+            document.beginDraft(
+                ordinal: ordinal,
+                baseText: draftText,
+                text: draftText
+            )
+            draftBaseText = draftText
+            draftRevision = document.revision
+        }
         .onChange(of: editingOrdinal) { old, new in
-            guard let new, old != new,
+            guard let old, let new, old != new,
                   let cue = document.parsed.cue(ordinal: new) else {
                 return
             }
             draftBaseText = cue.rawText
+            draftRevision = document.revision
         }
     }
 
@@ -370,7 +412,19 @@ private struct SubtitleDocumentPage: View {
                                 isActive: activeOrdinals(document)
                                     .contains(cue.ordinal),
                                 editingOrdinal: $editingOrdinal,
-                                draftText: $draftText,
+                                draftText: Binding(
+                                    get: { draftText },
+                                    set: { text in
+                                        draftText = text
+                                        // Mirror synchronously: close and
+                                        // termination read the document's
+                                        // copy, and a deferred onChange
+                                        // could lose the last keystroke.
+                                        if editingOrdinal != nil {
+                                            document.updateDraftText(text)
+                                        }
+                                    }
+                                ),
                                 focusedCue: $focusedCue,
                                 onSelect: {
                                     workspace.seek(
@@ -453,22 +507,36 @@ private struct SubtitleDocumentPage: View {
             return
         }
         if let current = editingOrdinal, current != ordinal {
+            let generation = draftGeneration
             Task {
                 guard await commitDraft(document) else { return }
-                guard let fresh = document.parsed.cue(ordinal: ordinal) else {
+                // A newer draft may have opened while the commit waited.
+                guard generation == draftGeneration,
+                      let fresh = document.parsed.cue(ordinal: ordinal) else {
                     return
                 }
-                openDraft(fresh)
+                openDraft(fresh, in: document)
             }
             return
         }
-        openDraft(cue)
+        openDraft(cue, in: document)
     }
 
-    private func openDraft(_ cue: SubtitleCue) {
+    private func openDraft(
+        _ cue: SubtitleCue,
+        in document: SubtitleDocument
+    ) {
+        draftGeneration &+= 1
         draftText = cue.rawText
         draftBaseText = cue.rawText
+        draftRevision = document.revision
+        draftConflict = nil
         editingOrdinal = cue.ordinal
+        document.beginDraft(
+            ordinal: cue.ordinal,
+            baseText: cue.rawText,
+            text: cue.rawText
+        )
         DispatchQueue.main.async {
             // The project can switch while the focus hop is queued.
             guard canFocus else { return }
@@ -482,35 +550,56 @@ private struct SubtitleDocumentPage: View {
         guard !document.isReadOnly else {
             editingOrdinal = nil
             focusedCue = nil
+            document.discardDraft()
+            return false
+        }
+        // The ordinal alone is not identity: an external edit or a reparse
+        // can reorder cues. Refuse to write unless both the document
+        // revision and the cue's text are still the ones the draft was
+        // opened against.
+        guard document.revision == draftRevision,
+              let cue = document.parsed.cue(ordinal: ordinal),
+              cue.rawText == draftBaseText else {
+            draftConflict = "This cue changed on disk. Your draft is kept; "
+                + "cancel it or copy the text before discarding."
             return false
         }
         let text = draftText
+        let generation = draftGeneration
         editingOrdinal = nil
         focusedCue = nil
-        if await workspace.apply(
-            .setText(ordinal: ordinal, text: text),
+        if await workspace.applyDraft(
+            text: text,
+            ordinal: ordinal,
+            baseText: draftBaseText,
+            revision: draftRevision,
             to: document
         ) != nil {
+            if generation == draftGeneration {
+                draftConflict = nil
+                document.discardDraft()
+            }
             return true
         }
         // Keep the words on screen so a failed save is not silently lost.
-        editingOrdinal = ordinal
-        if canFocus {
-            focusedCue = ordinal
+        if generation == draftGeneration {
+            editingOrdinal = ordinal
+            if canFocus {
+                focusedCue = ordinal
+            }
         }
         return false
     }
 
-    private func cancelDraft() {
-        editingOrdinal = nil
-        focusedCue = nil
-    }
-
     private func reconcileState(_ document: SubtitleDocument) {
         guard let editing = editingOrdinal else { return }
-        guard let cue = document.parsed.cue(ordinal: editing),
+        guard document.revision == draftRevision,
+              let cue = document.parsed.cue(ordinal: editing),
               cue.rawText == draftBaseText else {
-            cancelDraft()
+            // Keep the user's words and surface the conflict. Cancelling
+            // here silently discarded uncommitted text.
+            draftConflict = "This cue changed on disk. Your draft is kept; "
+                + "cancel it or copy the text before discarding."
             return
         }
     }

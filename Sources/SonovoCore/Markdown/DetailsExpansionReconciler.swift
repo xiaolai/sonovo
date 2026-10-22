@@ -1,5 +1,3 @@
-import Foundation
-
 /// The content identity of one details block.
 ///
 /// Position is deliberately absent: blocks are matched by content so an edit

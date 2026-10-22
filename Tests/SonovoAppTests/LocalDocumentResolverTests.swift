@@ -90,10 +90,10 @@ final class LocalDocumentResolverTests: XCTestCase {
 
     func testServesTheDocumentAndSiblingResources() throws {
         let page = try file("/doc/page.html")
-        XCTAssertEqual(page.mimeType, "text/html; charset=utf-8")
+        XCTAssertEqual(page.mimeType, "text/html")
 
         let style = try file("/doc/style.css")
-        XCTAssertEqual(style.mimeType, "text/css; charset=utf-8")
+        XCTAssertEqual(style.mimeType, "text/css")
 
         let image = try file("/doc/image.png")
         XCTAssertEqual(image.mimeType, "image/png")

@@ -180,7 +180,8 @@ enum CodeLanguage: String, CaseIterable, Sendable {
                 blockComments: [.init(open: "/*", close: "*/", nested: false)],
                 stringQuotes: ["\"", "'"],
                 backtickStrings: true,
-                keywords: Self.javaScriptKeywords
+                keywords: Self.javaScriptKeywords,
+                regexLiterals: true
             )
         case .typescript:
             return CodeSyntaxSpec(
@@ -190,7 +191,8 @@ enum CodeLanguage: String, CaseIterable, Sendable {
                 backtickStrings: true,
                 keywords: Self.javaScriptKeywords
                     .union(Self.typeScriptKeywords),
-                typeKeywords: Self.typeScriptTypes
+                typeKeywords: Self.typeScriptTypes,
+                regexLiterals: true
             )
         case .python:
             return CodeSyntaxSpec(
@@ -213,7 +215,8 @@ enum CodeLanguage: String, CaseIterable, Sendable {
                 ],
                 keywords: Self.shellKeywords,
                 singleQuoteEscapes: false,
-                hashCommentRequiresBoundary: true
+                hashCommentRequiresBoundary: true,
+                multilineQuoteStrings: true
             )
         case .json:
             return CodeSyntaxSpec(
@@ -381,11 +384,9 @@ enum CodeLanguage: String, CaseIterable, Sendable {
                 hashCommentRequiresBoundary: true
             )
         case .rakefile, .gemfile:
-            return CodeSyntaxSpec(
-                lineComments: ["#"],
-                stringQuotes: ["\"", "'"],
-                keywords: Self.rubyKeywords
-            )
+            // These are Ruby files. Reuse the Ruby spec so heredocs and the
+            // rest of the lexer rules cannot drift between the cases.
+            return CodeLanguage.ruby.syntax
         case .plainText:
             return CodeSyntaxSpec()
         }
@@ -481,6 +482,11 @@ struct CodeSyntaxSpec: Sendable, Equatable {
     var doubledQuoteEscapes = false
     /// Shell-family `#` starts a comment only at a word boundary.
     var hashCommentRequiresBoundary = false
+    /// Ordinary quotes may span lines (shell). Other languages reset an
+    /// unterminated ordinary quote at the line end.
+    var multilineQuoteStrings = false
+    /// Slash-delimited regular-expression literals (JavaScript/TypeScript).
+    var regexLiterals = false
 }
 
 // MARK: - Keyword tables

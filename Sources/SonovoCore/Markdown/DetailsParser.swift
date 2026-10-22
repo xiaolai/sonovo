@@ -107,18 +107,16 @@ enum DetailsParser {
                         interior.append(.htmlBlock(raw: prefixRaw, range: prefixRange))
                     }
                 }
-                if let parsedDetails = multiBlockDetails(
-                    opener: opener,
-                    openRange: blockRange,
-                    closeTagEnd: pair.closeTagEnd,
-                    interior: interior,
-                    parsed: parsed,
-                    depth: depth
-                ) {
-                    result.append(parsedDetails)
-                } else {
-                    result.append(block)
-                }
+                result.append(
+                    multiBlockDetails(
+                        opener: opener,
+                        openRange: blockRange,
+                        closeTagEnd: pair.closeTagEnd,
+                        interior: interior,
+                        parsed: parsed,
+                        depth: depth
+                    )
+                )
                 index = pair.closingIndex + 1
                 continue
             }
@@ -316,7 +314,7 @@ enum DetailsParser {
         interior: [Block],
         parsed: ParsedMarkdown,
         depth: Int
-    ) -> Block? {
+    ) -> Block {
         let ns = parsed.source as NSString
         var summaryInlines: [Inline] = []
         var summarySourceRange: SourceRange?
@@ -574,16 +572,9 @@ enum DetailsParser {
 
         // Prepend document-wide reference definitions so a compact body can
         // resolve references defined outside it.
-        let prefix = parsed.ast.referenceDefinitions.map { definition -> String in
-            var line = "[\(definition.label)]: "
-                + Self.serializedDefinitionDestination(
-                    definition.destination
-                )
-            if let title = definition.title, !title.isEmpty {
-                line += " \"\(title.replacingOccurrences(of: "\"", with: "\\\""))\""
-            }
-            return line
-        }.joined(separator: "\n")
+        let prefix = parsed.ast.referenceDefinitions
+            .map(ReferenceDefinitionSerializer.line)
+            .joined(separator: "\n")
         // Prefer prepending the definitions: a definition before the body
         // cannot be swallowed by an unclosed construct at the body's end. It
         // is only unsafe when the synthetic prefix would map before offset
@@ -605,44 +596,95 @@ enum DetailsParser {
             && baseLine > prefixLines
             && startingColumn == 0
 
+        // A details block inside a blockquote carries `>` markers on every
+        // continuation line. Parsing them would turn the container into a
+        // second quote and split emphasis that spans lines, so strip the
+        // container markers first and map positions back with the removal
+        // counts. The fragment's first line is mid-line after `</summary>`
+        // unless it starts at the container prefix; a `>` at its start is
+        // authored content there, not a container marker.
+        let container = containerPrefix(
+            at: baseRange.lowerBound,
+            in: parsed.source
+        )
+        let sourceNS = parsed.source as NSString
+        let baseLocation = min(
+            max(baseRange.lowerBound, 0),
+            max(sourceNS.length - 1, 0)
+        )
+        let baseLineStart = sourceNS.lineRange(
+            for: NSRange(location: baseLocation, length: 0)
+        ).location
+        let startsAtPrefix = baseRange.lowerBound
+            <= baseLineStart + container.length
+        let stripped = stripContainerQuotes(
+            text,
+            depth: container.depth,
+            stripFirstLine: startsAtPrefix
+        )
+        let parseText = stripped.text
+        let removals = stripped.removals
+
         let combined: String
         let mapBaseOffset: Int
         let mapBaseLine: Int
         let mapBaseColumn: Int
         let bodyStartInCombined: Int
+        let mapRemovals: [Int]
         if prefix.isEmpty {
-            combined = text
+            combined = parseText
             mapBaseOffset = baseRange.lowerBound
             mapBaseLine = max(1, baseLine)
             mapBaseColumn = startingColumn
             bodyStartInCombined = 0
+            mapRemovals = removals
         } else if prepend {
-            combined = prefix + "\n\n" + text
+            combined = prefix + "\n\n" + parseText
             mapBaseOffset = baseRange.lowerBound - prefixLength
             mapBaseLine = max(1, baseLine - prefixLines)
             // The synthetic prefix ends with a newline, so the body starts at
             // column zero.
             mapBaseColumn = 0
             bodyStartInCombined = prefixLength
+            mapRemovals = Array(repeating: 0, count: prefixLines) + removals
         } else {
             // An unclosed fence at the body's end would swallow the appended
             // definitions. Close it synthetically so the definitions are
             // structural and never become code-block content.
-            let closer = unclosedFenceCloser(in: text)
-            let body = closer.map { text + "\n" + $0 } ?? text
+            let closer = unclosedConstructCloser(in: parseText)
+            // Add a blank line before the synthetic closer: it keeps a
+            // synthetic-only block separate from the last real block, and
+            // the body-end clamp removes it from the body's ranges.
+            let body = closer.map { parseText + "\n\n" + $0 } ?? parseText
             combined = body + "\n\n" + prefix
             mapBaseOffset = baseRange.lowerBound
             mapBaseLine = max(1, baseLine)
             mapBaseColumn = startingColumn
             bodyStartInCombined = 0
+            mapRemovals = removals
         }
 
         let map = SourceMap(
             source: combined,
             baseLine: mapBaseLine,
             baseOffset: mapBaseOffset,
-            baseColumn: mapBaseColumn
+            baseColumn: mapBaseColumn,
+            linePrefixRemovals: mapRemovals
         )
+        // The details body is parsed with the same recursive converter as a
+        // document. Guard it before the converter can overflow the stack;
+        // preserve the body literally instead of dropping it.
+        if NestingGuard.exceedsLimit(
+            combined,
+            limit: MarkdownLimits.maxParseDepth
+        ) {
+            return [
+                .paragraph(
+                    inlines: [.text(text, range: baseRange)],
+                    range: baseRange
+                )
+            ]
+        }
         let document = Document(parsing: combined, options: MarkdownParser.parseOptions)
         let mapper = ASTMapper(
             sourceMap: map,
@@ -665,6 +707,131 @@ enum DetailsParser {
         return augment(blocks: filtered, parsed: parsed, depth: depth)
     }
 
+    /// Strips up to `depth` blockquote markers from the start of every
+    /// line. Returns the stripped text and the UTF-16 count removed from
+    /// each line, which the source map uses to report original positions.
+    /// `stripFirstLine` is false when the fragment starts mid-line after a
+    /// tag, where a leading `>` is authored content.
+    private static func stripContainerQuotes(
+        _ text: String,
+        depth: Int,
+        stripFirstLine: Bool
+    ) -> (text: String, removals: [Int]) {
+        guard depth > 0 else { return (text, []) }
+        let lines = text.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        )
+        var removals: [Int] = []
+        var output: [Substring] = []
+        for (lineIndex, line) in lines.enumerated() {
+            guard lineIndex > 0 || stripFirstLine else {
+                removals.append(0)
+                output.append(line)
+                continue
+            }
+            var cursor = line.startIndex
+            for _ in 0..<depth {
+                var probe = cursor
+                var spaces = 0
+                while probe < line.endIndex, line[probe] == " ", spaces < 4 {
+                    probe = line.index(after: probe)
+                    spaces += 1
+                }
+                guard probe < line.endIndex, line[probe] == ">" else {
+                    break
+                }
+                probe = line.index(after: probe)
+                // CommonMark removes one space after the marker; further
+                // spaces are content (`>     code` is an indented code
+                // block inside the quote).
+                if probe < line.endIndex, line[probe] == " " {
+                    probe = line.index(after: probe)
+                }
+                cursor = probe
+            }
+            let removed = line.utf16.distance(
+                from: line.startIndex,
+                to: cursor
+            )
+            removals.append(removed)
+            output.append(line[cursor...])
+        }
+        return (output.map(String.init).joined(separator: "\n"), removals)
+    }
+
+    /// The container prefix on the source line that contains `offset`: its
+    /// blockquote depth and its UTF-16 length. List markers count as prefix
+    /// but not as quote depth (`- > <details>` is one quote).
+    private static func containerPrefix(
+        at offset: Int,
+        in source: String
+    ) -> (depth: Int, length: Int) {
+        let ns = source as NSString
+        guard ns.length > 0 else { return (0, 0) }
+        let location = min(max(offset, 0), ns.length - 1)
+        let lineRange = ns.lineRange(
+            for: NSRange(location: location, length: 0)
+        )
+        let line = ns.substring(with: lineRange)
+        var index = line.startIndex
+        var markers = 0
+        while index < line.endIndex {
+            var probe = index
+            var spaces = 0
+            while probe < line.endIndex, line[probe] == " ", spaces < 4 {
+                probe = line.index(after: probe)
+                spaces += 1
+            }
+            if probe < line.endIndex, line[probe] == ">" {
+                markers += 1
+                index = line.index(after: probe)
+                continue
+            }
+            if let afterMarker = listMarkerEnd(from: probe, in: line) {
+                index = afterMarker
+                continue
+            }
+            break
+        }
+        return (
+            markers,
+            line.utf16.distance(from: line.startIndex, to: index)
+        )
+    }
+
+    /// The index after a list marker (`- `, `* `, `1. `) at `index`, or nil.
+    private static func listMarkerEnd(
+        from index: String.Index,
+        in line: String
+    ) -> String.Index? {
+        guard index < line.endIndex else { return nil }
+        let character = line[index]
+        if character == "-" || character == "+" || character == "*" {
+            let after = line.index(after: index)
+            guard after < line.endIndex,
+                  line[after] == " " || line[after] == "\t" else {
+                return nil
+            }
+            return line.dropFirst(0).index(after: after)
+        }
+        var probe = index
+        var digits = 0
+        while probe < line.endIndex, line[probe].isNumber, digits < 10 {
+            probe = line.index(after: probe)
+            digits += 1
+        }
+        guard digits >= 1, digits <= 9, probe < line.endIndex,
+              line[probe] == "." || line[probe] == ")" else {
+            return nil
+        }
+        let after = line.index(after: probe)
+        guard after < line.endIndex,
+              line[after] == " " || line[after] == "\t" else {
+            return nil
+        }
+        return line.index(after: after)
+    }
 
     /// Clamps block ranges to the real body, dropping synthetic-only extent.
     private static func clamp(
@@ -734,46 +901,64 @@ enum DetailsParser {
         }
     }
 
-    /// A fence line that closes a trailing unclosed fenced code block, or
-    /// nil when the text does not end inside one.
-    private static func unclosedFenceCloser(in text: String) -> String? {
-        var fence: (character: Character, length: Int)?
+    /// A closer that ends the construct still open at the end of `text`,
+    /// so reference definitions appended after it stay structural.
+    ///
+    /// Guessing from the text misses cases (a fence marker inside an HTML
+    /// block, a tag name split across lines). Instead, probe with the real
+    /// parser: append a definition and see whether it becomes structural.
+    /// The common case needs one probe; a swallowed definition tries each
+    /// closer until the parser agrees. Fragments are small and this only
+    /// runs when the document actually has reference definitions to append.
+    static func unclosedConstructCloser(in text: String) -> String? {
+        // A random label cannot collide with a definition already in the
+        // fragment, which would make a swallowed marker look structural.
+        let probeLabel = "zz-probe-\(UUID().uuidString.lowercased())"
+        let marker = "[\(probeLabel)]: /probe-target"
+
+        func markerIsStructural(_ body: String) -> Bool {
+            MarkdownParser.parseCanonical(body + "\n\n" + marker)
+                .ast.referenceDefinitions
+                .contains { $0.label.lowercased() == probeLabel }
+        }
+
+        if markerIsStructural(text) { return nil }
+        // A fence closes only with at least as many markers as it opened
+        // with, so try the run lengths the text actually contains first.
+        var candidates: [String] = []
         for line in text.split(
             separator: "\n",
             omittingEmptySubsequences: false
         ) {
-            // Four spaces or a leading tab make indented code, not a fence.
-            let indentation = line.prefix(while: { $0 == " " }).count
-            let canBeFence = line.first != "\t" && indentation < 4
             let trimmed = line.drop(while: { $0 == " " })
-            if let active = fence {
-                var run = 0
-                for character in trimmed {
-                    guard character == active.character else { break }
-                    run += 1
-                }
-                if canBeFence, run >= active.length,
-                   trimmed.dropFirst(run).allSatisfy({
-                       $0 == " " || $0 == "\t"
-                   }) {
-                    fence = nil
-                }
-            } else if canBeFence,
-                      let first = trimmed.first,
-                      first == "`" || first == "~" {
-                var run = 0
-                for character in trimmed {
-                    guard character == first else { break }
-                    run += 1
-                }
-                if run >= 3,
-                   !(first == "`" && trimmed.dropFirst(run).contains("`")) {
-                    fence = (first, run)
+            guard let first = trimmed.first,
+                  first == "`" || first == "~" else {
+                continue
+            }
+            var run = 0
+            for character in trimmed {
+                guard character == first else { break }
+                run += 1
+            }
+            if run >= 3 {
+                let closer = String(repeating: first, count: run)
+                if !candidates.contains(closer) {
+                    candidates.append(closer)
                 }
             }
         }
-        guard let fence else { return nil }
-        return String(repeating: fence.character, count: fence.length)
+        for closer in [
+            "```", "~~~", "-->", "]]>", "?>", ">",
+            "</script>", "</style>", "</pre>", "</textarea>"
+        ] where !candidates.contains(closer) {
+            candidates.append(closer)
+        }
+        for candidate in candidates {
+            if markerIsStructural(text + "\n\n" + candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     // MARK: - Lexing
@@ -832,6 +1017,10 @@ enum DetailsParser {
         private let ns: NSString
         private var index = 0
         private var fence: (character: unichar, length: Int)?
+        /// The current line's bounds, cached across tokens. Searching for
+        /// the next newline and copying the rest of the line once per token
+        /// made a long line full of tags quadratic.
+        private var lineBounds: (start: Int, limit: Int, next: Int)?
 
         init(_ ns: NSString) {
             self.ns = ns
@@ -839,28 +1028,42 @@ enum DetailsParser {
 
         mutating func next() -> LexToken? {
             while index < ns.length {
-                let lineEnd = ns.range(
-                    of: "\n",
-                    options: [],
-                    range: NSRange(
-                        location: index,
-                        length: ns.length - index
+                let bounds: (start: Int, limit: Int, next: Int)
+                if let cached = lineBounds,
+                   index >= cached.start, index <= cached.limit {
+                    bounds = cached
+                } else {
+                    let lineEnd = ns.range(
+                        of: "\n",
+                        options: [],
+                        range: NSRange(
+                            location: index,
+                            length: ns.length - index
+                        )
                     )
-                )
-                let lineLimit = lineEnd.location == NSNotFound
-                    ? ns.length
-                    : lineEnd.location
-                let line = ns.substring(
-                    with: NSRange(
-                        location: index,
-                        length: max(0, lineLimit - index)
-                    )
-                )
+                    let limit = lineEnd.location == NSNotFound
+                        ? ns.length
+                        : lineEnd.location
+                    let next = lineEnd.location == NSNotFound
+                        ? ns.length
+                        : lineEnd.location + 1
+                    bounds = (index, limit, next)
+                    lineBounds = bounds
+                }
+                let lineLimit = bounds.limit
+                let nextLine = bounds.next
                 let atLineStart = index == 0
                     || ns.character(at: index - 1) == 0x0A
-                let nextLine = lineEnd.location == NSNotFound
-                    ? ns.length
-                    : lineEnd.location + 1
+                // Only a line-start token needs the line text; mid-line
+                // tokens never inspect it.
+                let line = atLineStart
+                    ? ns.substring(
+                        with: NSRange(
+                            location: index,
+                            length: max(0, lineLimit - index)
+                        )
+                    )
+                    : ""
 
                 if let activeFence = fence {
                     if closesFence(
@@ -1503,21 +1706,6 @@ enum DetailsParser {
         if character >= 0x61, character <= 0x7A { return true } // a-z
         if character >= 0x30, character <= 0x39 { return true } // 0-9
         return character == 0x2D || character == 0x5F || character == 0x3A // - _ :
-    }
-
-    private static func serializedDefinitionDestination(
-        _ destination: String
-    ) -> String {
-        if destination.rangeOfCharacter(
-            from: .whitespacesAndNewlines
-        ) != nil || destination.contains("<") || destination.contains(">") {
-            let escaped = destination
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "<", with: "\\<")
-                .replacingOccurrences(of: ">", with: "\\>")
-            return "<\(escaped)>"
-        }
-        return destination
     }
 
     private static func range(

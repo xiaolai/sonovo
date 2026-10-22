@@ -44,6 +44,9 @@ public enum SaveMode: Sendable, Equatable {
     case automatic
     /// An explicit user save or conflict resolution.
     case explicitOverwrite
+    /// Recreate a file known to be missing. Refuses a destination that
+    /// reappeared, rather than overwriting it.
+    case create
 }
 
 /// Test-only hooks for race injection.
@@ -295,6 +298,12 @@ public struct MarkdownFileStore: Sendable {
         let destination = request.destination
         let fileManager = FileManager.default
         let exists = fileManager.fileExists(atPath: destination.path)
+        // Reject a recreated destination before reading it: a create request
+        // carries no size bound, so reading first would allocate an arbitrary
+        // file only to refuse it.
+        if exists, request.mode == .create {
+            throw SaveError.destinationExists
+        }
         let previousBytes: Data? = exists
             ? try readPreviousBytes(for: request)
             : nil
@@ -539,7 +548,7 @@ public struct MarkdownFileStore: Sendable {
         _ request: SaveRequest,
         _ workspace: SaveWorkspace
     ) throws -> SaveOutcome {
-        if request.mode == .automatic {
+        if request.mode == .automatic || request.mode == .create {
             workspace.removeDisplacedArtifact()
             workspace.removeNewArtifact()
             throw SaveError.swapUnavailable
@@ -585,6 +594,25 @@ public struct MarkdownFileStore: Sendable {
                     newContent: workspace.newArtifact
                 )
             )
+        }
+
+        // An unconditional overwrite has no expected snapshot, but a writer
+        // may still have changed the destination between the initial read and
+        // the reread. Preserve those bytes, not the older copy, before
+        // replacing them.
+        if request.expectedDisk == nil,
+           let latest,
+           latest != workspace.previousBytes {
+            do {
+                try latest.write(to: workspace.displacedArtifact)
+            } catch {
+                // The rename has not run, so the destination still holds the
+                // external bytes. Fail without touching it.
+                throw SaveError.writeFailed(
+                    "cannot preserve the changed destination at "
+                        + "\(workspace.displacedArtifact.path): \(error)"
+                )
+            }
         }
 
         guard renameatx_np(
@@ -639,10 +667,11 @@ public struct MarkdownFileStore: Sendable {
                     "restore file already exists at \(restoreURL.path)"
                 )
             }
-            // The restored file replaces the destination; it must carry the
-            // same permissions, ACLs, and attributes as the file it
-            // replaces, not freshly created defaults.
-            try preserveAttributes(from: destination, to: restoreURL)
+            // The restored bytes are the inode that was swapped out to the
+            // temporary file. Carry that inode's permissions, ACLs, and
+            // attributes, not the installed local replacement's broader
+            // defaults.
+            try preserveAttributes(from: workspace.temporary, to: restoreURL)
         } catch {
             try? FileManager.default.removeItem(at: restoreURL)
             throw SaveError.writeFailed(
@@ -683,11 +712,35 @@ public struct MarkdownFileStore: Sendable {
 
         do {
             try swappedOut.write(to: workspace.displacedArtifact)
-            try? FileManager.default.removeItem(at: restoreURL)
-            return nil
         } catch {
             return restoreURL
         }
+        // The destination held a newer external version than the one being
+        // restored. Put that newer version back on disk so the disk and the
+        // conflict artifact agree; the older restored bytes are superseded.
+        // `restoreURL` currently holds the newer version as its own inode.
+        guard renameatx_np(
+            Self.atFDCWD,
+            restoreURL.path,
+            Self.atFDCWD,
+            destination.path,
+            Self.renameSwap
+        ) == 0 else {
+            // Leave the newer version at the recovery path rather than
+            // deleting the only copy.
+            return restoreURL
+        }
+        // The second swap moved the older restored bytes to restoreURL.
+        // Only delete it when it really is those bytes; a third external
+        // version may have arrived in between and must be preserved.
+        if let swappedBack = try? readBoundedFile(
+            at: restoreURL,
+            limit: data.count
+        ), swappedBack == data {
+            try? FileManager.default.removeItem(at: restoreURL)
+            return nil
+        }
+        return restoreURL
     }
 
     /// Confirms the destination holds the bytes this save wrote. Bounded by

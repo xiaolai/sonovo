@@ -189,6 +189,10 @@ final class WaveformCache {
 
 enum WaveformExtractor {
     static let bucketsPerSecond = 200
+    /// Four hours at 200 buckets/s is about 2.9M buckets across three
+    /// arrays. Longer audio gets a named failure instead of an unbounded
+    /// allocation.
+    static let maximumAnalyzedSeconds: Double = 4 * 60 * 60
 
     static func extract(url: URL) async throws -> WaveformData {
         let task = Task.detached(priority: .userInitiated) {
@@ -211,6 +215,9 @@ enum WaveformExtractor {
         let duration = asset.duration.seconds
         guard duration.isFinite, duration > 0 else {
             throw WaveformError.invalidDuration
+        }
+        guard duration <= WaveformExtractor.maximumAnalyzedSeconds else {
+            throw WaveformError.tooLong
         }
 
         let reader = try AVAssetReader(asset: asset)
@@ -429,6 +436,7 @@ enum WaveformError: LocalizedError {
     case invalidDuration
     case cannotRead
     case emptyAudio
+    case tooLong
 
     var errorDescription: String? {
         switch self {
@@ -436,6 +444,8 @@ enum WaveformError: LocalizedError {
         case .invalidDuration: "This file has no usable duration."
         case .cannotRead: "The audio track could not be read."
         case .emptyAudio: "The audio track contained no samples."
+        case .tooLong:
+            "This audio is longer than four hours; the waveform is not drawn."
         }
     }
 }

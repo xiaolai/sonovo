@@ -55,12 +55,15 @@ public struct SourceMap: Sendable {
     private struct Line: Sendable {
         /// The line without its newline.
         let text: Substring
-        /// The global UTF-16 offset of the line's first code unit.
+        /// The global UTF-16 offset of the line's first code unit in the
+        /// original document.
         let startUTF16: Int
         /// The line's start index in the source.
         let startIndex: String.Index
         /// The global 1-based line number.
         let number: Int
+        /// Characters removed from this line's start before parsing.
+        let prefixRemoval: Int
     }
 
     /// The canonical source this map describes.
@@ -76,6 +79,11 @@ public struct SourceMap: Sendable {
     public let baseColumn: Int
 
     private let lines: [Line]
+    /// UTF-16 characters removed from the start of each line of `source`,
+    /// in order. Used when a fragment is parsed without its enclosing
+    /// container markers; positions still report offsets in the original
+    /// document.
+    private let linePrefixRemovals: [Int]
 
     /// Creates a map over canonical (BOM-free, LF-only) source.
     ///
@@ -85,11 +93,14 @@ public struct SourceMap: Sendable {
     ///     A frontmatter body parsed separately uses the line after the
     ///     closing fence.
     ///   - baseOffset: The global UTF-16 offset of `source`'s first code unit.
+    ///   - linePrefixRemovals: Characters stripped from the start of each
+    ///     line before parsing. Offsets and columns remain global.
     public init(
         source: String,
         baseLine: Int = 1,
         baseOffset: Int = 0,
-        baseColumn: Int = 0
+        baseColumn: Int = 0,
+        linePrefixRemovals: [Int] = []
     ) {
         precondition(baseLine >= 1, "baseLine is 1-based")
         precondition(baseOffset >= 0, "baseOffset is 0-based")
@@ -98,23 +109,36 @@ public struct SourceMap: Sendable {
         self.baseLine = baseLine
         self.baseOffset = baseOffset
         self.baseColumn = baseColumn
+        self.linePrefixRemovals = linePrefixRemovals
 
         var result: [Line] = []
         var cursor = baseOffset
         var number = baseLine
         var start = source.startIndex
+        var lineIndex = 0
 
         while true {
             let newline = source[start...].firstIndex(of: "\n")
             let end = newline ?? source.endIndex
             let text = source[start..<end]
+            let removal = lineIndex < linePrefixRemovals.count
+                ? linePrefixRemovals[lineIndex]
+                : 0
+            let startUTF16 = cursor + removal
             result.append(
-                Line(text: text, startUTF16: cursor, startIndex: start, number: number)
+                Line(
+                    text: text,
+                    startUTF16: startUTF16,
+                    startIndex: start,
+                    number: number,
+                    prefixRemoval: removal
+                )
             )
-            cursor += text.utf16.count
+            cursor = startUTF16 + text.utf16.count
             guard let newline else { break }
             cursor += 1
             number += 1
+            lineIndex += 1
             start = source.index(after: newline)
         }
 
@@ -211,27 +235,74 @@ public struct SourceMap: Sendable {
         }
 
         // A fragment that starts mid-line inherits that line's column for
-        // every position on its first line.
-        let column = entry.number == baseLine ? baseColumn + local : local
+        // every position on its first line. Characters stripped from the
+        // line start still count as columns in the original document.
+        let column = (entry.number == baseLine ? baseColumn : 0)
+            + local
+            + entry.prefixRemoval
         return SourcePosition(line: entry.number, column: column, offset: offset)
     }
 
     /// Returns the source text covered by a resolved range.
     public func text(in range: SourceRange) -> String? {
+        guard !linePrefixRemovals.isEmpty else {
+            let lower = range.lowerBound - baseOffset
+            let upper = range.upperBound - baseOffset
+            return Self.slice(source, utf16Offsets: lower..<upper)
+        }
+        guard let lower = position(atUTF16Offset: range.lowerBound),
+              let upper = position(atUTF16Offset: range.upperBound) else {
+            return nil
+        }
+        var pieces: [String] = []
+        for lineNumber in lower.line...upper.line {
+            guard let entry = lineEntry(lineNumber) else { return nil }
+            let lineEnd = entry.startUTF16 + entry.text.utf16.count
+            let startLocal = max(
+                0,
+                (lineNumber == lower.line ? range.lowerBound : entry.startUTF16)
+                    - entry.startUTF16
+            )
+            let endLocal = min(
+                entry.text.utf16.count,
+                max(
+                    0,
+                    (lineNumber == upper.line ? range.upperBound : lineEnd)
+                        - entry.startUTF16
+                )
+            )
+            if endLocal > startLocal,
+               let piece = Self.slice(
+                   String(entry.text),
+                   utf16Offsets: startLocal..<endLocal
+               ) {
+                pieces.append(piece)
+            }
+            if lineNumber < upper.line {
+                pieces.append("\n")
+            }
+        }
+        return pieces.joined()
+    }
+
+    /// Returns the slice covered by UTF-16 offsets, or nil when the range is
+    /// out of bounds or falls inside a multi-byte scalar.
+    public static func slice(
+        _ source: String,
+        utf16Offsets: Range<Int>
+    ) -> String? {
         let utf16 = source.utf16
-        let lowerBound = range.lowerBound - baseOffset
-        let upperBound = range.upperBound - baseOffset
         guard
-            lowerBound >= 0,
-            upperBound <= utf16.count,
+            utf16Offsets.lowerBound >= 0,
+            utf16Offsets.upperBound <= utf16.count,
             let lower = utf16.index(
                 utf16.startIndex,
-                offsetBy: lowerBound,
+                offsetBy: utf16Offsets.lowerBound,
                 limitedBy: utf16.endIndex
             ),
             let upper = utf16.index(
                 utf16.startIndex,
-                offsetBy: upperBound,
+                offsetBy: utf16Offsets.upperBound,
                 limitedBy: utf16.endIndex
             ),
             let lowerScalar = lower.samePosition(in: source.unicodeScalars),

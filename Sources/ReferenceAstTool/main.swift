@@ -21,7 +21,13 @@ do {
     let data: Data
     if arguments == ["--stdin"] {
         let input = FileHandle.standardInput.readDataToEndOfFile()
-        guard let source = String(data: input, encoding: .utf8) else {
+        // Validate without stripping a leading U+FEFF: canonicalize removes
+        // exactly one byte-order mark, and a BOM followed by a content
+        // U+FEFF must keep that content character.
+        guard let source = String(
+            validating: Array(input),
+            as: UTF8.self
+        ) else {
             throw ReferenceAstError.unreadableInput("stdin")
         }
         data = try ReferenceAst.projection(for: source)

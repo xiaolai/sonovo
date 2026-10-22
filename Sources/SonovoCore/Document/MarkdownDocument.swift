@@ -105,10 +105,21 @@ public final class MarkdownDocument: Identifiable {
     private let store: MarkdownFileStore
     private var firstPendingEdit: Date?
     private var lastEdit: Date?
+    /// The first edit made while a save was in flight. It was not part of the
+    /// bytes that save wrote, so the five-second ceiling restarts from here.
+    private var firstEditDuringSave: Date?
     private var saveInFlight = false
     private var saveWaiters: [CheckedContinuation<Void, Never>] = []
     private var pendingArtifactsToClean: [URL] = []
-    private var pendingResolution: ExternalResolution?
+    /// A conflict decision waits for the save slot. It is bound to the disk
+    /// snapshot the user reviewed so it cannot authorize overwriting a newer
+    /// conflict that appeared while it waited.
+    private var pendingResolution: PendingResolution?
+
+    private struct PendingResolution {
+        let resolution: ExternalResolution
+        let snapshot: DiskSnapshot?
+    }
 
     public var isDirty: Bool {
         revision != savedRevision || (fileURL == nil && revision > 0)
@@ -167,14 +178,21 @@ public final class MarkdownDocument: Identifiable {
         if firstPendingEdit == nil {
             firstPendingEdit = lastEdit
         }
+        if saveInFlight, firstEditDuringSave == nil {
+            firstEditDuringSave = lastEdit
+        }
     }
 
     /// Applies an external change decision.
     public func resolveExternalChange(_ resolution: ExternalResolution) {
         guard !saveInFlight else {
             // Applying a reload while a save is in flight could interleave
-            // the two disk states. Queue it until the save releases the slot.
-            pendingResolution = resolution
+            // the two disk states. Queue it until the save releases the slot,
+            // bound to the conflict the user actually reviewed.
+            pendingResolution = PendingResolution(
+                resolution: resolution,
+                snapshot: conflict?.diskSnapshot
+            )
             return
         }
         switch resolution {
@@ -249,6 +267,8 @@ public final class MarkdownDocument: Identifiable {
 
         let generation = identityGeneration
         let revisionAtStart = revision
+        // Edits from here on are outside this save's snapshot.
+        firstEditDuringSave = nil
         let data = MarkdownEncoding.encode(
             source,
             hasBOM: hasBOM,
@@ -307,6 +327,7 @@ public final class MarkdownDocument: Identifiable {
         guard !isClosed else { throw DocumentError.closed }
 
         let revisionAtStart = revision
+        firstEditDuringSave = nil
         let data = MarkdownEncoding.encode(
             source,
             hasBOM: hasBOM,
@@ -528,9 +549,10 @@ public final class MarkdownDocument: Identifiable {
             firstPendingEdit = nil
         } else {
             // The five-second ceiling restarts from the first edit that was
-            // not included in this save.
-            firstPendingEdit = lastEdit
+            // not included in this save, not from the most recent keystroke.
+            firstPendingEdit = firstEditDuringSave ?? lastEdit
         }
+        firstEditDuringSave = nil
         conflict = nil
         lastError = nil
     }
@@ -573,7 +595,13 @@ public final class MarkdownDocument: Identifiable {
 
         if let pending = pendingResolution {
             pendingResolution = nil
-            resolveExternalChange(pending)
+            // The conflict may have been replaced while the decision waited.
+            // Applying the old decision to the new bytes would silently
+            // authorize an overwrite the user never saw.
+            if let snapshot = pending.snapshot,
+               snapshot == conflict?.diskSnapshot {
+                resolveExternalChange(pending.resolution)
+            }
         }
     }
 }

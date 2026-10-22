@@ -18,15 +18,6 @@ enum Model3DLoadState: Equatable, Sendable {
     var isReady: Bool { self == .ready }
 
     var isConverting: Bool { self == .converting }
-
-    var errorMessage: String? {
-        switch self {
-        case .conversionFailed(let message), .failed(let message):
-            message
-        case .needsConversion, .converting, .loading, .ready:
-            nil
-        }
-    }
 }
 
 /// One read-only model file. There is no save path and no dirty state: the
@@ -64,6 +55,7 @@ final class Model3DDocument: Identifiable {
     private var cachedMaterialPaths: [String] = []
     private var materialRevision: AssetRevision?
     private var materialTask: Task<Void, Never>?
+    private var isClosed = false
     private var conversionSourceDate: Date?
 
     var hasExternalChange = false
@@ -71,6 +63,9 @@ final class Model3DDocument: Identifiable {
     var isAnimationPlaying = true
     var selectedClip = 0
     private(set) var selectedScene = 0
+    /// The scene the user most recently asked for. A late page
+    /// acknowledgement for an older request must not restore it.
+    private var requestedScene: Int?
 
     init(url: URL, format: Model3DFormat) {
         let canonical = MarkdownSecurity.canonical(url)
@@ -95,6 +90,7 @@ final class Model3DDocument: Identifiable {
     private func scheduleMaterialScan() {
         materialTask?.cancel()
         materialTask = nil
+        guard !isClosed else { return }
         guard format == .obj else {
             cachedMaterialPaths = []
             materialRevision = nil
@@ -117,7 +113,7 @@ final class Model3DDocument: Identifiable {
             } onCancel: {
                 scan.cancel()
             }
-            guard let self, !Task.isCancelled else { return }
+            guard let self, !Task.isCancelled, !self.isClosed else { return }
             guard Self.revision(of: url) == revision else {
                 // The OBJ changed while it was scanned. Scan the new
                 // revision instead of leaving the viewer blocked forever.
@@ -158,11 +154,12 @@ final class Model3DDocument: Identifiable {
         }
         var urls = declaredMaterialURLs(sourceURL: sourceURL)
         if urls.isEmpty {
-            let candidate = sourceURL.deletingPathExtension()
-                .appendingPathExtension("mtl")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                urls = [candidate]
-            }
+            // Track the conventional sibling even when it does not exist
+            // yet; its later creation must invalidate the loaded model.
+            urls = [
+                sourceURL.deletingPathExtension()
+                    .appendingPathExtension("mtl")
+            ]
         }
         let directory = MarkdownSecurity.canonical(
             sourceURL.deletingLastPathComponent()
@@ -341,10 +338,17 @@ final class Model3DDocument: Identifiable {
     }
 
     func reload() {
-        if format.isConvertible {
+        if isConverted || format.isConvertible {
             discardConversion()
-            state = .needsConversion
-            newLoadIdentity()
+            if format.isConvertible {
+                state = .needsConversion
+                newLoadIdentity()
+            } else {
+                // A converted USD file goes back to direct loading; the old
+                // temporary GLB and convertedFrom must not survive the
+                // reload.
+                beginLoading()
+            }
         } else {
             beginLoading()
         }
@@ -377,9 +381,26 @@ final class Model3DDocument: Identifiable {
         animations: [Model3DAnimation]
     ) {
         guard !sceneNames.isEmpty else { return }
-        selectedScene = min(max(index, 0), sceneNames.count - 1)
+        // Acknowledgements can arrive out of order. Ignore one for a scene
+        // other than the last request; an unsolicited first ack (no request
+        // made) still applies.
+        let acknowledged = min(max(index, 0), sceneNames.count - 1)
+        if let requestedScene, requestedScene != acknowledged {
+            return
+        }
+        // Keep the request instead of clearing it: after B→C→B, the late
+        // acknowledgement for C must still be rejected once B landed.
+        selectedScene = acknowledged
         self.stats = stats
         updateAnimationState(animations)
+    }
+
+    /// Stops background work whose result no longer has a viewer. The
+    /// material scan can outlive a closed document otherwise.
+    func markClosed() {
+        isClosed = true
+        materialTask?.cancel()
+        materialTask = nil
     }
 
     private func updateAnimationState(_ animations: [Model3DAnimation]) {
@@ -394,7 +415,9 @@ final class Model3DDocument: Identifiable {
 
     func selectScene(_ index: Int) {
         guard !sceneNames.isEmpty else { return }
-        selectedScene = min(max(index, 0), sceneNames.count - 1)
+        let clamped = min(max(index, 0), sceneNames.count - 1)
+        selectedScene = clamped
+        requestedScene = clamped
     }
 
     func fail(_ message: String) {
@@ -512,6 +535,7 @@ final class Model3DDocument: Identifiable {
         animations = []
         sceneNames = []
         selectedScene = 0
+        requestedScene = nil
     }
 
     func cleanUpTemporaryOutput() {

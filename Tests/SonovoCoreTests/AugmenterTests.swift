@@ -268,6 +268,24 @@ struct AugmenterTests {
         }
     }
 
+    private func allDetails(of ast: SonovoAST) -> [DetailsBlock] {
+        func collect(_ blocks: [Block]) -> [DetailsBlock] {
+            blocks.flatMap { block -> [DetailsBlock] in
+                switch block {
+                case let .details(details, _):
+                    return [details] + collect(details.blocks)
+                case let .blockQuote(children, _):
+                    return collect(children)
+                case let .list(list, _):
+                    return list.items.flatMap { collect($0.blocks) }
+                default:
+                    return []
+                }
+            }
+        }
+        return collect(ast.blocks)
+    }
+
     @Test("Parses a compact details block")
     func compactDetails() throws {
         let source = "<details><summary>Summary</summary>Body *here*</details>\n"
@@ -286,6 +304,45 @@ struct AugmenterTests {
             if case .emphasis = inline { return true }
             return false
         })
+    }
+
+    @Test("An unclosed construct does not swallow appended definitions")
+    func fragmentReferenceWithUnclosedConstruct() {
+        let definition = ReferenceDefinition(
+            label: "ref",
+            destination: "https://example.com",
+            title: nil,
+            range: nil
+        )
+
+        func resolves(_ fragment: String) -> Bool {
+            InlineFragmentParser.parse(
+                fragment,
+                baseLine: 1,
+                baseOffset: 0,
+                referenceDefinitions: [definition]
+            ).contains { inline in
+                if case let .link(destination, _, _, _) = inline {
+                    return destination == "https://example.com"
+                }
+                return false
+            }
+        }
+
+        #expect(resolves("[the ref][ref] <!--"))
+        #expect(resolves("[the ref][ref]\n\n<script>var a = 1;"))
+        #expect(resolves("[the ref][ref]\n\n<script\n>var a = 1;"))
+        #expect(resolves("[the ref][ref]\n\n<!--\nnote"))
+        #expect(resolves("[the ref][ref]\n\n```\ncode"))
+        #expect(resolves("[the ref][ref]\n\n````\ncode"))
+        #expect(
+            resolves(
+                "[zz-probe]: /existing\n\n[the ref][ref]\n\n```\ncode"
+            )
+        )
+        // A fence line inside an HTML block is literal; the block itself
+        // ends at a blank line.
+        #expect(resolves("[the ref][ref]\n\n<div>\n```"))
     }
 
     @Test("Parses a multi-block details block and keeps the body blocks")
@@ -307,6 +364,134 @@ struct AugmenterTests {
         #expect(block.blocks.count == 2)
         #expect(block.summary.contains { inline in
             if case .emphasis = inline { return true }
+            return false
+        })
+    }
+
+    @Test("A quoted details body is not wrapped in another quote")
+    func quotedDetailsBody() throws {
+        let source = """
+        > <details>
+        > <summary>S</summary>
+        >
+        > Body *here*
+        >
+        > - item
+        > </details>
+        """
+        let ast = augment(source)
+        let block = try #require(allDetails(of: ast).first)
+        #expect(block.blocks.count == 2)
+        #expect(block.blocks.allSatisfy { block in
+            if case .blockQuote = block { return false }
+            return true
+        })
+    }
+
+    @Test("Emphasis spanning a quoted body continuation stays one emphasis")
+    func quotedBodySpanningEmphasis() throws {
+        let source = """
+        > <details><summary>S</summary>*first
+        > second*
+        > </details>
+        """
+        let ast = augment(source)
+        let block = try #require(allDetails(of: ast).first)
+        #expect(block.blocks.count == 1)
+        guard case let .paragraph(inlines, _) = block.blocks.first else {
+            Issue.record("expected one body paragraph")
+            return
+        }
+        let emphasis = inlines.contains { inline in
+            if case .emphasis = inline { return true }
+            return false
+        }
+        #expect(emphasis)
+    }
+
+    @Test("Quoted indented code in a details body stays code")
+    func quotedIndentedCodeBody() throws {
+        let source = """
+        > <details><summary>S</summary>
+        >     code
+        > </details>
+        """
+        let ast = augment(source)
+        let block = try #require(allDetails(of: ast).first)
+        #expect(block.blocks.contains { block in
+            if case .codeBlock = block { return true }
+            return false
+        })
+    }
+
+    @Test("A body fragment starting with an authored quote keeps it")
+    func authoredLeadingQuoteFragment() throws {
+        let source = """
+        > <details><summary>S</summary>> inner</details>
+        """
+        let ast = augment(source)
+        let block = try #require(allDetails(of: ast).first)
+        #expect(block.blocks.contains { block in
+            if case .blockQuote = block { return true }
+            return false
+        })
+    }
+
+    @Test("A details inside a list item's quote keeps one body paragraph")
+    func listQuotedDetailsBody() throws {
+        let source = """
+        - > <details><summary>S</summary>first
+          > second
+          > </details>
+        """
+        let ast = augment(source)
+        let block = try #require(allDetails(of: ast).first)
+        #expect(block.blocks.count == 1)
+        guard case let .paragraph(inlines, _) = block.blocks.first else {
+            Issue.record("expected one body paragraph")
+            return
+        }
+        let text = inlines.compactMap { inline -> String? in
+            if case let .text(value, _) = inline { return value }
+            return nil
+        }.joined()
+        #expect(text.contains("first"))
+        #expect(text.contains("second"))
+    }
+
+    @Test("A quoted body continuation joins its paragraph")
+    func quotedCompactBodyContinuation() throws {
+        let source = """
+        > <details><summary>S</summary>first
+        > second
+        > </details>
+        """
+        let ast = augment(source)
+        let block = try #require(allDetails(of: ast).first)
+        #expect(block.blocks.count == 1)
+        guard case let .paragraph(inlines, _) = block.blocks.first else {
+            Issue.record("expected one body paragraph")
+            return
+        }
+        let text = inlines.compactMap { inline -> String? in
+            if case let .text(value, _) = inline { return value }
+            return nil
+        }.joined()
+        #expect(text.contains("first"))
+        #expect(text.contains("second"))
+    }
+
+    @Test("An authored quote inside a top-level details body is kept")
+    func authoredQuoteDetailsBody() throws {
+        let source = """
+        <details><summary>S</summary>
+        > quoted inside
+        </details>
+        """
+        let ast = augment(source)
+        let block = try #require(details(of: ast).first)
+        #expect(block.blocks.contains { block in
+            if case .blockQuote = block { return true }
             return false
         })
     }

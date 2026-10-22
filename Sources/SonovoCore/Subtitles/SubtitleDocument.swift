@@ -5,13 +5,21 @@ public enum SubtitleDocumentError: Error, Equatable {
     case readOnly
     case closed
     case readFailed(String)
-    case staleCompletion
 }
 
 /// How the subtitle document is presented.
 public enum SubtitleDocumentMode: String, Sendable, Equatable {
     case cues
     case source
+}
+
+/// A cue edit that has been typed but not committed. It lives on the
+/// document, not the view, so closing a tab or the window can still save it.
+public struct SubtitleDraft: Equatable, Sendable {
+    public let ordinal: Int
+    public let baseText: String
+    public let revision: UInt64
+    public var text: String
 }
 
 /// One open subtitle document.
@@ -50,6 +58,11 @@ public final class SubtitleDocument: Identifiable {
     public private(set) var conflict: ExternalConflict?
     public private(set) var lastSaveArtifacts: SaveArtifacts?
     public private(set) var lastError: String?
+    public private(set) var pendingDraft: SubtitleDraft?
+
+    public var hasPendingDraft: Bool {
+        pendingDraft != nil
+    }
 
     public var mode: SubtitleDocumentMode = .cues
 
@@ -150,9 +163,108 @@ public final class SubtitleDocument: Identifiable {
         return result
     }
 
-    // MARK: - Parsing
+    /// Applies a typed draft only if the document and cue still match the
+    /// revision it was opened against. Returns nil for a stale draft.
+    ///
+    /// The check runs after the parse await, which is where an external
+    /// edit could otherwise slip between the view's check and the write.
+    @discardableResult
+    public func applyDraft(
+        ordinal: Int,
+        text: String,
+        baseText: String,
+        revision: UInt64
+    ) async throws -> SubtitleEditResult? {
+        guard !isReadOnly else { throw SubtitleDocumentError.readOnly }
+        guard !isClosed else { throw SubtitleDocumentError.closed }
 
-    /// Waits for the background parse of the current revision, falling back
+        let parse = await parseResultForCurrentSource()
+        guard self.revision == revision,
+              parse.cue(ordinal: ordinal)?.rawText == baseText else {
+            return nil
+        }
+        let result = try SubtitleEditor.apply(
+            .setText(ordinal: ordinal, text: text),
+            to: parse,
+            source: source
+        )
+        if result.source != source {
+            try replaceSource(result.source, actionName: result.actionName)
+        }
+        return result
+    }
+
+    // MARK: - Drafts
+
+    /// Records a cue edit that is still being typed. The view keeps the
+    /// focus-state copy; this copy survives view teardown so a close or
+    /// termination can commit it.
+    public func beginDraft(
+        ordinal: Int,
+        baseText: String,
+        text: String
+    ) {
+        pendingDraft = SubtitleDraft(
+            ordinal: ordinal,
+            baseText: baseText,
+            revision: revision,
+            text: text
+        )
+    }
+
+    public func updateDraftText(_ text: String) {
+        pendingDraft?.text = text
+    }
+
+    public func discardDraft() {
+        pendingDraft = nil
+    }
+
+    /// Commits a pending draft if the document and cue still match the
+    /// revision the draft was typed against. Returns false when the draft
+    /// conflicts or the edit fails; the draft is kept in both cases.
+    ///
+    /// Typing can continue while the commit awaits the parse. The loop
+    /// rebases and commits the newer text instead of clearing a draft that
+    /// changed underneath the write.
+    @discardableResult
+    public func commitPendingDraft() async -> Bool {
+        for _ in 0..<8 {
+            guard let draft = pendingDraft else { return true }
+            guard !isReadOnly, !isClosed else { return false }
+            do {
+                guard try await applyDraft(
+                    ordinal: draft.ordinal,
+                    text: draft.text,
+                    baseText: draft.baseText,
+                    revision: draft.revision
+                ) != nil else {
+                    return false
+                }
+            } catch {
+                lastError = String(describing: error)
+                return false
+            }
+            guard let current = pendingDraft else { return true }
+            if current.text == draft.text {
+                pendingDraft = nil
+                return true
+            }
+            // The text changed during the await. The applied edit advanced
+            // the revision, so rebase the newer text onto what was written.
+            pendingDraft = SubtitleDraft(
+                ordinal: draft.ordinal,
+                baseText: draft.text,
+                revision: revision,
+                text: current.text
+            )
+        }
+        // Continuous typing outran the write. Keep the newest draft so a
+        // close can retry instead of discarding it.
+        return pendingDraft == nil
+    }
+
+    // MARK: - Parsing    /// Waits for the background parse of the current revision, falling back
     /// to a synchronous parse when the coalesced request was superseded.
     public func parseResultForCurrentSource() async -> SubtitleParseResult {
         if parsedRevision == revision {
@@ -330,14 +442,19 @@ public final class SubtitleDocument: Identifiable {
                 encoding: encoding,
                 lineEnding: lineEnding
             )
+            let effectiveMode: SaveMode = isMissingOnDisk
+                && mode == .explicitOverwrite ? .create : mode
             request = SaveRequest(
                 documentID: id,
                 identityGeneration: 0,
                 sourceRevision: revisionAtStart,
                 destination: fileURL,
-                expectedDisk: diskSnapshot,
+                // An explicit save after an external deletion recreates the
+                // file. Passing the old snapshot would make the store reject
+                // every save forever because the destination is absent.
+                expectedDisk: effectiveMode == .create ? nil : diskSnapshot,
                 data: data,
-                mode: mode,
+                mode: effectiveMode,
                 hooks: hooks
             )
         } catch {
@@ -369,16 +486,38 @@ public final class SubtitleDocument: Identifiable {
 
     /// Saves pending edits before a tab or window closes. Subtitle documents
     /// always have a file, so there is no untitled decision.
+    ///
+    /// A draft can be typed while a save awaits. The loop rechecks after
+    /// every await so those words are committed and saved too.
     public func flushForClose() async -> CloseOutcome {
-        guard isDirty else { return .closed }
-        do {
-            try await save(mode: .automatic)
-            return isDirty
-                ? .needsDecision(.saveFailed("save did not clear dirty"))
-                : .closed
-        } catch {
-            return .needsDecision(.saveFailed(String(describing: error)))
+        for _ in 0..<8 {
+            if pendingDraft != nil {
+                guard await commitPendingDraft() else {
+                    return .needsDecision(
+                        .saveFailed(
+                            "An unsaved cue draft conflicts with the file "
+                                + "on disk."
+                        )
+                    )
+                }
+            }
+            guard isDirty else {
+                return .closed
+            }
+            do {
+                try await save(mode: .automatic)
+            } catch {
+                return .needsDecision(.saveFailed(String(describing: error)))
+            }
         }
+        if pendingDraft != nil {
+            return .needsDecision(
+                .saveFailed("A cue draft could not be committed.")
+            )
+        }
+        return isDirty
+            ? .needsDecision(.saveFailed("save did not clear dirty"))
+            : .closed
     }
 
     public func markClosed() {

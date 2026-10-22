@@ -81,7 +81,7 @@ public enum SubtitleEncoding {
             ) else {
                 throw SubtitleEncodingError.invalidEncoding
             }
-            return canonicalize(
+            return try canonicalize(
                 text,
                 encoding: .utf8(hasBOM: true),
                 original: data
@@ -98,7 +98,7 @@ public enum SubtitleEncoding {
             ) else {
                 throw SubtitleEncodingError.invalidEncoding
             }
-            return canonicalize(
+            return try canonicalize(
                 text,
                 encoding: .utf16LittleEndian,
                 original: data
@@ -112,7 +112,7 @@ public enum SubtitleEncoding {
             ) else {
                 throw SubtitleEncodingError.invalidEncoding
             }
-            return canonicalize(
+            return try canonicalize(
                 text,
                 encoding: .utf16BigEndian,
                 original: data
@@ -132,7 +132,7 @@ public enum SubtitleEncoding {
         }
 
         if let text = String(data: data, encoding: .utf8) {
-            return canonicalize(
+            return try canonicalize(
                 text,
                 encoding: .utf8(hasBOM: false),
                 original: data
@@ -146,7 +146,7 @@ public enum SubtitleEncoding {
         ) else {
             throw SubtitleEncodingError.invalidEncoding
         }
-        return canonicalize(
+        return try canonicalize(
             text,
             encoding: .windows1252,
             original: data
@@ -157,7 +157,12 @@ public enum SubtitleEncoding {
         _ text: String,
         encoding: SubtitleTextEncoding,
         original: Data
-    ) -> SubtitleFileContents {
+    ) throws -> SubtitleFileContents {
+        // A decoded NUL is binary data even when the bytes formed valid text
+        // in some encoding (UTF-16 NULs decode to U+0000).
+        guard !text.contains("\0") else {
+            throw SubtitleEncodingError.invalidEncoding
+        }
         let canonical = SourceMap.canonicalize(raw: text, stripBOM: false)
         return SubtitleFileContents(
             text: canonical.text,

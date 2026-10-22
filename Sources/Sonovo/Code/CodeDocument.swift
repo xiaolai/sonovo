@@ -554,6 +554,9 @@ final class CodeDocument: Identifiable {
                 throw CodeDocumentError.staleCompletion
             }
             adoptSave(outcome, revisionAtStart: revisionAtStart)
+            // A paste can push the buffer past the editable threshold. The
+            // saved bytes are the new size authority.
+            refreshReadOnlyPolicy()
             return outcome
         } catch let error as SaveError {
             if case .diskChanged(let artifacts) = error {
@@ -828,6 +831,12 @@ final class CodeDocument: Identifiable {
             // conflict or review existed is moot.
             if let baseline = exactBaseline, read.snapshot == baseline {
                 conflict = nil
+                // A hidden A→B→A round trip returns to the acknowledged
+                // bytes. The old B snapshot and its pending review no longer
+                // describe the disk.
+                diskSnapshot = read.snapshot
+                pendingReview = false
+                reviewedDiff = nil
                 return .none
             }
             if read.snapshot == diskSnapshot {
@@ -848,7 +857,10 @@ final class CodeDocument: Identifiable {
                 return .conflict(conflict)
             }
 
-            if projectVisible {
+            // Visibility can change while the read is in flight. A tab hidden
+            // during the await must advance the disk only, not adopt into a
+            // buffer the user cannot see.
+            if currentProjectVisibility?() ?? projectVisible {
                 applyDisk(read)
                 return .adopted
             } else {
@@ -876,6 +888,11 @@ final class CodeDocument: Identifiable {
     /// test can prove it entered the wait instead of racing the write.
     @ObservationIgnored
     var conflictResolutionWaitHook: (() -> Void)?
+
+    /// Rechecks the document's actual visibility after an await. The value
+    /// passed to `checkExternalChange` is only the state at call time.
+    @ObservationIgnored
+    var currentProjectVisibility: (() -> Bool)?
 
     /// Applies a resolution without waiting when no write is in flight.
     /// Returns false when the caller must queue it behind the save slot.
@@ -932,12 +949,11 @@ final class CodeDocument: Identifiable {
                 return
             }
             source = text
-            lineEnding = (try? MarkdownEncoding.decode(
+            let decoded = try? MarkdownEncoding.decode(
                 conflict.diskSnapshot.bytes
-            ))?.lineEnding ?? lineEnding
-            hasBOM = (try? MarkdownEncoding.decode(
-                conflict.diskSnapshot.bytes
-            ))?.hasBOM ?? hasBOM
+            )
+            lineEnding = decoded?.lineEnding ?? lineEnding
+            hasBOM = decoded?.hasBOM ?? hasBOM
             diskSnapshot = conflict.diskSnapshot
             lastAcknowledged = conflict.diskSnapshot
             lastSaved = conflict.diskSnapshot
@@ -949,7 +965,7 @@ final class CodeDocument: Identifiable {
             self.conflict = nil
             pendingReview = false
             reviewedDiff = nil
-            refreshReadOnlyPolicy()
+            refreshReadOnlyPolicy(decodedContents: decoded)
         case .keepLocal:
             // The buffer becomes the acknowledged version; the next save
             // compares against the disk bytes the conflict captured. A clean
@@ -1165,13 +1181,15 @@ final class CodeDocument: Identifiable {
         }
     }
 
-    private func refreshReadOnlyPolicy() {
+    private func refreshReadOnlyPolicy(
+        decodedContents: MarkdownFileContents? = nil
+    ) {
         guard isReady else { return }
         var reason: CodeReadOnlyReason?
         if let snapshot = diskSnapshot,
            snapshot.byteCount > CodeLimits.editableBytes {
             reason = .size(byteCount: snapshot.byteCount)
-        } else if let decoded = diskSnapshot.flatMap({
+        } else if let decoded = decodedContents ?? diskSnapshot.flatMap({
             try? MarkdownEncoding.decode($0.bytes)
         }), decoded.hadMixedLineEndings {
             reason = .mixedLineEndings

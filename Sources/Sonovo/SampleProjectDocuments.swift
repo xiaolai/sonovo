@@ -1,5 +1,16 @@
 import Foundation
 
+enum SampleDocumentError: LocalizedError, Equatable {
+    case sourceUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .sourceUnavailable(name):
+            "The bundled sample “\(name)” is missing or unreadable."
+        }
+    }
+}
+
 /// The sample production names real documents, so those assets need real
 /// files behind them. The documents ship read-only in the app bundle; the
 /// first open copies them into Application Support, where the normal editor,
@@ -44,23 +55,22 @@ struct SampleProjectDocuments {
     /// Returns the writable copy of a sample document, copying it on first
     /// use. An existing copy is never overwritten: those edits belong to the
     /// user, and the bundled file is only the seed.
-    func documentURL(named name: String) -> URL? {
+    ///
+    /// Throws with the underlying failure so the caller can say why the
+    /// document could not be prepared.
+    func documentURL(named name: String) throws -> URL {
         let source = sourceDirectory.appendingPathComponent(name)
         guard fileManager.isReadableFile(atPath: source.path) else {
-            return nil
+            throw SampleDocumentError.sourceUnavailable(name)
         }
-        do {
-            try fileManager.createDirectory(
-                at: destinationDirectory,
-                withIntermediateDirectories: true
-            )
-            let target = destinationDirectory.appendingPathComponent(name)
-            if !fileManager.fileExists(atPath: target.path) {
-                try fileManager.copyItem(at: source, to: target)
-            }
-            return target
-        } catch {
-            return nil
+        try fileManager.createDirectory(
+            at: destinationDirectory,
+            withIntermediateDirectories: true
+        )
+        let target = destinationDirectory.appendingPathComponent(name)
+        if !fileManager.fileExists(atPath: target.path) {
+            try fileManager.copyItem(at: source, to: target)
         }
+        return target
     }
 }

@@ -22,8 +22,13 @@ struct VideoPlayerView: View {
 
             VideoStageView(
                 state: state,
-                palette: .dawn,
-                takeLabel: "TAKE 03"
+                palette: CoastalPalette.stills[
+                    state.selectedShotIndex % CoastalPalette.stills.count
+                ],
+                takeLabel: String(
+                    format: "TAKE 03 · SHOT %02d",
+                    state.selectedShotIndex + 1
+                )
             )
             .frame(maxWidth: AppTheme.Layout.mediaMaxWidth)
 
@@ -75,6 +80,10 @@ struct VideoPlayerView: View {
                     ForEach(0..<8, id: \.self) { index in
                         Button {
                             state.selectedShotIndex = index
+                            state.playhead = min(
+                                Double(index * 2),
+                                state.duration
+                            )
                         } label: {
                             ZStack(alignment: .bottomLeading) {
                                 CoastalSceneView(
@@ -206,18 +215,11 @@ struct VideoStageView: View {
     }
 
     private var takeBadge: some View {
-        HStack(spacing: AppTheme.Spacing.s5) {
-            Circle()
-                .fill(Color.accentColor)
-                .frame(width: AppTheme.IconSize.dotSmall, height: AppTheme.IconSize.dotSmall)
-            Text(takeLabel)
-                .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-                .tracking(AppTheme.Tracking.widest)
-        }
-        .foregroundStyle(AppTheme.Palette.white)
-        .padding(.horizontal, AppTheme.Spacing.sm)
-        .padding(.vertical, AppTheme.Spacing.xs)
-        .background(Capsule().fill(AppTheme.Surface.mediaOverlay))
+        MediaBadge(
+            text: takeLabel,
+            color: Color.accentColor,
+            tracking: AppTheme.Tracking.widest
+        )
     }
 }
 
@@ -352,9 +354,11 @@ private struct WipeStageContent: View {
 
     var body: some View {
         ZStack {
-            CoastalSceneView(palette: .dusk)
-
+            // B (TAKE 03) is the selected take the single stage shows in
+            // dawn; A (TAKE 02) is the warmer read on the left.
             CoastalSceneView(palette: .dawn)
+
+            CoastalSceneView(palette: .dusk)
                 .mask(alignment: .leading) {
                     Rectangle()
                         .frame(width: splitX)
@@ -444,6 +448,18 @@ private struct WipeStageContent: View {
     }
 
     private func compareLabel(_ text: String, color: Color) -> some View {
+        MediaBadge(text: text, color: color)
+    }
+}
+
+/// A take label over media: a colored dot and tracked uppercase text. Both
+/// the single take badge and the compare labels use it.
+private struct MediaBadge: View {
+    let text: String
+    let color: Color
+    var tracking: CGFloat = AppTheme.Tracking.wide
+
+    var body: some View {
         HStack(spacing: AppTheme.Spacing.s5) {
             Circle()
                 .fill(color)
@@ -453,7 +469,7 @@ private struct WipeStageContent: View {
                 )
             Text(text)
                 .font(.system(size: AppTheme.TypeScale.xxs, weight: .semibold))
-                .tracking(AppTheme.Tracking.wide)
+                .tracking(tracking)
         }
         .foregroundStyle(AppTheme.Palette.white)
         .padding(.horizontal, AppTheme.Spacing.sm)

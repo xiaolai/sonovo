@@ -314,17 +314,23 @@ struct CodeDiffView: View {
     }
 
     private func accessibilityLabel(for row: CodeDiffRow) -> String {
+        let label: String
         switch row.kind {
         case .equal:
-            return "Unchanged line \(row.left?.number ?? 0): "
+            label = "Unchanged line \(row.left?.number ?? 0): "
                 + (row.left?.text ?? "")
         case .delete:
-            return "Removed line \(row.left?.number ?? 0): "
+            label = "Removed line \(row.left?.number ?? 0): "
                 + (row.left?.text ?? "")
         case .insert:
-            return "Added line \(row.right?.number ?? 0): "
+            label = "Added line \(row.right?.number ?? 0): "
                 + (row.right?.text ?? "")
         }
+        // The marker is visible; VoiceOver must be able to identify a
+        // final-newline-only change too.
+        return isNoNewline(row)
+            ? label + " (no newline at end of file)"
+            : label
     }
 
     private func sideAccessibilityLabel(for row: SideRow) -> String {

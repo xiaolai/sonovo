@@ -297,6 +297,15 @@ struct TransportBar: View {
         }
         if tab.kind == .code,
            let document = state.code.selectedDocument {
+            // A refused or still-loading file has no decoded encoding; do
+            // not report the defaults as if they were measured.
+            guard document.isReady else {
+                if let refusal = document.refusal {
+                    return "\(document.language.displayName) · "
+                        + refusal.explanation
+                }
+                return "\(document.language.displayName) · Not loaded"
+            }
             return "\(document.language.displayName) · "
                 + (document.hasBOM ? "UTF-8 BOM" : "UTF-8")
                 + " · \(document.lineEnding == .crlf ? "CRLF" : "LF")"

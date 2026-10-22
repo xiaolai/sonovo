@@ -21,7 +21,7 @@ struct WaveformView: View {
 
             drawSelection(context: &context, size: size, topPadding: topPadding, waveHeight: waveHeight)
             drawGrid(context: &context, size: size, topPadding: topPadding, waveHeight: waveHeight, midY: midY)
-            drawBars(context: &context, size: size, topPadding: topPadding, waveHeight: waveHeight, midY: midY)
+            drawBars(context: &context, size: size, waveHeight: waveHeight, midY: midY)
             drawPlayhead(context: &context, size: size, topPadding: topPadding, waveHeight: waveHeight)
             drawLabels(context: &context, size: size, rulerHeight: rulerHeight)
         }
@@ -93,7 +93,6 @@ struct WaveformView: View {
     private func drawBars(
         context: inout GraphicsContext,
         size: CGSize,
-        topPadding: CGFloat,
         waveHeight: CGFloat,
         midY: CGFloat
     ) {

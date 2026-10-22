@@ -34,6 +34,14 @@ final class Project: Identifiable {
     var openTabs: [EditorTab]
     var selectedTabID: String
     var selectedAssetID: String?
+
+    /// The file tabs worth restoring at launch. Synthetic workspace tabs are
+    /// recreated on demand, and demo sample tabs have no scanned assets.
+    var restorableTabIDs: [String] {
+        openTabs.compactMap { tab in
+            tab.workspaceKind == nil ? tab.assetID : nil
+        }
+    }
     var filterText = ""
     var hasActivity = false
     private(set) var isActive = false
@@ -185,6 +193,12 @@ final class Project: Identifiable {
         }
         self.code.isPathOwnedAnywhere = { [weak self] path in
             self?.isDocumentPathOpen(path, excluding: nil) ?? false
+        }
+        self.code.isEditorTabSelected = { [weak self] in
+            guard let self else { return false }
+            return self.openTabs.first {
+                $0.id == self.selectedTabID
+            }?.kind == .code
         }
         self.markdown.isDestinationReserved = { [weak self] path in
             self?.sharedReservedDestinations[path] != nil
@@ -564,6 +578,13 @@ final class Project: Identifiable {
             guard tab.projectAsset != nil, !ids.contains(tab.id) else {
                 return false
             }
+            // The scan excludes some files the app can still open (an
+            // unrecognized extension saved from a code tab). Absence from
+            // the index is not deletion; the disk decides.
+            if let url = tab.url,
+               FileManager.default.fileExists(atPath: url.path) {
+                return false
+            }
             // A dirty document whose file vanished stays available so the
             // user can still save it. Clean documents are closed normally.
             return !documentIsDirty(for: tab)
@@ -863,12 +884,26 @@ final class Project: Identifiable {
     func openSampleAsset(_ asset: ProductionAsset) {
         noteSelectionChange()
         if let existing = openTabs.first(where: { $0.assetID == asset.id }) {
+            noteReopenIfClosing(
+                existing.url ?? sampleDocumentURL(for: existing)
+            )
             selectTab(existing.id)
             return
         }
         let tab = EditorTab(asset: asset)
+        noteReopenIfClosing(tab.url ?? sampleDocumentURL(for: tab))
         openTabs.append(tab)
         selectTab(tab.id)
+    }
+
+    /// Records that a file was asked for while its document close is
+    /// awaiting, so the close does not remove the tab it just revived.
+    private func noteReopenIfClosing(_ url: URL?) {
+        guard let url else { return }
+        let path = MarkdownSecurity.canonical(url).path
+        if closingPaths[path] != nil {
+            reopenedDuringClose.insert(path)
+        }
     }
 
     func openAsset(id: String?) {
@@ -925,11 +960,28 @@ final class Project: Identifiable {
         }
         guard isDemo,
               let assetID = tab.sampleAsset?.id,
-              let name = Self.sampleDocumentNames[assetID],
-              let url = sampleDocuments?.documentURL(named: name) else {
+              let name = Self.sampleDocumentNames[assetID] else {
             return
         }
-        openDocument(kind: tab.kind, url: url)
+        let prepared: URL
+        do {
+            guard let sampleDocuments else {
+                throw SampleDocumentError.sourceUnavailable(name)
+            }
+            prepared = try sampleDocuments.documentURL(named: name)
+        } catch {
+            let message = "The sample document “\(name)” could not be "
+                + "prepared: \(error.localizedDescription)"
+            if tab.kind == .subtitle {
+                subtitles.lastError = message
+                subtitles.selectedDocumentID = nil
+            } else {
+                markdown.lastError = message
+                markdown.selectedDocumentID = nil
+            }
+            return
+        }
+        openDocument(kind: tab.kind, url: prepared)
     }
 
     /// One dispatch for every workspace that hosts documents. Demo tabs and
@@ -995,80 +1047,144 @@ final class Project: Identifiable {
     ) async -> DocumentCloseOutcome {
         // A document with its own file tab belongs to that tab. Closing the
         // synthetic workspace tab must not close a document the user can
-        // still see and reach from a file tab.
-        let fileTabPaths = Set(openTabs.compactMap { tab -> String? in
-            guard tab.workspaceKind == nil,
-                  let url = tab.url ?? sampleDocumentURL(for: tab) else {
-                return nil
+        // still see and reach from a file tab. The tabs are checked per
+        // document, not captured once: a file tab can open while an earlier
+        // close in this loop is awaiting a decision.
+        func hasFileTab(_ url: URL) -> Bool {
+            let path = MarkdownSecurity.canonical(url).path
+            return openTabs.contains { tab in
+                guard tab.workspaceKind == nil,
+                      let tabURL = tab.url ?? sampleDocumentURL(for: tab)
+                else {
+                    return false
+                }
+                return MarkdownSecurity.canonical(tabURL).path == path
             }
-            return MarkdownSecurity.canonical(url).path
-        })
+        }
+
+        // Routes one workspace-hosted document through the same close
+        // tracking a file tab uses, so a reopen during the close is honored.
+        // Returns nil when the document closed and the loop should continue.
+        func closeTracked(
+            url: URL?,
+            kind: AssetKind,
+            pendingDocumentID: () -> UUID?,
+            close: () async -> Bool
+        ) async -> DocumentCloseOutcome? {
+            let path = url.map { MarkdownSecurity.canonical($0).path }
+            if let path { beginClosing(path) }
+            let closed = await close()
+            if let path {
+                let remaining = endClosing(path)
+                let reopened = reopenedDuringClose.contains(path)
+                if remaining == 0, reopened {
+                    reopenedDuringClose.remove(path)
+                }
+                if reopened, closed {
+                    if remaining == 0, let url {
+                        reopenDocument(kind: kind, url: url)
+                    }
+                    return .failed
+                }
+            }
+            guard !closed else { return nil }
+            if let pending = pendingDocumentID() {
+                return .deferred(pending)
+            }
+            return .failed
+        }
+
         switch kind {
         case .script:
             for document in markdown.documents {
-                if let url = document.fileURL,
-                   fileTabPaths.contains(
-                       MarkdownSecurity.canonical(url).path
-                   ) {
+                if let url = document.fileURL, hasFileTab(url) {
                     continue
                 }
-                guard await markdown.close(document) else {
+                let outcome = await closeTracked(
+                    url: document.fileURL,
+                    kind: .script,
                     // Only a Markdown save decision resumes through the
                     // document-closed callback; a failed save does not. The
                     // pending document identifies the decision itself; the
                     // attempted document can differ when a second close
                     // arrives while the first decision is unresolved.
-                    guard let pending = markdown.pendingClose else {
-                        return .failed
+                    pendingDocumentID: { [weak self] in
+                        self?.markdown.pendingClose?.id
+                    },
+                    close: { [weak self] in
+                        guard let self else { return false }
+                        return await self.markdown.close(document)
                     }
-                    pendingWorkspaceClose = kind
-                    pendingWorkspaceCloseDocumentID = pending.id
-                    return .deferred(pending.id)
+                )
+                if let outcome {
+                    if case let .deferred(id) = outcome {
+                        pendingWorkspaceClose = kind
+                        pendingWorkspaceCloseDocumentID = id
+                    }
+                    return outcome
                 }
             }
             return .closed
         case .code:
             for document in code.documents {
-                if fileTabPaths.contains(
-                    MarkdownSecurity.canonical(document.fileURL).path
-                ) {
+                if hasFileTab(document.fileURL) {
                     continue
                 }
-                guard await code.close(document) else {
-                    guard let pending = code.pendingClose else {
-                        return .failed
+                let outcome = await closeTracked(
+                    url: document.fileURL,
+                    kind: .code,
+                    pendingDocumentID: { [weak self] in
+                        self?.code.pendingClose?.id
+                    },
+                    close: { [weak self] in
+                        guard let self else { return false }
+                        return await self.code.close(document)
                     }
-                    pendingWorkspaceClose = kind
-                    pendingWorkspaceCloseDocumentID = pending.id
-                    return .deferred(pending.id)
+                )
+                if let outcome {
+                    if case let .deferred(id) = outcome {
+                        pendingWorkspaceClose = kind
+                        pendingWorkspaceCloseDocumentID = id
+                    }
+                    return outcome
                 }
             }
             return .closed
         case .subtitle:
             for document in subtitles.documents {
-                if fileTabPaths.contains(
-                    MarkdownSecurity.canonical(document.fileURL).path
-                ) {
+                if hasFileTab(document.fileURL) {
                     continue
                 }
                 // A subtitle close failure is reported, not deferred: no
                 // decision alert re-enters this close, so keeping the tab
                 // is the final state until the user closes it again.
-                guard await subtitles.close(document) else {
-                    return .failed
-                }
+                let outcome = await closeTracked(
+                    url: document.fileURL,
+                    kind: .subtitle,
+                    pendingDocumentID: { nil },
+                    close: { [weak self] in
+                        guard let self else { return false }
+                        return await self.subtitles.close(document)
+                    }
+                )
+                if let outcome { return outcome }
             }
             return .closed
         case .model3d:
             for document in models.documents {
-                if fileTabPaths.contains(
-                    MarkdownSecurity.canonical(document.sourceURL).path
-                ) {
+                if hasFileTab(document.sourceURL) {
                     continue
                 }
-                guard await models.close(document) else {
-                    return .failed
-                }
+                let outcome = await closeTracked(
+                    url: document.sourceURL,
+                    kind: .model3d,
+                    pendingDocumentID: { nil },
+                    close: { [weak self] in
+                        guard let self else { return false }
+                        return await self.models.close(document)
+                    }
+                )
+                if let outcome { return outcome }
             }
             return .closed
         default:
@@ -1280,10 +1396,11 @@ final class Project: Identifiable {
     private func sampleDocumentURL(for tab: EditorTab) -> URL? {
         guard isDemo,
               let assetID = tab.sampleAsset?.id,
-              let name = Self.sampleDocumentNames[assetID] else {
+              let name = Self.sampleDocumentNames[assetID],
+              let sampleDocuments else {
             return nil
         }
-        return sampleDocuments?.documentURL(named: name)
+        return try? sampleDocuments.documentURL(named: name)
     }
 
     func closeAllTabs() async {
@@ -1407,6 +1524,7 @@ final class Project: Identifiable {
             return
         }
         let removedSelected = ids.contains(selectedTabID)
+        let previousSelection = selectedTabID
         openTabs.removeAll { ids.contains($0.id) }
         if removedSelected {
             selectedTabID = ""
@@ -1417,7 +1535,19 @@ final class Project: Identifiable {
                 // tab is the demo's identity for it.
                 selectWorkspaceTab(.script)
             } else {
-                syncTabForDocument(at: newURL, kind: .script)
+                openMovedMarkdownDocument(at: newURL)
+            }
+        } else {
+            // The moved document keeps a tab even when another tab is in
+            // front. Creating it selects it, so put the previous selection
+            // back afterwards.
+            if isDemo {
+                selectWorkspaceTab(.script)
+            } else {
+                openMovedMarkdownDocument(at: newURL, select: false)
+            }
+            if openTabs.contains(where: { $0.id == previousSelection }) {
+                selectTab(previousSelection)
             }
         }
         onSelectionChanged?()
@@ -1457,22 +1587,61 @@ final class Project: Identifiable {
         onSelectionChanged?()
     }
 
-    /// The new identity of a Save As may not be in the scan index yet. Build
-    /// one tab for it now; the next scan reconciles by the canonical path id.
-    private func openMovedCodeDocument(at url: URL, select: Bool = true) {
+    /// The new identity of a Markdown Save As may not be in the scan index
+    /// yet. Build one tab for it now; the next scan reconciles by the
+    /// canonical path id.
+    private func openMovedMarkdownDocument(at url: URL, select: Bool = true) {
         let canonical = MarkdownSecurity.canonical(url)
         if let asset = assets.first(where: {
             MarkdownSecurity.canonical($0.url) == canonical
         }) {
-            // The path's extension may belong to another viewer (code saved
-            // as `.md`, for example). The tab must follow the document that
-            // is actually open — the code workspace — not the asset's kind.
-            openCodeTab(
-                for: asset.kind == .code ? asset : codeAsset(from: asset),
-                select: select
-            )
+            openMarkdownTab(for: asset, select: select)
             return
         }
+        openMarkdownTab(
+            for: syntheticAsset(for: canonical, kind: .script),
+            select: select
+        )
+    }
+
+    private func openMarkdownTab(
+        for asset: ProjectAsset,
+        select: Bool = true
+    ) {
+        let path = MarkdownSecurity.canonical(asset.url).path
+        let markdownID = markdown.documents.first {
+            $0.fileURL.map {
+                MarkdownSecurity.canonical($0).path == path
+            } == true
+        }?.id
+        if isDocumentPathOpen(path, excluding: markdownID) {
+            // Another workspace owns this path; a Markdown tab could not
+            // bind a second document, so keep the existing tab instead.
+            if select,
+               let existing = openTabs.first(where: { $0.id == asset.id }) {
+                selectTab(existing.id)
+            }
+            return
+        }
+        if let existing = openTabs.first(where: { $0.id == asset.id }) {
+            if existing.kind == .script {
+                if select { selectTab(existing.id) }
+                return
+            }
+            openTabs.removeAll { $0.id == existing.id }
+        }
+        let tab = EditorTab(asset: asset)
+        openTabs.append(tab)
+        if select {
+            selectTab(tab.id)
+        }
+    }
+
+    /// An asset-shaped value for a file the last scan has not indexed yet.
+    private func syntheticAsset(
+        for canonical: URL,
+        kind: AssetKind
+    ) -> ProjectAsset {
         let values = try? canonical.resourceValues(
             forKeys: [
                 .fileSizeKey,
@@ -1493,21 +1662,40 @@ final class Project: Identifiable {
         let identifier = values?.fileResourceIdentifier.map {
             String(describing: $0)
         }
-        openCodeTab(
-            for: ProjectAsset(
-                id: path,
-                url: canonical,
-                name: canonical.lastPathComponent,
-                relativePath: relative,
-                kind: .code,
+        return ProjectAsset(
+            id: path,
+            url: canonical,
+            name: canonical.lastPathComponent,
+            relativePath: relative,
+            kind: kind,
+            size: size,
+            modified: modified,
+            revision: AssetRevision(
+                fileIdentifier: identifier,
                 size: size,
-                modified: modified,
-                revision: AssetRevision(
-                    fileIdentifier: identifier,
-                    size: size,
-                    modified: modified
-                )
-            ),
+                modified: modified
+            )
+        )
+    }
+
+    /// The new identity of a Save As may not be in the scan index yet. Build
+    /// one tab for it now; the next scan reconciles by the canonical path id.
+    private func openMovedCodeDocument(at url: URL, select: Bool = true) {
+        let canonical = MarkdownSecurity.canonical(url)
+        if let asset = assets.first(where: {
+            MarkdownSecurity.canonical($0.url) == canonical
+        }) {
+            // The path's extension may belong to another viewer (code saved
+            // as `.md`, for example). The tab must follow the document that
+            // is actually open — the code workspace — not the asset's kind.
+            openCodeTab(
+                for: asset.kind == .code ? asset : codeAsset(from: asset),
+                select: select
+            )
+            return
+        }
+        openCodeTab(
+            for: syntheticAsset(for: canonical, kind: .code),
             select: select
         )
     }
@@ -1660,6 +1848,7 @@ final class Project: Identifiable {
         refreshTask?.cancel()
         watcher?.stop()
         watcher = nil
+        markdown.shutdown()
         models.prepareForTermination()
         code.prepareForTermination()
         terminalSessions.shutdownAll(force: true)

@@ -1,5 +1,3 @@
-import Foundation
-
 /// A position in the canonical Markdown source.
 ///
 /// Lines are 1-based. Columns and offsets count UTF-16 code units, matching

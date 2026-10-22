@@ -29,7 +29,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
 
         XCTAssertEqual(container.registry.entries.count, 1)
@@ -47,7 +48,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
 
         XCTAssertEqual(container.registry.entries.count, 2)
@@ -73,7 +75,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
         let entry = try XCTUnwrap(
             container.registry.entries[ObjectIdentifier(project)]
@@ -87,7 +90,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
 
         XCTAssertTrue(entry.host.isHidden)
@@ -106,7 +110,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
         let firstHost = try XCTUnwrap(
             container.registry.entries[ObjectIdentifier(first)]?.host
@@ -121,7 +126,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
 
         XCTAssertEqual(container.registry.entries.count, 1)
@@ -142,7 +148,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .light,
             displayScale: 2,
             canvasInset: 8,
-            canvasRadius: 12
+            canvasRadius: 12,
+            workspaceTheme: .standard
         )
         let context = try XCTUnwrap(
             container.registry.entries[ObjectIdentifier(project)]?.context
@@ -154,7 +161,8 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             colorScheme: .dark,
             displayScale: 3,
             canvasInset: 4,
-            canvasRadius: 6
+            canvasRadius: 6,
+            workspaceTheme: .standard
         )
 
         XCTAssertEqual(context.colorScheme, .dark)
@@ -170,6 +178,7 @@ final class ProjectEditorHostRegistryTests: XCTestCase {
             displayScale: 2,
             canvasInset: 8,
             canvasRadius: 12,
+            workspaceTheme: .standard,
             hostFactory: { _, _ in NSView() }
         )
     }

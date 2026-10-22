@@ -88,6 +88,24 @@ final class Model3DWorkspaceTests: XCTestCase {
         XCTAssertEqual(document.selectedScene, 1)
         document.selectScene(-4)
         XCTAssertEqual(document.selectedScene, 0)
+
+        // A late acknowledgement for the previous scene must not restore it.
+        document.selectScene(1)
+        document.applyScene(index: 0, stats: .empty, animations: [])
+        XCTAssertEqual(document.selectedScene, 1)
+        document.applyScene(index: 1, stats: stats, animations: [])
+        XCTAssertEqual(document.selectedScene, 1)
+        XCTAssertEqual(document.stats, stats)
+
+        // B→C→B: a stale C acknowledgement arriving after the newest B
+        // landed must not overwrite the selection.
+        document.selectScene(1)
+        document.selectScene(0)
+        document.selectScene(1)
+        document.applyScene(index: 1, stats: stats, animations: [])
+        document.applyScene(index: 0, stats: .empty, animations: [])
+        XCTAssertEqual(document.selectedScene, 1)
+        XCTAssertEqual(document.stats, stats)
     }
 
     func testLoadedKeepsWarningsPostedWhileLoading() throws {
@@ -135,9 +153,6 @@ final class Model3DWorkspaceTests: XCTestCase {
             BlendConversionResult(
                 outputURL: glb,
                 temporaryDirectory: output,
-                installation: BlenderInstallation(
-                    executableURL: URL(fileURLWithPath: "/usr/bin/true")
-                ),
                 version: "5.2.2",
                 log: "SONOVO_EXPORT_OK"
             )
@@ -185,9 +200,6 @@ final class Model3DWorkspaceTests: XCTestCase {
             BlendConversionResult(
                 outputURL: glb,
                 temporaryDirectory: output,
-                installation: BlenderInstallation(
-                    executableURL: URL(fileURLWithPath: "/usr/bin/true")
-                ),
                 version: "5.2.2",
                 log: "SONOVO_EXPORT_OK",
                 warnings: ["This file contains 2 scenes; choose one in the header."]

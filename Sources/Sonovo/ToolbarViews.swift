@@ -25,18 +25,6 @@ struct TrailingToolbarView: View {
     var body: some View {
         HStack(spacing: AppTheme.Spacing.s6) {
             Menu {
-                previewQualityButton("1080p")
-                previewQualityButton("720p")
-                previewQualityButton("4K")
-            } label: {
-                Label(state.previewQuality, systemImage: "play.rectangle")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Preview quality")
-            .accessibilityLabel("Preview quality")
-
-            Menu {
                 Picker("Terminal", selection: $state.terminalPresentation) {
                     Text("Hidden").tag(TerminalPresentation.hidden)
                     Text("Split").tag(TerminalPresentation.split)
@@ -97,18 +85,6 @@ struct TrailingToolbarView: View {
             .help("View mode")
             .accessibilityLabel("View mode")
 
-        }
-    }
-
-    private func previewQualityButton(_ quality: String) -> some View {
-        Button {
-            state.previewQuality = quality
-        } label: {
-            if state.previewQuality == quality {
-                Label(quality, systemImage: "checkmark")
-            } else {
-                Text(quality)
-            }
         }
     }
 }

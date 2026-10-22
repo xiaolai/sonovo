@@ -20,6 +20,7 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
 
     private let box = WeakBox()
     nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var preferenceObserver: NSObjectProtocol?
     private var highlightTask: Task<Void, Never>?
     private var suppressSync = false
     private var compositionBaseline: (revision: UInt64, source: String)?
@@ -38,11 +39,23 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
         textView.string = document.source
         applyBaseAttributesOnly()
         observeDocument()
+        preferenceObserver = NotificationCenter.default.addObserver(
+            forName: .sonovoEditorPreferencesChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyEditorPreferences()
+            }
+        }
     }
 
     deinit {
         if let scrollObserver {
             NotificationCenter.default.removeObserver(scrollObserver)
+        }
+        if let preferenceObserver {
+            NotificationCenter.default.removeObserver(preferenceObserver)
         }
     }
 
@@ -74,13 +87,34 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
+        let wrap = Preferences.wrapLines
+        textView.isHorizontallyResizable = !wrap
+        textView.autoresizingMask = wrap ? [.width] : []
         textView.textContainer?.containerSize = NSSize(
-            width: scrollView.contentSize.width,
+            width: wrap
+                ? scrollView.contentSize.width
+                : CGFloat.greatestFiniteMagnitude,
             height: CGFloat.greatestFiniteMagnitude
         )
-        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.widthTracksTextView = wrap
+    }
+
+    /// Applies a Settings change without reopening the document.
+    private func applyEditorPreferences() {
+        let wrap = Preferences.wrapLines
+        textView.isHorizontallyResizable = !wrap
+        textView.autoresizingMask = wrap ? [.width] : []
+        if let container = textView.textContainer {
+            container.widthTracksTextView = wrap
+            container.containerSize = NSSize(
+                width: wrap
+                    ? scrollView.contentSize.width
+                    : CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+        }
+        applyBaseAttributesOnly()
+        scheduleHighlight()
     }
 
     private func configureTextView() {
@@ -115,7 +149,7 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
         paragraph.paragraphSpacing = AppTheme.Reading.sourceParagraphSpacing
         return [
             .font: NSFont.monospacedSystemFont(
-                ofSize: AppTheme.Reading.sourceSize,
+                ofSize: Preferences.editorFontSize,
                 weight: .regular
             ),
             .foregroundColor: NSColor(AppTheme.Palette.label),
@@ -200,7 +234,8 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
         }
         if let baseline = compositionBaseline {
             compositionBaseline = nil
-            if document.source != baseline.source {
+            if document.revision != baseline.revision
+                || document.source != baseline.source {
                 // An external reload changed the file mid-composition.
                 resetTextToDocument()
                 return
@@ -418,10 +453,19 @@ struct SubtitleHighlighter {
         storage: NSTextStorage,
         muted: NSColor
     ) {
-        var section = ""
-        var inNoteBlock = false
-        var lineStart = ns.lineRange(for: affectedRange).location
-        let limit = NSMaxRange(ns.lineRange(for: affectedRange))
+        let affectedLines = ns.lineRange(for: affectedRange)
+        let start = affectedLines.location
+        // The visible window can begin inside a section. Reading the state
+        // from the text before it keeps ASS dialogue from being muted when
+        // the `[Events]` header has scrolled out of view.
+        var section = format.isASSFamily
+            ? assSection(before: start, ns: ns)
+            : ""
+        var inNoteBlock = format == .vtt
+            ? vttNoteBlockState(before: start, ns: ns)
+            : false
+        var lineStart = start
+        let limit = NSMaxRange(affectedLines)
         while lineStart < limit, lineStart < ns.length {
             let lineRange = ns.lineRange(
                 for: NSRange(location: lineStart, length: 0)
@@ -437,11 +481,10 @@ struct SubtitleHighlighter {
                 if inNoteBlock {
                     set(muted, on: lineRange, storage: storage)
                     if blank { inNoteBlock = false }
-                } else if upper.hasPrefix("WEBVTT") {
+                } else if trimmed == "WEBVTT"
+                    || trimmed.hasPrefix("WEBVTT ") {
                     set(muted, on: lineRange, storage: storage)
-                } else if upper.hasPrefix("NOTE")
-                    || upper.hasPrefix("STYLE")
-                    || upper.hasPrefix("REGION") {
+                } else if isVTTBlockKeyword(trimmed) {
                     set(muted, on: lineRange, storage: storage)
                     inNoteBlock = true
                 }
@@ -459,6 +502,58 @@ struct SubtitleHighlighter {
             }
             lineStart = NSMaxRange(lineRange)
         }
+    }
+
+    /// The last ASS section header before `offset`, or "" when the range
+    /// starts before any header.
+    private func assSection(before offset: Int, ns: NSString) -> String {
+        var probe = offset
+        while probe > 0 {
+            let lineRange = ns.lineRange(
+                for: NSRange(location: probe - 1, length: 0)
+            )
+            let line = ns.substring(with: lineRange)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let upper = line.uppercased()
+            if upper.hasPrefix("["), upper.hasSuffix("]") {
+                return upper
+            }
+            guard lineRange.location > 0 else { break }
+            probe = lineRange.location
+        }
+        return ""
+    }
+
+    /// Whether `offset` falls inside a WebVTT NOTE/STYLE/REGION block. A
+    /// blank line ends the block, so a blank line between the keyword and
+    /// the window means the window is ordinary cue content.
+    private func vttNoteBlockState(before offset: Int, ns: NSString) -> Bool {
+        var probe = offset
+        while probe > 0 {
+            let lineRange = ns.lineRange(
+                for: NSRange(location: probe - 1, length: 0)
+            )
+            let line = ns.substring(with: lineRange)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { return false }
+            if isVTTBlockKeyword(line) { return true }
+            guard lineRange.location > 0 else { break }
+            probe = lineRange.location
+        }
+        return false
+    }
+
+    /// WebVTT block keywords are uppercase and need a following boundary.
+    /// `Note this carefully` is cue text, not a NOTE block.
+    private func isVTTBlockKeyword(_ text: String) -> Bool {
+        for keyword in ["NOTE", "STYLE", "REGION"] {
+            if text == keyword
+                || text.hasPrefix(keyword + " ")
+                || text.hasPrefix(keyword + "\t") {
+                return true
+            }
+        }
+        return false
     }
 
     private func set(

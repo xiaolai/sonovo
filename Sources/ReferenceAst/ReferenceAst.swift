@@ -66,7 +66,8 @@ public enum ReferenceAst {
         forFileAt path: String,
         options: ReferenceAstOptions = ReferenceAstOptions()
     ) throws -> Data {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let text = String(validating: Array(data), as: UTF8.self) else {
             throw ReferenceAstError.unreadableInput(path)
         }
         return try projection(for: text, options: options)

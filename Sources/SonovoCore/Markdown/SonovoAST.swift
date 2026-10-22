@@ -1,5 +1,3 @@
-import Foundation
-
 /// The owned Markdown tree the editor and viewer render.
 ///
 /// The tree is value-typed and `Sendable`. It is derived from `swift-markdown`

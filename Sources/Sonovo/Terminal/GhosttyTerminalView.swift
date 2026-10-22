@@ -110,7 +110,7 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         )
         config.userdata = Unmanaged.passUnretained(self).toOpaque()
         config.scale_factor = Double(window?.backingScaleFactor ?? 2)
-        config.font_size = 13
+        config.font_size = Float(AppTheme.TypeScale.md)
         config.context = GHOSTTY_SURFACE_CONTEXT_TAB
 
         // surfaceNew copies the configuration during the call; the C strings
@@ -358,16 +358,23 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     // MARK: - Keyboard
 
     override func keyDown(with event: NSEvent) {
-        guard surface != nil else {
+        guard let surface else {
             interpretKeyEvents([event])
             return
         }
+        // Option-as-Alt and similar settings change which modifiers the
+        // text system should see. AppKit interprets the event we hand it,
+        // so apply the surface's translation before interpreting.
+        let translated = Self.eventByApplyingTranslationMods(
+            event,
+            surface: surface
+        )
 
         keyTextAccumulator = []
         defer { keyTextAccumulator = nil }
 
         let hadMarkedText = markedText.length > 0
-        interpretKeyEvents([event])
+        interpretKeyEvents([translated])
         syncPreedit(clearIfNeeded: hadMarkedText)
 
         let action = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
@@ -385,10 +392,49 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
             _ = sendKey(
                 action,
                 event: event,
-                text: EventTranslator.ghosttyCharacters(from: event),
+                text: EventTranslator.ghosttyCharacters(from: translated),
                 composing: markedText.length > 0 || hadMarkedText
             )
         }
+    }
+
+    /// A copy of `event` carrying the surface's translation modifiers, or
+    /// the original when translation changes nothing. The original event is
+    /// still what reaches the terminal: only text translation changes.
+    private static func eventByApplyingTranslationMods(
+        _ event: NSEvent,
+        surface: ghostty_surface_t
+    ) -> NSEvent {
+        let translated = GhosttyFFI.surfaceKeyTranslationMods(
+            surface,
+            mods: EventTranslator.translateModifiers(event.modifierFlags)
+        )
+        let translatedFlags = EventTranslator.modifierFlags(from: translated)
+        // Hidden bits matter for dead keys, so start from the real flags and
+        // change only the four modifiers translation controls.
+        var mods = event.modifierFlags
+        for flag in [
+            NSEvent.ModifierFlags.shift, .control, .option, .command
+        ] {
+            if translatedFlags.contains(flag) {
+                mods.insert(flag)
+            } else {
+                mods.remove(flag)
+            }
+        }
+        guard mods != event.modifierFlags else { return event }
+        return NSEvent.keyEvent(
+            with: event.type,
+            location: event.locationInWindow,
+            modifierFlags: mods,
+            timestamp: event.timestamp,
+            windowNumber: event.windowNumber,
+            context: nil,
+            characters: event.characters(byApplyingModifiers: mods) ?? "",
+            charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+            isARepeat: event.isARepeat,
+            keyCode: event.keyCode
+        ) ?? event
     }
 
     override func keyUp(with event: NSEvent) {
@@ -523,7 +569,18 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     ) -> Bool {
         guard let surface else { return false }
 
-        var keyEvent = EventTranslator.translateKeyEvent(event, action: action)
+        // The surface's configuration decides which modifiers contribute to
+        // text translation (Option-as-Alt, for example). Asking it keeps the
+        // key event consistent with the characters AppKit produced.
+        let translation = GhosttyFFI.surfaceKeyTranslationMods(
+            surface,
+            mods: EventTranslator.translateModifiers(event.modifierFlags)
+        )
+        var keyEvent = EventTranslator.translateKeyEvent(
+            event,
+            action: action,
+            translationMods: EventTranslator.modifierFlags(from: translation)
+        )
         keyEvent.composing = composing
 
         if let text, !text.isEmpty, let first = text.utf8.first, first >= 0x20 {
@@ -630,12 +687,7 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
             return
         }
 
-        guard let surface else { return }
-        let length = text.utf8CString.count
-        guard length > 1 else { return }
-        text.withCString { pointer in
-            GhosttyFFI.surfaceText(surface, text: pointer, len: UInt(length - 1))
-        }
+        _ = insertLiteral(text)
     }
 
     /// Writes literal text into the session without an input event. Used by
@@ -708,6 +760,32 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
             super.rightMouseUp(with: event)
             return
         }
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        guard sendMouseButton(
+            event,
+            state: GHOSTTY_MOUSE_PRESS,
+            button: EventTranslator.translateMouseButton(event)
+        ) else {
+            super.otherMouseDown(with: event)
+            return
+        }
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard sendMouseButton(
+            event,
+            state: GHOSTTY_MOUSE_RELEASE,
+            button: EventTranslator.translateMouseButton(event)
+        ) else {
+            super.otherMouseUp(with: event)
+            return
+        }
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        sendMousePosition(event)
     }
 
     override func mouseMoved(with event: NSEvent) {

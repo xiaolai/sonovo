@@ -60,6 +60,7 @@ final class FSEventSource: ProjectWatching, @unchecked Sendable {
             UInt32(
                 kFSEventStreamCreateFlagFileEvents
                     | kFSEventStreamCreateFlagNoDefer
+                    | kFSEventStreamCreateFlagWatchRoot
             )
         ) else {
             return

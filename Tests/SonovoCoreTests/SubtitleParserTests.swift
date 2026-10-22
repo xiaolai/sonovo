@@ -76,6 +76,29 @@ struct SubtitleFormatDetectionTests {
         )
     }
 
+    @Test("SRT cue text naming ASS sections stays SRT")
+    func srtTextMentioningASSStructures() {
+        let source = """
+        1
+        00:00:01,000 --> 00:00:02,000
+        [Events]
+        Format: example
+        Dialogue: example
+        """
+        #expect(
+            SubtitleFormat.detect(
+                url: URL(fileURLWithPath: "/tmp/x.srt"),
+                source: source
+            ) == .srt
+        )
+        #expect(
+            SubtitleFormat.detect(
+                url: URL(fileURLWithPath: "/tmp/x.ass"),
+                source: assSample
+            ) == .ass
+        )
+    }
+
     @Test("The extension is the fallback")
     func extensionFallback() {
         #expect(
@@ -235,6 +258,19 @@ struct SRTParsingTests {
         #expect(result.cues[0].coordinateLine != nil)
         #expect(result.cues[0].rawText == "Hello")
         #expect(slice(source, result.cues[0].textRange) == "Hello")
+    }
+
+    @Test("Coordinate labels inside prose stay cue text")
+    func coordinateLabelsInProse() {
+        let source = """
+        1
+        00:00:01,000 --> 00:00:02,000
+        Use X1: 1 X2: 2 Y1: 3 Y2: 4 today
+        """
+        let result = parseSRT(source)
+        #expect(result.cues.count == 1)
+        #expect(result.cues[0].coordinateLine == nil)
+        #expect(result.cues[0].rawText == "Use X1: 1 X2: 2 Y1: 3 Y2: 4 today")
     }
 
     @Test("Reports malformed blocks without dropping them")
@@ -584,5 +620,38 @@ struct SubtitleEncodingTests {
         let decoded = try SubtitleEncoding.decode(bytes)
         #expect(decoded.text == "a\nb\n")
         #expect(decoded.encoding == .utf8(hasBOM: true))
+    }
+}
+
+@Suite("Subtitle edge cases")
+struct SubtitleEdgeCaseTests {
+    @Test("Malformed timestamps cannot overflow or bypass the limit")
+    func timestampBounds() {
+        #expect(
+            SubtitleTimecode.parseUserInput(
+                "9223372036854775807:00:00.000"
+            ) == nil
+        )
+        #expect(SubtitleTimecode.parseUserInput("360000") == nil)
+        #expect(SubtitleTimecode.parseUserInput("1.²") == nil)
+    }
+
+    @Test("Whitespace-only lines do not split an SRT cue")
+    func whitespaceBlankLines() {
+        #expect(
+            SubtitleEditor.sanitizedText("One\n \nTwo", format: .srt)
+                == "One\nTwo"
+        )
+    }
+
+    @Test("SRT dialogue that spells a section header stays SRT")
+    func srtHeaderDialogue() {
+        let source = "1\n00:00:01,000 --> 00:00:02,000\n[EVENTS]"
+        #expect(
+            SubtitleFormat.detect(
+                url: URL(fileURLWithPath: "/tmp/x.srt"),
+                source: source
+            ) == .srt
+        )
     }
 }

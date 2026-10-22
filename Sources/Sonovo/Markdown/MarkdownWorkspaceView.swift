@@ -238,6 +238,16 @@ struct MarkdownWorkspaceView: View {
 
     private var emptyState: some View {
         VStack(spacing: AppTheme.Spacing.md) {
+            // A failed open has no selected document, so the per-page error
+            // banner would otherwise never be shown.
+            if let error = workspace.lastError {
+                banner(
+                    text: error,
+                    systemImage: "exclamationmark.triangle",
+                    tint: AppTheme.Palette.warning,
+                    dismiss: workspace.dismissError
+                )
+            }
             Image(systemName: "doc.text")
                 .font(.system(size: AppTheme.TypeScale.displayLarge, weight: .ultraLight))
                 .foregroundStyle(.tertiary)
@@ -319,6 +329,7 @@ private struct MarkdownRenderedDocumentView: View {
     let workspace: MarkdownWorkspace
 
     @State private var output: MarkdownParseOutput?
+    @State private var parseTimedOut = false
 
     /// Two documents can share a revision number. Keying the task only by
     /// revision leaves the new document displaying the old document's AST.
@@ -354,6 +365,14 @@ private struct MarkdownRenderedDocumentView: View {
                         set: { workspace.scrollTargets[document.id] = $0 }
                     )
                 )
+            } else if parseTimedOut {
+                Text(
+                    "Parsing is taking longer than expected. "
+                        + "This view updates when the parse finishes."
+                )
+                .font(.system(size: AppTheme.TypeScale.sm))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -365,17 +384,42 @@ private struct MarkdownRenderedDocumentView: View {
                 revision: document.revision
             )
         ) {
-            let result = await workspace.parseService.parse(
-                MarkdownParseInput(
-                    documentID: document.id,
-                    revision: document.revision,
-                    source: document.source
+            let revision = document.revision
+            let source = document.source
+            // The parse service may drop a request when the cross-document
+            // backlog is full. Keep retrying with a bounded backoff for as
+            // long as this view exists, so a dropped request cannot leave a
+            // stale render until the next edit.
+            var attempt = 0
+            while !Task.isCancelled {
+                if attempt > 0 {
+                    let delay = min(
+                        2.0,
+                        0.05 * pow(2, Double(min(attempt, 6)))
+                    )
+                    try? await Task.sleep(for: .seconds(delay))
+                    if Task.isCancelled { return }
+                }
+                attempt += 1
+                let result = await workspace.parseService.parse(
+                    MarkdownParseInput(
+                        documentID: document.id,
+                        revision: revision,
+                        source: source
+                    )
                 )
-            )
-            if let result,
-               result.documentID == document.id,
-               result.revision == document.revision {
-                output = result
+                if let result,
+                   result.documentID == document.id,
+                   result.revision == revision,
+                   document.revision == revision {
+                    output = result
+                    parseTimedOut = false
+                    return
+                }
+                if attempt >= 20, !Task.isCancelled {
+                    // Say the parse is slow, but keep retrying.
+                    parseTimedOut = true
+                }
             }
         }
     }

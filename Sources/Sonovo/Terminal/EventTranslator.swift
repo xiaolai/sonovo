@@ -61,6 +61,33 @@ enum EventTranslator {
         return keyEvent
     }
 
+    /// Converts the surface's effective translation modifiers back to the
+    /// AppKit flags the text interpreter expects.
+    static func modifierFlags(
+        from mods: ghostty_input_mods_e
+    ) -> NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if mods.rawValue & GHOSTTY_MODS_SHIFT.rawValue != 0 {
+            flags.insert(.shift)
+        }
+        if mods.rawValue & GHOSTTY_MODS_CTRL.rawValue != 0 {
+            flags.insert(.control)
+        }
+        if mods.rawValue & GHOSTTY_MODS_ALT.rawValue != 0 {
+            flags.insert(.option)
+        }
+        if mods.rawValue & GHOSTTY_MODS_SUPER.rawValue != 0 {
+            flags.insert(.command)
+        }
+        if mods.rawValue & GHOSTTY_MODS_CAPS.rawValue != 0 {
+            flags.insert(.capsLock)
+        }
+        if mods.rawValue & GHOSTTY_MODS_NUM.rawValue != 0 {
+            flags.insert(.numericPad)
+        }
+        return flags
+    }
+
     // MARK: - Modifier Translation
 
     /// Translate NSEvent.ModifierFlags to ghostty_input_mods_e.
@@ -84,16 +111,6 @@ enum EventTranslator {
         return ghostty_input_mods_e(mods)
     }
 
-    /// Convert ghostty_input_mods_e back to NSEvent.ModifierFlags.
-    static func modifierFlags(from mods: ghostty_input_mods_e) -> NSEvent.ModifierFlags {
-        var flags = NSEvent.ModifierFlags()
-        if mods.rawValue & GHOSTTY_MODS_SHIFT.rawValue != 0 { flags.insert(.shift) }
-        if mods.rawValue & GHOSTTY_MODS_CTRL.rawValue != 0 { flags.insert(.control) }
-        if mods.rawValue & GHOSTTY_MODS_ALT.rawValue != 0 { flags.insert(.option) }
-        if mods.rawValue & GHOSTTY_MODS_SUPER.rawValue != 0 { flags.insert(.command) }
-        return flags
-    }
-
     // MARK: - Mouse Button Translation
 
     /// Translate an NSEvent button number to ghostty_input_mouse_button_e.
@@ -102,21 +119,9 @@ enum EventTranslator {
         case 0: return GHOSTTY_MOUSE_LEFT
         case 1: return GHOSTTY_MOUSE_RIGHT
         case 2: return GHOSTTY_MOUSE_MIDDLE
+        case 3: return GHOSTTY_MOUSE_FOUR
+        case 4: return GHOSTTY_MOUSE_FIVE
         default: return GHOSTTY_MOUSE_UNKNOWN
-        }
-    }
-
-    /// Translate an NSEvent to a mouse button enum based on event type.
-    static func translateMouseButtonFromType(_ event: NSEvent) -> ghostty_input_mouse_button_e {
-        switch event.type {
-        case .leftMouseDown, .leftMouseUp, .leftMouseDragged:
-            return GHOSTTY_MOUSE_LEFT
-        case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
-            return GHOSTTY_MOUSE_RIGHT
-        case .otherMouseDown, .otherMouseUp, .otherMouseDragged:
-            return event.buttonNumber == 2 ? GHOSTTY_MOUSE_MIDDLE : GHOSTTY_MOUSE_UNKNOWN
-        default:
-            return GHOSTTY_MOUSE_UNKNOWN
         }
     }
 

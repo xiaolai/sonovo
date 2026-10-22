@@ -166,10 +166,17 @@ enum CodeSymbolIndex {
                 // inside a message does not end the attribute early.
                 var depth = 0
                 var quote: Character?
+                var escaped = false
                 func scan(_ text: String) {
                     for character in text {
                         if let active = quote {
-                            if character == active { quote = nil }
+                            if escaped {
+                                escaped = false
+                            } else if character == "\\" {
+                                escaped = true
+                            } else if character == active {
+                                quote = nil
+                            }
                             continue
                         }
                         if character == "\"" || character == "'" {

@@ -994,28 +994,28 @@ struct CodeViewer: View {
             symbols = []
             return
         }
-        let source = document.source
-        let language = document.language
+        if let cached = workspace.controller(for: document)
+            .cachedSymbols() {
+            symbols = cached
+            return
+        }
+        let controller = workspace.controller(for: document)
         let revision = document.revision
+        let language = document.language
         symbolTask = Task { @MainActor in
             // Coalesce rapid edits; a stale scan must never replace the
             // current outline.
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
-            let worker = Task.detached(priority: .utility) {
-                CodeSymbolIndex.symbols(in: source, language: language)
-            }
-            let result = await withTaskCancellationHandler {
-                await worker.value
-            } onCancel: {
-                worker.cancel()
-            }
+            // The controller shares this scan with the breadcrumb's lookup.
+            guard let scanned = await controller.symbolsForCurrentRevision()
+            else { return }
             guard !Task.isCancelled,
                   document.revision == revision,
                   document.language == language else {
                 return
             }
-            symbols = result
+            symbols = scanned
         }
     }
 

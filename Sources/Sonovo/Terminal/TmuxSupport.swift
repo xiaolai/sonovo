@@ -24,8 +24,8 @@ struct TerminalEnvironment: Sendable {
 /// fake so no process is ever spawned.
 protocol TmuxControlling: AnyObject, Sendable {
     var isAvailable: Bool { get }
-    func sessionNames(prefix: String) -> [String]
     /// nil means tmux could not answer; callers must not assume absence.
+    func sessionNames(prefix: String) -> [String]?
     func sessionExists(name: String) -> Bool?
     func launchInput(name: String, directory: String) -> String
     func kill(name: String) -> Bool
@@ -111,12 +111,19 @@ enum TmuxCommands {
     static func open(
         executable: String,
         name: String,
-        directory: String
+        directory: String,
+        shell: String = "",
+        loginShell: Bool = false
     ) -> String {
         let tool = commandToken(executable)
         let target = TmuxNaming.shellQuote("=" + name)
         let quotedName = TmuxNaming.shellQuote(name)
         let quotedDirectory = TmuxNaming.shellQuote(directory)
+        // The configured shell runs inside the new session. An empty shell
+        // leaves tmux's own default in place.
+        let command = shell.isEmpty
+            ? ""
+            : " \(TmuxNaming.shellQuote(shell))\(loginShell ? " -l" : "")"
         // One tmux client per branch: the server option, the session
         // option, creation, and attach all happen before that client can
         // disconnect. This closes the window where a hostile
@@ -127,7 +134,7 @@ enum TmuxCommands {
             + "\\; attach -t \(target)"
         let setup = "\(tool) set-option -s exit-unattached off "
             + "\\; new-session -d -s \(quotedName) "
-            + "-c \(quotedDirectory) "
+            + "-c \(quotedDirectory)\(command) "
             + "\\; set-option -t \(target) destroy-unattached off"
         // A launcher that loses the has-session race still attaches: setup
         // is allowed to fail (duplicate session) and the second client
@@ -200,16 +207,22 @@ final class LiveTmux: TmuxControlling, @unchecked Sendable {
         isAvailable = executable != nil
     }
 
-    func sessionNames(prefix: String) -> [String] {
+    func sessionNames(prefix: String) -> [String]? {
         guard isAvailable,
               let result = run([
                   "list-sessions",
                   "-F",
                   "#{session_name}"
-              ]), result.status == 0 else {
-            // "no server running" exits non-zero and is an empty list, not
-            // an error the caller can act on.
-            return []
+              ]) else {
+            return nil
+        }
+        if result.status != 0 {
+            // "no server running" is a confirmed empty list. A timeout or a
+            // real server error is unknown, and callers must not treat it as
+            // proof that a name is free.
+            return result.output.lowercased().contains("no server running")
+                ? []
+                : nil
         }
         return result.output
             .split(separator: "\n")
@@ -247,7 +260,9 @@ final class LiveTmux: TmuxControlling, @unchecked Sendable {
         return TmuxCommands.open(
             executable: executable,
             name: name,
-            directory: directory
+            directory: directory,
+            shell: Preferences.effectiveShell,
+            loginShell: Preferences.loginShell
         )
     }
 

@@ -7,15 +7,6 @@ struct WikiLinkMatch: Equatable {
     let target: String
     let fragment: String?
     let alias: String?
-
-    var display: String {
-        alias ?? targetWithFragment
-    }
-
-    var targetWithFragment: String {
-        if let fragment { return "\(target)#\(fragment)" }
-        return target
-    }
 }
 
 /// Finds `[[target]]` and `[[target|alias]]` in a raw source span.

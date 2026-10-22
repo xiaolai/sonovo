@@ -18,11 +18,6 @@ struct ProjectSwitcherModel: Equatable, Sendable {
     let entries: [ProjectSwitcherEntry]
     let showsChipRail: Bool
 
-    init(entries: [ProjectSwitcherEntry], showsChipRail: Bool) {
-        self.entries = entries
-        self.showsChipRail = showsChipRail
-    }
-
     @MainActor
     init(workspace: Workspace) {
         let activeID = workspace.liveProject.id

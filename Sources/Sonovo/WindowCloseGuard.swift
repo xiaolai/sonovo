@@ -62,10 +62,17 @@ struct WindowCloseGuard: NSViewRepresentable {
             self.original = nil
         }
 
+        private var flushInFlight = false
+
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             if bypass { return true }
+            // A second close click while the first flush is saving would
+            // start a parallel save and could invoke the delegate twice.
+            guard !flushInFlight else { return false }
+            flushInFlight = true
 
             Task { @MainActor in
+                defer { flushInFlight = false }
                 guard await flush() else { return }
                 // The flush saved our documents; the window's own delegate
                 // may still refuse the close.

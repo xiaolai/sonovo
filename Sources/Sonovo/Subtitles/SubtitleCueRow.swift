@@ -220,7 +220,7 @@ struct SubtitleCueRow: View {
                 )
                 .foregroundStyle(.tertiary)
 
-            if let warning = warnings.first {
+            if !warnings.isEmpty {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(AppTheme.Palette.warning)

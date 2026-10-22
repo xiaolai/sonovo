@@ -33,6 +33,31 @@ final class ImageDocumentModelTests: XCTestCase {
         XCTAssertNotNil(model.image)
     }
 
+    func testReloadPicksUpReplacedPixels() async throws {
+        let url = try makeImage(
+            width: 100,
+            height: 50,
+            type: .png,
+            extension: "png"
+        )
+        let replacement = try makeImage(
+            width: 300,
+            height: 200,
+            type: .png,
+            extension: "png"
+        )
+        let model = ImageDocumentModel(url: url)
+        await model.load()
+        XCTAssertEqual(model.metadata?.pixelWidth, 100)
+
+        try Data(contentsOf: replacement).write(to: url)
+        await model.reload()
+
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.metadata?.pixelWidth, 300)
+        XCTAssertEqual(model.metadata?.pixelHeight, 200)
+    }
+
     func testLoadsTIFF() async throws {
         let url = try makeImage(
             width: 320,

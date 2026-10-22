@@ -300,6 +300,112 @@ struct SubtitleDocumentTests {
         }
     }
 
+    @Test("Explicit save recreates a file deleted on disk")
+    func recreateDeletedFile() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srtSource.utf8).write(to: url)
+
+        let document = try SubtitleDocument(loading: url)
+        try document.replaceSource(
+            srtSource.replacingOccurrences(of: "Hello", with: "Local"),
+            actionName: "Edit"
+        )
+        try FileManager.default.removeItem(at: url)
+        _ = try await document.checkExternalChange()
+        #expect(document.isMissingOnDisk)
+
+        try await document.save(mode: .explicitOverwrite)
+        #expect(try String(contentsOf: url, encoding: .utf8).contains("Local"))
+        #expect(!document.isMissingOnDisk)
+    }
+
+    @Test("Recreation refuses a file that reappeared instead of overwriting it")
+    func createRefusesReappearedFile() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srtSource.utf8).write(to: url)
+
+        let document = try SubtitleDocument(loading: url)
+        try document.replaceSource(
+            srtSource.replacingOccurrences(of: "Hello", with: "Local"),
+            actionName: "Edit"
+        )
+        try FileManager.default.removeItem(at: url)
+        _ = try await document.checkExternalChange()
+        #expect(document.isMissingOnDisk)
+
+        let resurrected = """
+        1
+        00:00:01,000 --> 00:00:02,000
+        Resurrected
+        """
+        try Data(resurrected.utf8).write(to: url)
+
+        await #expect(throws: SaveError.destinationExists) {
+            try await document.save(mode: .explicitOverwrite)
+        }
+        #expect(try String(contentsOf: url, encoding: .utf8) == resurrected)
+        #expect(document.isDirty)
+    }
+
+    @Test("A pending cue draft is saved by close")
+    func flushCommitsPendingDraft() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srtSource.utf8).write(to: url)
+
+        let document = try SubtitleDocument(loading: url)
+        document.beginDraft(ordinal: 0, baseText: "Hello", text: "Draft")
+        document.updateDraftText("Draft text")
+
+        let outcome = await document.flushForClose()
+
+        #expect(outcome == .closed)
+        #expect(document.pendingDraft == nil)
+        #expect(
+            try String(contentsOf: url, encoding: .utf8)
+                .contains("Draft text")
+        )
+    }
+
+    @Test("A draft typed against an older revision is refused")
+    func staleDraftIsRefused() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srtSource.utf8).write(to: url)
+
+        let document = try SubtitleDocument(loading: url)
+        let staleRevision = document.revision
+        document.beginDraft(ordinal: 0, baseText: "Hello", text: "Mine")
+
+        let external = srtSource.replacingOccurrences(
+            of: "Hello",
+            with: "External"
+        )
+        try Data(external.utf8).write(to: url)
+        _ = try await document.checkExternalChange()
+        #expect(document.revision != staleRevision)
+
+        let outcome = await document.flushForClose()
+
+        if case let .needsDecision(blocker) = outcome {
+            #expect(blocker == .saveFailed(
+                "An unsaved cue draft conflicts with the file on disk."
+            ))
+        } else {
+            Issue.record("Expected a close decision, got \(outcome)")
+        }
+        #expect(
+            try String(contentsOf: url, encoding: .utf8) == external
+        )
+        #expect(document.pendingDraft != nil)
+    }
+
     @Test("Parse requests coalesce to the newest revision")
     func parseServiceCoalescing() async {
         let service = SubtitleParseService()

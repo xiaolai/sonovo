@@ -24,7 +24,42 @@ final class SubtitleMediaPlayer {
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var statusObservation: NSKeyValueObservation?
+    private var preferenceObserver: NSObjectProtocol?
     private var openGeneration: UInt64 = 0
+    /// Invalidates a replay's play call when the user pauses, seeks, or
+    /// closes before the rewind seek completes.
+    private var playGeneration: UInt64 = 0
+
+    init() {
+        applyAudioDevice()
+        preferenceObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyAudioDevice()
+            }
+        }
+    }
+
+    isolated deinit {
+        if let preferenceObserver {
+            NotificationCenter.default.removeObserver(preferenceObserver)
+        }
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
+    }
+
+    /// The subtitle preview uses its own AVPlayer; it must route to the
+    /// same output device as the main player.
+    private func applyAudioDevice() {
+        let uid = Preferences.audioDeviceUID
+        guard player.audioOutputDeviceUniqueID != uid else { return }
+        player.audioOutputDeviceUniqueID = uid
+    }
 
     var currentMilliseconds: Int {
         max(0, Int((currentTime * 1000).rounded()))
@@ -78,30 +113,32 @@ final class SubtitleMediaPlayer {
         switch metadata {
         case let .success(metadata):
             guard metadata.isPlayable else {
-                fail("This file cannot be played.", url: url)
+                fail("This file cannot be played.")
                 return
             }
             guard metadata.duration.isFinite, metadata.duration > 0 else {
-                fail("This file has no playable duration.", url: url)
+                fail("This file has no playable duration.")
                 return
             }
             guard metadata.hasVideo || metadata.hasAudio else {
-                fail("This file has no audio or video tracks.", url: url)
+                fail("This file has no audio or video tracks.")
                 return
             }
             let item = AVPlayerItem(asset: AVURLAsset(url: url))
             player.replaceCurrentItem(with: item)
             duration = metadata.duration
             hasVideo = metadata.hasVideo
-            isReady = true
-            isLoading = false
+            // Readiness follows the item's actual status, not the asset
+            // metadata. A track that parses but cannot be played must not
+            // enable the transport.
+            isLoading = true
             installObservers(item: item)
         case let .failure(error):
-            fail(error.localizedDescription, url: url)
+            fail(error.localizedDescription)
         }
     }
 
-    private func fail(_ message: String, url: URL) {
+    private func fail(_ message: String) {
         errorMessage = message
         isReady = false
         isLoading = false
@@ -111,6 +148,29 @@ final class SubtitleMediaPlayer {
 
     private func installObservers(item: AVPlayerItem) {
         removeObservers()
+        statusObservation = item.observe(
+            \.status,
+            options: [.initial, .new]
+        ) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                guard let self, item === self.player.currentItem else {
+                    return
+                }
+                switch item.status {
+                case .readyToPlay:
+                    self.isReady = true
+                    self.isLoading = false
+                case .failed:
+                    self.errorMessage = item.error?.localizedDescription
+                        ?? "The file could not be played."
+                    self.isReady = false
+                    self.isPlaying = false
+                    self.isLoading = false
+                default:
+                    break
+                }
+            }
+        }
         let interval = CMTime(value: 1, timescale: 30)
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: interval,
@@ -140,6 +200,8 @@ final class SubtitleMediaPlayer {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil
         }
+        statusObservation?.invalidate()
+        statusObservation = nil
     }
 
     // MARK: - Transport
@@ -155,6 +217,7 @@ final class SubtitleMediaPlayer {
     }
 
     func pause() {
+        playGeneration &+= 1
         player.pause()
         isPlaying = false
     }
@@ -184,6 +247,7 @@ final class SubtitleMediaPlayer {
 
     func close() {
         openGeneration += 1
+        playGeneration &+= 1
         removeObservers()
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -209,6 +273,7 @@ final class SubtitleMediaPlayer {
             errorMessage = itemError.localizedDescription
             isReady = false
             isPlaying = false
+            isLoading = false
         }
     }
 
@@ -221,6 +286,8 @@ final class SubtitleMediaPlayer {
     /// calling play() synchronously after seek can be ignored while the seek
     /// is still in flight, so play starts in the seek completion.
     private func replayFromStart() {
+        playGeneration &+= 1
+        let generation = playGeneration
         currentTime = 0
         player.seek(
             to: .zero,
@@ -228,7 +295,12 @@ final class SubtitleMediaPlayer {
             toleranceAfter: .zero
         ) { [weak self] finished in
             Task { @MainActor in
-                guard let self, finished else { return }
+                guard let self, finished,
+                      generation == self.playGeneration,
+                      self.isReady,
+                      self.player.currentItem != nil else {
+                    return
+                }
                 self.player.play()
                 self.isPlaying = true
             }

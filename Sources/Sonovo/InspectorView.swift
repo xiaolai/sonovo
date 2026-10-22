@@ -191,18 +191,20 @@ struct InspectorView: View {
                     label: "Language",
                     value: document.language.displayName
                 )
-                MetadataRow(
-                    label: "Lines",
-                    value: "\(document.source.components(separatedBy: "\n").count)"
-                )
-                MetadataRow(
-                    label: "Encoding",
-                    value: document.hasBOM ? "UTF-8 BOM" : "UTF-8"
-                )
-                MetadataRow(
-                    label: "Line endings",
-                    value: document.lineEnding == .crlf ? "CRLF" : "LF"
-                )
+                if document.isReady {
+                    MetadataRow(
+                        label: "Lines",
+                        value: "\(document.source.components(separatedBy: "\n").count)"
+                    )
+                    MetadataRow(
+                        label: "Encoding",
+                        value: document.hasBOM ? "UTF-8 BOM" : "UTF-8"
+                    )
+                    MetadataRow(
+                        label: "Line endings",
+                        value: document.lineEnding == .crlf ? "CRLF" : "LF"
+                    )
+                }
                 MetadataRow(
                     label: "State",
                     value: codeStateLabel(document)
@@ -212,6 +214,12 @@ struct InspectorView: View {
     }
 
     private func codeStateLabel(_ document: CodeDocument) -> String {
+        if let refusal = document.refusal {
+            return refusal.explanation
+        }
+        if !document.isReady {
+            return "Loading"
+        }
         if let reason = document.readOnlyReason {
             return reason.explanation
         }
@@ -234,50 +242,57 @@ struct InspectorView: View {
     }
 
     private func projectAssetHeader(_ asset: ProjectAsset) -> some View {
-        HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
-            ZStack {
-                RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                    .fill(Color.accentColor.opacity(AppTheme.Opacity.tint))
-                Image(systemName: asset.kind.icon)
-                    .font(.system(size: AppTheme.TypeScale.title, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-            }
-            .frame(width: AppTheme.Size.avatar, height: AppTheme.Size.avatar)
-
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
-                Text(asset.name)
-                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
-                    .lineLimit(2)
-
-                Text(asset.kind.projectGroup.title)
-                    .font(.system(size: AppTheme.TypeScale.xxs))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: AppTheme.Spacing.zero)
-        }
+        inspectorHeader(
+            icon: asset.kind.icon,
+            title: asset.name,
+            subtitle: asset.kind.projectGroup.title
+        )
     }
 
     private func assetHeader(_ asset: ProductionAsset) -> some View {
+        inspectorHeader(
+            icon: asset.kind.icon,
+            title: state.displayName(for: asset),
+            subtitle: asset.shortDetail,
+            subtitleLineLimit: 1
+        )
+    }
+
+    private func inspectorHeader(
+        icon: String,
+        title: String,
+        subtitle: String,
+        subtitleLineLimit: Int? = nil
+    ) -> some View {
         HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
             ZStack {
-                RoundedRectangle(cornerRadius: AppTheme.Radius.panel, style: .continuous)
-                    .fill(Color.accentColor.opacity(AppTheme.Opacity.tint))
-                Image(systemName: asset.kind.icon)
-                    .font(.system(size: AppTheme.TypeScale.title, weight: .medium))
+                RoundedRectangle(
+                    cornerRadius: AppTheme.Radius.panel,
+                    style: .continuous
+                )
+                .fill(Color.accentColor.opacity(AppTheme.Opacity.tint))
+                Image(systemName: icon)
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.title,
+                            weight: .medium
+                        )
+                    )
                     .foregroundStyle(Color.accentColor)
             }
             .frame(width: AppTheme.Size.avatar, height: AppTheme.Size.avatar)
 
             VStack(alignment: .leading, spacing: AppTheme.Spacing.s3) {
-                Text(state.displayName(for: asset))
-                    .font(.system(size: AppTheme.TypeScale.md, weight: .semibold))
+                Text(title)
+                    .font(
+                        .system(size: AppTheme.TypeScale.md, weight: .semibold)
+                    )
                     .lineLimit(2)
 
-                Text(asset.shortDetail)
+                Text(subtitle)
                     .font(.system(size: AppTheme.TypeScale.xxs))
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(subtitleLineLimit)
             }
 
             Spacer(minLength: AppTheme.Spacing.zero)
@@ -287,6 +302,7 @@ struct InspectorView: View {
     private func metadataRows(for asset: ProductionAsset) -> [MetadataItem] {
         if asset.kind == .script,
            state.selectedTab?.kind == .script,
+           state.selectedTab?.assetID == asset.id,
            let document = state.markdown.selectedDocument {
             return [
                 MetadataItem(label: "Kind", value: "Markdown"),
@@ -306,6 +322,7 @@ struct InspectorView: View {
         }
         if asset.kind == .subtitle,
            state.selectedTab?.kind == .subtitle,
+           state.selectedTab?.assetID == asset.id,
            let document = state.subtitles.selectedDocument {
             return [
                 MetadataItem(label: "Kind", value: document.format.displayName),

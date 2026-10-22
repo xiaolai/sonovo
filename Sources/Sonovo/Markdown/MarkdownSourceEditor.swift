@@ -22,13 +22,22 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     private let weakSelf = WeakController()
     nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var preferenceObserver: NSObjectProtocol?
     private var visibleHighlightTask: Task<Void, Never>?
 
     private let parseService: MarkdownParseService
     private let parseDebounce: TimeInterval
     private let registry = MarkdownCommandRegistry()
     private let assetStore = MarkdownAssetStore()
-    private(set) var lastCommandError: Error?
+    private(set) var lastCommandError: Error? {
+        didSet {
+            guard let lastCommandError else { return }
+            onCommandError?(String(describing: lastCommandError))
+        }
+    }
+    /// Production surfaces route command and asset failures to the workspace
+    /// banner instead of leaving them in an unread property.
+    var onCommandError: ((String) -> Void)?
 
     private var parseTask: Task<Void, Never>?
     private var pendingParseRevision: UInt64?
@@ -76,6 +85,15 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         textView.string = document.source
         applyBaseAttributesOnly()
         observeDocument()
+        preferenceObserver = NotificationCenter.default.addObserver(
+            forName: .sonovoEditorPreferencesChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.applyEditorPreferences()
+            }
+        }
     }
 
     /// Called when the view is attached to a window hierarchy.
@@ -88,6 +106,28 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         if let scrollObserver {
             NotificationCenter.default.removeObserver(scrollObserver)
         }
+        if let preferenceObserver {
+            NotificationCenter.default.removeObserver(preferenceObserver)
+        }
+    }
+
+    /// Applies a Settings change to an open editor: the wrap mode and font
+    /// size take effect without reopening the document.
+    private func applyEditorPreferences() {
+        let wrap = Preferences.wrapLines
+        textView.isHorizontallyResizable = !wrap
+        textView.autoresizingMask = wrap ? [.width] : []
+        if let container = textView.textContainer {
+            container.widthTracksTextView = wrap
+            container.containerSize = NSSize(
+                width: wrap
+                    ? scrollView.contentSize.width
+                    : CGFloat.greatestFiniteMagnitude,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+        }
+        applyBaseAttributesOnly()
+        scheduleVisibleHighlight()
     }
 
     private func configureScrollView() {
@@ -106,13 +146,16 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
+        let wrap = Preferences.wrapLines
+        textView.isHorizontallyResizable = !wrap
+        textView.autoresizingMask = wrap ? [.width] : []
         textView.textContainer?.containerSize = NSSize(
-            width: scrollView.contentSize.width,
+            width: wrap
+                ? scrollView.contentSize.width
+                : CGFloat.greatestFiniteMagnitude,
             height: CGFloat.greatestFiniteMagnitude
         )
-        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.widthTracksTextView = wrap
     }
 
     private func installScrollObserver() {
@@ -228,7 +271,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         // smaller paragraph gap so consecutive lines stay together.
         return [
             .font: NSFont.monospacedSystemFont(
-                ofSize: AppTheme.Reading.sourceSize,
+                ofSize: Preferences.editorFontSize,
                 weight: .regular
             ),
             .foregroundColor: NSColor(AppTheme.Palette.label),
@@ -330,7 +373,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
         if let baseline = compositionBaseline {
             compositionBaseline = nil
-            if document.source != baseline.source {
+            if document.revision != baseline.revision
+                || document.source != baseline.source {
                 // The document changed while the composition was in flight
                 // (an external reload or adoption). Writing the stale editor
                 // buffer composed on top of the old text would silently
@@ -710,17 +754,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     /// The width of the leading whitespace, counting a tab as four columns.
     private func leadingIndentWidth(_ line: String) -> Int {
-        var width = 0
-        for character in line {
-            if character == " " {
-                width += 1
-            } else if character == "\t" {
-                width += 4
-            } else {
-                break
-            }
-        }
-        return width
+        columnWidth(String(line.prefix(while: { $0 == " " || $0 == "\t" })))
     }
 
     /// Whether `line` is a CommonMark thematic break (`- - -`, `* * *`,
@@ -766,8 +800,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             if text.hasSuffix("\r") { text.removeLast() }
             if !text.trimmingCharacters(in: .whitespaces).isEmpty {
                 guard let parsed = ListLine.parse(text) else { return false }
-                let contentColumn = leadingIndentWidth(parsed.indent)
-                    + parsed.markerLength
+                // `markerLength` already includes the leading indent. Measure
+                // the matched prefix once, counting a tab as four columns.
+                let prefix = (text as NSString).substring(
+                    with: NSRange(location: 0, length: parsed.markerLength)
+                )
+                let contentColumn = columnWidth(prefix)
                 // Four columns past the item's content column is indented
                 // code, even though it is indented enough for the item.
                 return contentColumn <= indent && indent - contentColumn < 4
@@ -1051,17 +1089,7 @@ private enum FenceContext {
 
     /// The width of the leading whitespace, counting a tab as four columns.
     private static func leadingWidth(_ line: String) -> Int {
-        var width = 0
-        for character in line {
-            if character == " " {
-                width += 1
-            } else if character == "\t" {
-                width += 4
-            } else {
-                break
-            }
-        }
-        return width
+        columnWidth(String(line.prefix(while: { $0 == " " || $0 == "\t" })))
     }
 
     /// Recognizes a fence that follows one or more list markers, such as
@@ -1074,11 +1102,13 @@ private enum FenceContext {
         _ trimmed: Substring
     ) -> (character: Character, length: Int, containerIndent: Int)? {
         var rest = trimmed
+        var sawListContainer = false
         while true {
             if let first = rest.first,
                first == "-" || first == "+" || first == "*" {
                 let after = rest.dropFirst()
                 if after.first == " " || after.first == "\t" {
+                    sawListContainer = true
                     rest = after.drop(while: { $0 == " " || $0 == "\t" })
                     continue
                 }
@@ -1095,6 +1125,7 @@ private enum FenceContext {
                 let after = rest.index(after: probe)
                 if after == rest.endIndex
                     || rest[after] == " " || rest[after] == "\t" {
+                    sawListContainer = true
                     rest = rest[after...].drop(while: {
                         $0 == " " || $0 == "\t"
                     })
@@ -1116,12 +1147,18 @@ private enum FenceContext {
               !(first == "`" && rest.dropFirst(length).contains("`")) else {
             return nil
         }
-        // Include any list markers consumed above: for `- ``` the fence's
-        // content column is 2, not 0.
-        let containerIndent = line.distance(
-            from: line.startIndex,
-            to: trimmed.startIndex
-        ) + trimmed.distance(from: trimmed.startIndex, to: rest.startIndex)
+        // Only a list container makes indentation a scope requirement. A
+        // top-level fence may be indented up to three spaces without turning
+        // that indentation into a container: unindented content lines are
+        // still inside the fence.
+        let containerIndent: Int
+        if sawListContainer {
+            containerIndent = columnWidth(
+                String(line[line.startIndex..<rest.startIndex])
+            )
+        } else {
+            containerIndent = 0
+        }
         return (first, length, containerIndent)
     }
 
@@ -1141,6 +1178,20 @@ private enum FenceContext {
 }
 
 // MARK: - List line parsing
+
+/// Display columns of a prefix: a tab advances to the next four-column tab
+/// stop, every other character one column.
+private func columnWidth(_ text: String) -> Int {
+    var width = 0
+    for character in text {
+        if character == "\t" {
+            width = (width / 4 + 1) * 4
+        } else {
+            width += 1
+        }
+    }
+    return width
+}
 
 private struct ListLine {
     let indent: String
@@ -1171,7 +1222,7 @@ private struct ListLine {
         // CommonMark allows at most nine digits in an ordered marker. A
         // longer number is not a list marker, and parsing it as one overflowed
         // `number + 1` on Return.
-        let pattern = #"^([ \t]*)([-*+]|[0-9]{1,9}[.)])([ \t]+)(\[[ xX]\](?:[ \t]+|$))?"#
+        let pattern = #"^([ \t]*)([-*+]|[0-9]{1,9}[.)])([ \t]+|$)(\[[ xX]\](?:[ \t]+|$))?"#
         guard let expression = try? NSRegularExpression(pattern: pattern) else {
             return nil
         }
@@ -1228,7 +1279,7 @@ private struct MarkdownHighlighter {
     private let tertiary = NSColor(AppTheme.Palette.tertiaryLabel)
     private let accent = NSColor(AppTheme.Palette.info)
     private let codeBackground = NSColor(AppTheme.Palette.card)
-    private let baseSize = AppTheme.Reading.sourceSize
+    private var baseSize: CGFloat { Preferences.editorFontSize }
 
     func apply(ast: SonovoAST, to storage: NSTextStorage) {
         walk(ast.blocks, storage: storage)
@@ -1280,7 +1331,7 @@ private struct MarkdownHighlighter {
                     add(
                         .font,
                         NSFont.monospacedSystemFont(
-                            ofSize: AppTheme.TypeScale.md,
+                            ofSize: Preferences.editorFontSize,
                             weight: .regular
                         ),
                         range,

@@ -188,7 +188,7 @@ enum NestingGuard {
         // indentation of each open list/quote level so a document that opens
         // one level per line still trips the limit.
         var indentStack: [Int] = []
-        var fence: (character: Character, length: Int)?
+        var fence: (character: Character, length: Int, prefix: String)?
         // An open raw-HTML block: empty means "until a blank line", otherwise
         // the closing marker to look for.
         var htmlEnd: String?
@@ -203,7 +203,9 @@ enum NestingGuard {
                     }) {
                         htmlEnd = nil
                     }
-                } else if line.contains(end) {
+                } else if line.lowercased().contains(end.lowercased()) {
+                    // HTML terminators are case-insensitive: `</SCRIPT>`
+                    // closes a `<script>` block.
                     htmlEnd = nil
                 }
                 continue
@@ -211,10 +213,45 @@ enum NestingGuard {
 
             // Fenced literal content is not structural Markdown.
             if let active = fence {
-                if closesFence(line, active) {
-                    fence = nil
+                // A fence opened inside a blockquote or list ends when that
+                // container ends. A top-level fence has no container prefix
+                // and absorbs every subsequent line. The container only has
+                // to still be open, not identical: `> >` is a valid content
+                // line inside a quoted fence.
+                let scopeOpen: Bool
+                if active.prefix.isEmpty {
+                    scopeOpen = true
+                } else if active.prefix.contains(">") {
+                    // Every quote level of the opening container must still
+                    // be present; ending the inner quote ends the fence.
+                    let required = active.prefix.filter { $0 == ">" }.count
+                    let present = splitContainers(line).prefix
+                        .filter { $0 == ">" }.count
+                    scopeOpen = present >= required
+                } else {
+                    scopeOpen = line.hasPrefix(active.prefix)
                 }
-                continue
+                if scopeOpen {
+                    let rest: Substring
+                    if active.prefix.isEmpty {
+                        // A top-level closing fence may be indented up to
+                        // three spaces. A tab reaches column four and is
+                        // indented code, not a delimiter.
+                        let spaces = line.prefix(while: { $0 == " " }).count
+                        rest = spaces <= 3
+                            ? line.dropFirst(spaces)
+                            : line
+                    } else {
+                        rest = splitContainers(line).rest
+                    }
+                    if closesFence(rest, active) {
+                        fence = nil
+                    }
+                    continue
+                }
+                // The container ended. Clear the fence and process this line
+                // as ordinary Markdown; it may open a new one.
+                fence = nil
             }
             if let opened = openingFence(line) {
                 fence = opened
@@ -312,9 +349,11 @@ enum NestingGuard {
         return false
     }
 
-    /// Removes blockquote markers and list markers, so a fence inside a
-    /// container is still recognized as a fence.
-    private static func stripContainers(_ line: Substring) -> Substring {
+    /// Splits a line into its leading container prefix and its content, so a
+    /// fence inside a container is recognized and its scope can be tracked.
+    private static func splitContainers(
+        _ line: Substring
+    ) -> (prefix: Substring, rest: Substring) {
         var rest = line
         while true {
             rest = rest.drop(while: { $0 == " " || $0 == "\t" })
@@ -327,14 +366,31 @@ enum NestingGuard {
                 rest = rest.dropFirst(length)
                 continue
             }
-            return rest
+            return (line[line.startIndex..<rest.startIndex], rest)
         }
+    }
+
+    /// Removes blockquote markers and list markers, so a fence inside a
+    /// container is still recognized as a fence.
+    private static func stripContainers(_ line: Substring) -> Substring {
+        splitContainers(line).rest
+    }
+
+    /// Container identity for fence scope. Trailing whitespace after a quote
+    /// marker is not significant (`>` and `> ` are the same container);
+    /// indentation for list containers is significant.
+    private static func normalizedContainerPrefix(_ prefix: Substring) -> String {
+        var text = String(prefix)
+        if text.contains(">") {
+            while text.last == " " || text.last == "\t" { text.removeLast() }
+        }
+        return text
     }
 
     private static func openingFence(
         _ line: Substring
-    ) -> (character: Character, length: Int)? {
-        let trimmed = stripContainers(line)
+    ) -> (character: Character, length: Int, prefix: String)? {
+        let (prefix, trimmed) = splitContainers(line)
         guard let first = trimmed.first, first == "`" || first == "~" else {
             return nil
         }
@@ -347,21 +403,29 @@ enum NestingGuard {
         if first == "`", trimmed.dropFirst(length).contains("`") {
             return nil
         }
-        return (first, length)
+        // Ordinary leading indentation is not a container. A blockquote or
+        // list marker makes the fence's prefix a scope requirement.
+        let hasContainer = prefix.contains {
+            $0 == ">" || $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
+        }
+        return (
+            first,
+            length,
+            hasContainer ? normalizedContainerPrefix(prefix) : ""
+        )
     }
 
     private static func closesFence(
-        _ line: Substring,
-        _ fence: (character: Character, length: Int)
+        _ rest: Substring,
+        _ fence: (character: Character, length: Int, prefix: String)
     ) -> Bool {
-        let trimmed = stripContainers(line)
         var length = 0
-        for character in trimmed {
+        for character in rest {
             guard character == fence.character else { break }
             length += 1
         }
         guard length >= fence.length else { return false }
-        return trimmed.dropFirst(length).allSatisfy {
+        return rest.dropFirst(length).allSatisfy {
             $0 == " " || $0 == "\t"
         }
     }
@@ -402,10 +466,21 @@ enum NestingGuard {
             return lower.contains(">") ? nil : ">"
         }
 
-        // Types 1-5 end at their own closing tag.
+        // Types 1-5 end at their own closing tag. The tag name must end at a
+        // real boundary: `<scripture>` is not `<script>`.
         for tag in ["script", "pre", "style", "textarea"] {
-            if lower.hasPrefix("<" + tag),
-               !lower.contains("</" + tag + ">") {
+            let opening = "<" + tag
+            guard lower.hasPrefix(opening) else { continue }
+            let boundary = lower.index(
+                lower.startIndex,
+                offsetBy: opening.count
+            )
+            if boundary < lower.endIndex {
+                let next = lower[boundary]
+                guard next == " " || next == "\t"
+                    || next == ">" else { continue }
+            }
+            if !lower.contains("</" + tag + ">") {
                 return "</" + tag + ">"
             }
         }

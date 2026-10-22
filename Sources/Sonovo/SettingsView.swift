@@ -31,37 +31,33 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @Bindable var state: AppState
+
     @AppStorage("sonovo.appearance") private var appearance = "system"
     @AppStorage("sonovo.canvasInset") private var canvasInset = AppTheme.Canvas.comfortableInset
     @AppStorage("sonovo.canvasRadius") private var canvasRadius = AppTheme.Canvas.roundedRadius
 
     @State private var selectedSection: SettingsSection = .appearance
-    @State private var foregroundIntensity =
+    @AppStorage("sonovo.theme") private var theme = "Standard"
+    @AppStorage("sonovo.foregroundIntensity") private var foregroundIntensity =
         AppTheme.Preferences.foregroundIntensityDefault
-    @State private var backgroundIntensity =
+    @AppStorage("sonovo.backgroundIntensity") private var backgroundIntensity =
         AppTheme.Preferences.backgroundIntensityDefault
-    @State private var theme = "Standard"
 
-    @AppStorage("sonovo.restoreTabs") private var restoreTabs = true
-    @AppStorage("sonovo.confirmClose") private var confirmClose = true
-    @AppStorage("sonovo.reopenLast") private var reopenLast = true
     @AppStorage("sonovo.editorFontSize") private var editorFontSize =
         AppTheme.Preferences.editorFontSizeDefault
-    @AppStorage("sonovo.showBreadcrumbs") private var showBreadcrumbs = true
     @AppStorage("sonovo.markdownRendered") private var markdownRendered = true
     @AppStorage("sonovo.wrapLines") private var wrapLines = true
     @AppStorage("sonovo.codeTabWidth") private var codeTabWidth =
         AppTheme.Code.tabWidthDefault
     @AppStorage("sonovo.codeUsesTabs") private var codeUsesTabs = false
     @AppStorage("sonovo.codeWrapLines") private var codeWrapLines = false
-    @AppStorage("sonovo.audioDevice") private var audioDevice = "System Default"
-    @AppStorage("sonovo.sampleRate") private var sampleRate = "48 kHz"
-    @AppStorage("sonovo.followPlayhead") private var followPlayhead = true
-    @AppStorage("sonovo.captionsDefault") private var captionsDefault = true
-    @AppStorage("sonovo.shell") private var shell = "/bin/zsh"
+    @AppStorage("sonovo.audioDevice") private var audioDevice = ""
+    @AppStorage("sonovo.shell") private var shell = ""
     @AppStorage("sonovo.terminalFont") private var terminalFont = "SF Mono 12"
     @AppStorage("sonovo.loginShell") private var loginShell = true
     @AppStorage("sonovo.terminals.tmux") private var terminalTmux = true
+    @State private var outputDevices: [AudioOutputDevice] = []
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.zero) {
@@ -84,6 +80,33 @@ struct SettingsView: View {
         .frame(width: AppTheme.Layout.settingsWidth, height: AppTheme.Layout.settingsHeight)
         .navigationTitle("Settings")
         .preferredColorScheme(preferredColorScheme)
+        .task {
+            outputDevices = AudioOutputDevices.all()
+        }
+        .onChange(of: editorFontSize) { _, _ in
+            postEditorPreferenceChange()
+        }
+        .onChange(of: wrapLines) { _, _ in
+            postEditorPreferenceChange()
+        }
+        .onChange(of: terminalFont) { _, _ in
+            GhosttyAppController.shared.reloadTerminalPreferences()
+        }
+        .onChange(of: shell) { _, _ in
+            GhosttyAppController.shared.reloadTerminalPreferences()
+        }
+        .onChange(of: loginShell) { _, _ in
+            GhosttyAppController.shared.reloadTerminalPreferences()
+        }
+    }
+
+    /// Editors read the size and wrap mode when they build attributes. Tell
+    /// the live ones so an open document updates without reopening.
+    private func postEditorPreferenceChange() {
+        NotificationCenter.default.post(
+            name: .sonovoEditorPreferencesChanged,
+            object: nil
+        )
     }
 
     private var preferredColorScheme: ColorScheme? {
@@ -119,15 +142,11 @@ struct SettingsView: View {
 
             SettingsGroup {
                 SettingsRow {
-                    Toggle("Restore open tabs", isOn: $restoreTabs)
-                    Text("Reopen the tabs and splits from your last session.")
+                    Toggle("Restore open tabs", isOn: $state.restoreTabs)
+                    Text("Reopen the file tabs from your last session.")
                 }
                 SettingsRow {
-                    Toggle("Confirm before closing", isOn: $confirmClose)
-                    Text("Ask before closing a production with unsaved changes.")
-                }
-                SettingsRow {
-                    Toggle("Reopen last production", isOn: $reopenLast)
+                    Toggle("Reopen last production", isOn: $state.reopenLast)
                     Text("Open the most recent production at launch.")
                 }
             }
@@ -277,7 +296,7 @@ struct SettingsView: View {
                     }
                 }
                 SettingsRow {
-                    Toggle("Show breadcrumbs", isOn: $showBreadcrumbs)
+                    Toggle("Show breadcrumbs", isOn: $state.showBreadcrumbs)
                     Text("Show the path to the current asset above the editor.")
                 }
                 SettingsRow {
@@ -336,9 +355,17 @@ struct SettingsView: View {
                         Text("Output device")
                         Spacer()
                         Picker("", selection: $audioDevice) {
-                            Text("System Default").tag("System Default")
-                            Text("Mac Studio Speakers").tag("Mac Studio Speakers")
-                            Text("AirPods").tag("AirPods")
+                            Text("System Default").tag("")
+                            ForEach(outputDevices) { device in
+                                Text(device.name).tag(device.id)
+                            }
+                            if !audioDevice.isEmpty,
+                               !outputDevices.contains(where: {
+                                   $0.id == audioDevice
+                               }) {
+                                Text("Unavailable device")
+                                    .tag(audioDevice)
+                            }
                         }
                         .labelsHidden()
                         .accessibilityLabel("Output device")
@@ -346,24 +373,14 @@ struct SettingsView: View {
                     }
                 }
                 SettingsRow {
-                    HStack {
-                        Text("Sample rate")
-                        Spacer()
-                        Picker("", selection: $sampleRate) {
-                            Text("48 kHz").tag("48 kHz")
-                            Text("44.1 kHz").tag("44.1 kHz")
-                        }
-                        .labelsHidden()
-                        .accessibilityLabel("Sample rate")
-                        .frame(width: AppTheme.Layout.settingsPickerCompactWidth)
-                    }
-                }
-                SettingsRow {
-                    Toggle("Follow playhead", isOn: $followPlayhead)
+                    Toggle("Follow playhead", isOn: $state.followPlayhead)
                     Text("Keep the selected transcript line aligned with playback.")
                 }
                 SettingsRow {
-                    Toggle("Show captions by default", isOn: $captionsDefault)
+                    Toggle(
+                        "Show captions by default",
+                        isOn: $state.showCaptions
+                    )
                     Text("Display the current transcript line over the video stage.")
                 }
             }
@@ -383,6 +400,7 @@ struct SettingsView: View {
                         Text("Shell")
                         Spacer()
                         Picker("", selection: $shell) {
+                            Text("System Default").tag("")
                             Text("zsh").tag("/bin/zsh")
                             Text("bash").tag("/bin/bash")
                             Text("fish").tag("/opt/homebrew/bin/fish")

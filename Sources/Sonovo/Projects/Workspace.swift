@@ -131,7 +131,8 @@ final class Workspace {
             project.isRestoringSelection = true
         }
 
-        if let activePath = store.activePath,
+        if Preferences.reopenLast,
+           let activePath = store.activePath,
            let project = projects.first(where: { $0.id == activePath }) {
             activeProjectID = project.id
             if project.isOffline {
@@ -204,6 +205,16 @@ final class Workspace {
             return
         }
         guard !project.isOffline else { return }
+        guard Preferences.restoreTabs else {
+            // Closing the window without tab restore starts the project on
+            // its default workspace tab rather than a stale file.
+            return
+        }
+        for id in store.openTabs[project.id] ?? [] {
+            if let asset = project.assets.first(where: { $0.id == id }) {
+                project.openAsset(asset)
+            }
+        }
         restoreSelection(project, path: selection)
     }
 
@@ -378,6 +389,7 @@ final class Workspace {
             return
         }
         store.selections[project.id] = project.selectedAssetID
+        store.openTabs[project.id] = project.restorableTabIDs
         if project.id == activeProjectID || project.isDemo {
             store.activePath = project.isDemo ? nil : project.id
         }

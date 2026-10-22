@@ -172,6 +172,7 @@ final class Model3DWorkspace {
         }
         watchTasks.removeValue(forKey: document.id)?.cancel()
         watchers.removeValue(forKey: document.id)?.stop()
+        document.markClosed()
         document.cleanUpTemporaryOutput()
         let sourceURL = document.sourceURL
         documents.removeAll { $0.id == document.id }
@@ -243,6 +244,7 @@ final class Model3DWorkspace {
         conversions.removeAll()
         converter.terminateAll()
         for document in documents {
+            document.markClosed()
             document.cleanUpTemporaryOutput()
         }
         for watcher in watchers.values {

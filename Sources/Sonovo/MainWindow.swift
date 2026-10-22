@@ -40,13 +40,11 @@ struct MainWindow: View {
             "Unsaved Changes",
             isPresented: Binding(
                 get: { state.hasPendingCloseDecision },
-                set: { presented in
-                    if !presented {
-                        state.pendingCloseOwner?.markdown
-                            .dismissCloseAlert()
-                        state.pendingCodeCloseOwner?.code
-                            .dismissCloseAlert()
-                    }
+                set: { _ in
+                    // Every button resolves the decision it was presented
+                    // for. Clearing here would resolve whatever is pending
+                    // after Discard advanced the queue, dropping another
+                    // document's decision.
                 }
             )
         ) {

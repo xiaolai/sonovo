@@ -31,19 +31,22 @@ enum InlineFragmentParser {
         // Definitions are document-wide. Append them so a summary containing
         // `[label][ref]` resolves; the appended lines are beyond the fragment
         // and are filtered out of the result.
-        let definitionText = referenceDefinitions.map { definition -> String in
-            var line = "[\(definition.label)]: "
-                + serializedDestination(definition.destination)
-            if let title = definition.title, !title.isEmpty {
-                line += " \""
-                    + title.replacingOccurrences(of: "\"", with: "\\\"")
-                    + "\""
-            }
-            return line
-        }.joined(separator: "\n")
+        let definitionText = referenceDefinitions
+            .map(ReferenceDefinitionSerializer.line)
+            .joined(separator: "\n")
+        // An unclosed fence, HTML comment, or raw-text element in the
+        // fragment would swallow the appended definitions and turn them into
+        // content. Close it behind the fragment boundary; the synthetic
+        // lines are outside the fragment and are filtered out later. The
+        // blank line keeps any synthetic-only block separate from the last
+        // real block.
+        let closer = definitionText.isEmpty
+            ? nil
+            : DetailsParser.unclosedConstructCloser(in: parsedText)
+        let protected = closer.map { parsedText + "\n\n" + $0 } ?? parsedText
         let combined = definitionText.isEmpty
-            ? parsedText
-            : parsedText + "\n\n" + definitionText
+            ? protected
+            : protected + "\n\n" + definitionText
 
         let map = SourceMap(
             source: combined,
@@ -57,12 +60,24 @@ enum InlineFragmentParser {
             enableAutolinks: true
         )
 
-        var result = flatten(
-            Document(parsing: combined, options: MarkdownParser.parseOptions),
-            mapper: mapper,
-            map: map,
-            fragmentEnd: fragmentEnd
-        )
+        // swift-markdown's converter is recursive. A fragment that exceeds
+        // the nesting limit must stay literal rather than reach it; the empty
+        // result falls through to the existing literal-text fallback.
+        var result: [Inline] = []
+        if !NestingGuard.exceedsLimit(
+            combined,
+            limit: MarkdownLimits.maxParseDepth
+        ) {
+            result = flatten(
+                Document(
+                    parsing: combined,
+                    options: MarkdownParser.parseOptions
+                ),
+                mapper: mapper,
+                map: map,
+                fragmentEnd: fragmentEnd
+            )
+        }
 
         if sentinel {
             // Remove the sentinel in local coordinates first, then map the
@@ -138,10 +153,23 @@ enum InlineFragmentParser {
                     appendBlocks(quote.children)
                 } else if let range = mapper.sourceRange(for: child) {
                     // A block with no inline children (code, raw HTML, a
-                    // thematic break) must still contribute its source.
-                    let raw = map.text(in: range) ?? ""
+                    // thematic break) must still contribute its source. The
+                    // range is clamped to the fragment: an unclosed construct
+                    // was closed synthetically just past this boundary, and
+                    // that closer is not part of the user's text.
+                    let upper = min(range.upperBound, fragmentEnd)
+                    guard upper > range.lowerBound else { continue }
+                    let clamped: SourceRange
+                    if upper == range.upperBound {
+                        clamped = range
+                    } else if let end = map.position(atUTF16Offset: upper) {
+                        clamped = SourceRange(start: range.start, end: end)
+                    } else {
+                        continue
+                    }
+                    let raw = map.text(in: clamped) ?? ""
                     if !raw.isEmpty {
-                        append([.text(raw, range: range)])
+                        append([.text(raw, range: clamped)])
                     }
                 }
             }
@@ -151,20 +179,6 @@ enum InlineFragmentParser {
         return result
     }
 
-    /// Serializes a destination so spaces do not change its meaning.
-    private static func serializedDestination(_ destination: String) -> String {
-        guard destination.rangeOfCharacter(
-            from: .whitespacesAndNewlines
-        ) != nil else {
-            return destination
-        }
-        let escaped = destination
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "<", with: "\\<")
-            .replacingOccurrences(of: ">", with: "\\>")
-        return "<\(escaped)>"
-    }
-
     // MARK: - Sentinel handling
 
     /// Whether the first line would be parsed as a block rather than inline
@@ -172,6 +186,19 @@ enum InlineFragmentParser {
     /// slice cannot start a new block without a blank line.
     private static func startsWithBlockMarker(_ text: String) -> Bool {
         let firstLine = text.prefix(while: { $0 != "\n" })
+        // Four spaces or a tab make an indented code block. A mid-paragraph
+        // slice must stay inline even when it begins with indentation.
+        var indentation = 0
+        for character in firstLine {
+            if character == " " {
+                indentation += 1
+            } else if character == "\t" {
+                indentation += 4
+            } else {
+                break
+            }
+        }
+        if indentation >= 4 { return true }
         let trimmed = firstLine.drop(while: { $0 == " " || $0 == "\t" })
         guard let first = trimmed.first else { return false }
 

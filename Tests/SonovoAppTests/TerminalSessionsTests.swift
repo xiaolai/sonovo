@@ -71,7 +71,7 @@ final class TerminalSessionsTests: XCTestCase {
         )
     }
 
-    func testTmuxTabsUseTheProjectPrefix() {
+    func testTmuxTabsUseTheProjectPrefix() async {
         let prefix = TmuxNaming.prefix(
             projectKey: "/tmp/project",
             projectName: "Project"
@@ -92,6 +92,7 @@ final class TerminalSessionsTests: XCTestCase {
         )
 
         store.addSession()
+        await store.awaitPendingAllocations()
         XCTAssertEqual(
             store.sessions[1].tmuxSessionName,
             prefix + "2"
@@ -127,13 +128,14 @@ final class TerminalSessionsTests: XCTestCase {
         )
 
         store.addSession()
+        await store.awaitPendingAllocations()
         XCTAssertEqual(
             store.sessions.last?.tmuxSessionName,
             prefix + "4"
         )
     }
 
-    func testClosingTmuxTabDetachesAndEndingKills() throws {
+    func testClosingTmuxTabDetachesAndEndingKills() async throws {
         let prefix = TmuxNaming.prefix(
             projectKey: "/tmp/project",
             projectName: "Project"
@@ -150,13 +152,13 @@ final class TerminalSessionsTests: XCTestCase {
         let name = try XCTUnwrap(ending.sessions[0].tmuxSessionName)
         ending.endConfirmation = { _ in true }
         fake.markRunning([name])
-        ending.endSession(ending.sessions[0].id)
+        await ending.endSession(ending.sessions[0].id)
         XCTAssertEqual(fake.killedNames, [name])
         XCTAssertEqual(name, prefix + "1")
         XCTAssertTrue(ending.sessions.isEmpty)
     }
 
-    func testEndFailureKeepsTheTabVisible() {
+    func testEndFailureKeepsTheTabVisible() async {
         let fake = FakeTmux()
         let store = makeTmuxStore(fake: fake, path: "/tmp/project")
         let name = store.sessions[0].tmuxSessionName
@@ -166,7 +168,7 @@ final class TerminalSessionsTests: XCTestCase {
         fake.killSucceeds = false
         store.endConfirmation = { _ in true }
 
-        store.endSession(store.sessions[0].id)
+        await store.endSession(store.sessions[0].id)
 
         XCTAssertEqual(store.sessions.count, 1)
         XCTAssertNotNil(store.lastError)
@@ -174,7 +176,7 @@ final class TerminalSessionsTests: XCTestCase {
         XCTAssertNil(store.lastError)
     }
 
-    func testNewTabAfterClosingAllStillQueriesServer() {
+    func testNewTabAfterClosingAllStillQueriesServer() async {
         let prefix = TmuxNaming.prefix(
             projectKey: "/tmp/project",
             projectName: "Project"
@@ -187,11 +189,24 @@ final class TerminalSessionsTests: XCTestCase {
         fake.markKnown(prefix + "5")
 
         store.addSession()
+        await store.awaitPendingAllocations()
 
         XCTAssertEqual(
             store.sessions[0].tmuxSessionName,
             prefix + "6"
         )
+    }
+
+    func testFailedDiscoveryRefusesNewTab() async {
+        let fake = FakeTmux()
+        let store = makeTmuxStore(fake: fake, path: "/tmp/project")
+        fake.failDiscovery()
+
+        store.addSession()
+        await store.awaitPendingAllocations()
+
+        XCTAssertEqual(store.sessions.count, 1)
+        XCTAssertNotNil(store.lastError)
     }
 
     func testTmuxProbeUpdatesCountAsynchronously() async {
@@ -249,9 +264,16 @@ private final class FakeTmux: TmuxControlling, @unchecked Sendable {
     private var killed: [String] = []
     private var running: Set<String> = []
     var killSucceeds = true
+    private var namesUnavailable = false
 
     init(names: [String] = []) {
         self.known = Set(names)
+    }
+
+    func failDiscovery() {
+        lock.lock()
+        defer { lock.unlock() }
+        namesUnavailable = true
     }
 
     var killedNames: [String] {
@@ -260,9 +282,10 @@ private final class FakeTmux: TmuxControlling, @unchecked Sendable {
         return killed
     }
 
-    func sessionNames(prefix: String) -> [String] {
+    func sessionNames(prefix: String) -> [String]? {
         lock.lock()
         defer { lock.unlock() }
+        guard !namesUnavailable else { return nil }
         return known.filter { $0.hasPrefix(prefix) }
     }
 

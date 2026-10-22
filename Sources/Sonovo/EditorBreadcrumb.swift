@@ -5,7 +5,16 @@ struct EditorBreadcrumb: View {
     let project: Project
 
     @State private var codeSymbols: [CodeSymbol] = []
-    @State private var codeSymbolRevision: UInt64?
+
+    /// Loaded code documents commonly share revision 1. Key the symbol load
+    /// by document identity and language, not revision alone.
+    private struct SymbolTaskKey: Hashable {
+        let documentID: UUID?
+        let revision: UInt64
+        let language: CodeLanguage?
+        let isReady: Bool
+        let tabKind: AssetKind?
+    }
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.xs) {
@@ -45,13 +54,20 @@ struct EditorBreadcrumb: View {
         .padding(.horizontal, AppTheme.Spacing.md)
         .frame(height: AppTheme.Layout.breadcrumbHeight)
         .background(Color.appWindow)
-        .task(id: codeRevision) {
+        .task(id: symbolTaskKey) {
             await loadCodeSymbols()
         }
     }
 
-    private var codeRevision: UInt64 {
-        project.code.selectedDocument?.revision ?? 0
+    private var symbolTaskKey: SymbolTaskKey {
+        let document = project.code.selectedDocument
+        return SymbolTaskKey(
+            documentID: document?.id,
+            revision: document?.revision ?? 0,
+            language: document?.language,
+            isReady: document?.isReady ?? false,
+            tabKind: project.selectedTab?.kind
+        )
     }
 
     private func symbolMenu(_ document: CodeDocument) -> some View {
@@ -87,18 +103,21 @@ struct EditorBreadcrumb: View {
               document.language.supportsOutline,
               document.isReady else {
             codeSymbols = []
-            codeSymbolRevision = nil
             return
         }
+        let documentID = document.id
         let revision = document.revision
         let source = document.source
         let language = document.language
         let symbols = await Task.detached(priority: .utility) {
             CodeSymbolIndex.symbols(in: source, language: language)
         }.value
-        guard document.revision == revision else { return }
+        // A stale task must not publish into another document's menu.
+        guard !Task.isCancelled,
+              project.selectedTab?.kind == .code,
+              project.code.selectedDocument?.id == documentID,
+              document.revision == revision else { return }
         codeSymbols = symbols
-        codeSymbolRevision = revision
     }
 
     /// The breadcrumb trail for the selected asset, workspace document, or

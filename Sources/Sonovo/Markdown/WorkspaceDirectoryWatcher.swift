@@ -24,8 +24,9 @@ final class WorkspaceDirectoryWatcher: @unchecked Sendable {
         stop()
     }
 
-    func start() {
-        guard !active, stream == nil else { return }
+    @discardableResult
+    func start() -> Bool {
+        guard !active, stream == nil else { return active }
 
         var context = FSEventStreamContext(
             version: 0,
@@ -53,17 +54,18 @@ final class WorkspaceDirectoryWatcher: @unchecked Sendable {
                     | kFSEventStreamCreateFlagNoDefer
             )
         ) else {
-            return
+            return false
         }
 
         FSEventStreamSetDispatchQueue(stream, queue)
         guard FSEventStreamStart(stream) else {
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
-            return
+            return false
         }
         self.stream = stream
         active = true
+        return true
     }
 
     func stop() {

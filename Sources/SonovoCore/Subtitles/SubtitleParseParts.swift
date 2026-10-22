@@ -8,6 +8,8 @@ struct SubtitleParseParts {
     var unparsedBlocks: [SubtitleUnparsedBlock] = []
     var assInfo: ASSInfo?
     var hasCueIndexes = false
+    /// The format parser stopped collecting at the cue limit.
+    var truncated = false
     var timestampStyle = SubtitleTimestampStyle(
         decimalSeparator: ".",
         fractionDigits: 3,

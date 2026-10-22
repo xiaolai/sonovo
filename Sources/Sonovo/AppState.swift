@@ -51,7 +51,33 @@ final class AppState {
     var editorMode: EditorMode = .player
     var inspectorVisible = true
     var showTabBar = true
-    var showBreadcrumbs = true
+    var showBreadcrumbs = Preferences.showBreadcrumbs {
+        didSet {
+            UserDefaults.standard.set(
+                showBreadcrumbs,
+                forKey: PreferenceKey.showBreadcrumbs
+            )
+        }
+    }
+
+    // Launch behavior. Settings binds these directly; the consumers are
+    // `Workspace.restore` and `Workspace.recover`.
+    var restoreTabs = Preferences.restoreTabs {
+        didSet {
+            UserDefaults.standard.set(
+                restoreTabs,
+                forKey: PreferenceKey.restoreTabs
+            )
+        }
+    }
+    var reopenLast = Preferences.reopenLast {
+        didSet {
+            UserDefaults.standard.set(
+                reopenLast,
+                forKey: PreferenceKey.reopenLast
+            )
+        }
+    }
 
     var terminalPresentation: TerminalPresentation = .hidden
     var terminalDock: TerminalDock = .automatic
@@ -62,13 +88,30 @@ final class AppState {
     let duration: Double = 12.4
     var volume: Double = 0.8
     var isLooping = false
-    var showCaptions = true
+    var showCaptions = Preferences.captionsDefault {
+        didSet {
+            UserDefaults.standard.set(
+                showCaptions,
+                forKey: PreferenceKey.captionsDefault
+            )
+        }
+    }
+    var followPlayhead = Preferences.followPlayhead {
+        didSet {
+            UserDefaults.standard.set(
+                followPlayhead,
+                forKey: PreferenceKey.followPlayhead
+            )
+            if followPlayhead {
+                selectedTranscriptID = currentTranscript?.id
+            }
+        }
+    }
 
     var selectedTranscriptID: String? = "seg-2"
     var compareSplit: CGFloat = AppTheme.Layout.compareDefaultSplit
     var selectedStillIndex = 3
     var selectedShotIndex = 2
-    var previewQuality = "1080p"
 
     var liveProject: Project { workspace.liveProject }
 
@@ -116,7 +159,6 @@ final class AppState {
         liveProject.terminalSessions
     }
     var openTabs: [EditorTab] { liveProject.openTabs }
-    var selectedTabID: String { liveProject.selectedTabID }
     var selectedAssetID: String? {
         get { liveProject.selectedAssetID }
         set { liveProject.selectedAssetID = newValue }
@@ -341,10 +383,6 @@ final class AppState {
         if !canUseMediaModes {
             editorMode = .player
         }
-    }
-
-    func closeTab(_ id: String) async {
-        await liveProject.closeTab(id)
     }
 
     func selectTranscript(_ id: String) {
@@ -690,7 +728,4 @@ final class AppState {
         project.selectWorkspaceTab(kind)
     }
 
-    func closeAllTabs() async {
-        await liveProject.closeAllTabs()
-    }
 }
