@@ -73,7 +73,8 @@ enum CodeReviewInstruction {
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        var line = "Review \(decision.path) (\(decision.pairSummary)): "
+        var line = "\(decision.reference) — review "
+            + decision.pairSummary + ": "
             + decision.disposition.instructionLabel
         if !note.isEmpty {
             line += " — \(note)"

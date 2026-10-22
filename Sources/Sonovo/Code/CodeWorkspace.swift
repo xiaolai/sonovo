@@ -4,6 +4,14 @@ import Observation
 import SonovoCore
 import UniformTypeIdentifiers
 
+/// The outcome of recording a review decision, so the sheet can say why it
+/// stays open instead of guessing.
+enum CodeReviewSaveOutcome: Equatable, Sendable {
+    case saved
+    case pairChanged
+    case saveFailed(String)
+}
+
 /// Owns the open code documents, their watchers, autosave, close decisions,
 /// and the retained editor controllers.
 ///
@@ -27,6 +35,7 @@ final class CodeWorkspace {
     private(set) var isReviewQueueScanning = false
     private(set) var reviewQueueError: String?
     private var reviewStore: CodeReviewStore?
+    private var reviewStoreRoot: URL?
     private var reviewScanGeneration: UInt64 = 0
     /// Test seam: redirects the ledger to a temporary directory.
     @ObservationIgnored
@@ -116,6 +125,7 @@ final class CodeWorkspace {
         guard workspaceRoot != root else { return }
         workspaceRoot = root
         reviewStore = nil
+        reviewStoreRoot = nil
         reviewQueue = nil
         reviewQueueError = nil
         discoveryTask?.cancel()
@@ -150,8 +160,13 @@ final class CodeWorkspace {
     /// Scans the project against the stored baselines. The first scan
     /// establishes the baseline instead of reporting every file as changed.
     func refreshReviewQueue() async {
-        guard let root = workspaceRoot, let store = ensureReviewStore() else {
+        guard let root = workspaceRoot else {
             reviewQueueError = "Open a folder to review its changes."
+            return
+        }
+        guard let store = await ensureReviewStore(for: root) else {
+            reviewQueueError = "The project changed while the review queue "
+                + "was opening."
             return
         }
         reviewScanGeneration &+= 1
@@ -163,15 +178,15 @@ final class CodeWorkspace {
             }
         }
         reviewQueueError = nil
-        let cursors = store.cursors
-        let decisions = store.decisions
-        let establishesBaseline = store.baselineEstablishedAt == nil
+        let state = await store.state()
+        let retained = await store.retainedHashes()
         let scanTask = Task.detached(priority: .utility) {
             CodeReviewInventory.scan(
                 root: root,
-                cursors: cursors,
-                decisions: decisions,
-                establishesBaseline: establishesBaseline
+                cursors: state.cursors,
+                decisions: state.decisions,
+                retained: retained,
+                establishesBaseline: state.baselineEstablishedAt == nil
             )
         }
         let scan = await withTaskCancellationHandler {
@@ -186,23 +201,36 @@ final class CodeWorkspace {
         }
         if scan.establishedBaseline {
             do {
-                try store.recordBaselines(scan.baselines)
+                try await store.recordBaselines(scan.baselines)
             } catch {
                 reviewQueueError = "The baseline could not be saved: \(error)"
             }
         }
+        // Persisting the baseline awaits; the root or a newer scan may have
+        // taken over in the meantime.
+        guard generation == reviewScanGeneration,
+              !Task.isCancelled,
+              workspaceRoot == root else {
+            return
+        }
         reviewQueue = scan.snapshot
-        if let error = store.lastError {
+        if let error = await store.lastError {
             reviewQueueError = error
+        } else if !scan.coverageComplete {
+            reviewQueueError = "Some folders could not be read; results may "
+                + "be incomplete."
         }
     }
 
-    /// Builds the pair a queue item reviews: the last decided or acknowledged
-    /// content against the current bytes. A new file is compared against an
-    /// empty document.
+    /// Builds the pair a queue item reviews. The basis decides whether the
+    /// pair is the active decision, the last decided version, the baseline, or
+    /// an empty file; a missing blob is unavailable, never replaced.
     func reviewPair(for item: CodeReviewQueueItem) async -> CodeDiffPair? {
         guard item.status != .deleted else { return nil }
-        guard let store = ensureReviewStore() else { return nil }
+        guard let root = workspaceRoot,
+              let store = await ensureReviewStore(for: root) else {
+            return nil
+        }
         let reader = self.reader
         let url = item.url
         let current = await Task.detached(priority: .userInitiated) {
@@ -210,47 +238,83 @@ final class CodeWorkspace {
         }.value
         guard case .data(let data)? = current else { return nil }
         let right = DiskSnapshot(bytes: data)
-        let left: DiskSnapshot
-        let leftLabel: String
-        if let decision = item.decision,
-           decision.rightHash == right.sha256,
-           let leftBytes = store.content(for: decision.leftHash),
-           let rightBytes = store.content(for: decision.rightHash) {
-            // Reopen the pair the decision was made against, so editing the
-            // decision never compares against different bytes.
-            left = DiskSnapshot(bytes: leftBytes)
-            let stored = DiskSnapshot(bytes: rightBytes)
-            guard case .available(let pair) = CodeDiffModel.availability(
-                left: left,
-                right: stored,
+        let basis = CodeReviewInventory.pairBasis(
+            decision: item.decision,
+            baseline: item.baseline,
+            currentHash: right.sha256
+        )
+        switch basis {
+        case .decision(let decision):
+            guard let leftBytes = await store.content(for: decision.leftHash),
+                  let rightBytes = await store.content(
+                      for: decision.rightHash
+                  ) else {
+                return nil
+            }
+            return makePair(
+                left: DiskSnapshot(bytes: leftBytes),
+                right: DiskSnapshot(bytes: rightBytes),
                 leftLabel: decision.leftLabel,
                 rightLabel: decision.rightLabel
+            )
+        case .lastDecided(let decision):
+            if decision.rightHash == right.sha256 {
+                guard let leftBytes = await store.content(
+                    for: decision.leftHash
+                ), let rightBytes = await store.content(
+                    for: decision.rightHash
+                ) else {
+                    return nil
+                }
+                return makePair(
+                    left: DiskSnapshot(bytes: leftBytes),
+                    right: DiskSnapshot(bytes: rightBytes),
+                    leftLabel: decision.leftLabel,
+                    rightLabel: decision.rightLabel
+                )
+            }
+            guard let leftBytes = await store.content(
+                for: decision.rightHash
             ) else {
                 return nil
             }
-            return pair
-        }
-        if let baseline = item.baseline {
-            if let decision = item.decision,
-               let bytes = store.content(for: decision.rightHash) {
-                left = DiskSnapshot(bytes: bytes)
-                leftLabel = "Last decided"
-            } else if baseline.hasContent,
-                      let bytes = store.content(for: baseline.hash) {
-                left = DiskSnapshot(bytes: bytes)
-                leftLabel = "Last reviewed"
-            } else {
+            return makePair(
+                left: DiskSnapshot(bytes: leftBytes),
+                right: right,
+                leftLabel: "Last decided",
+                rightLabel: "Current"
+            )
+        case .baseline(let cursor):
+            guard let leftBytes = await store.content(for: cursor.hash) else {
                 return nil
             }
-        } else {
-            left = DiskSnapshot(bytes: Data())
-            leftLabel = "New file"
+            return makePair(
+                left: DiskSnapshot(bytes: leftBytes),
+                right: right,
+                leftLabel: "Last reviewed",
+                rightLabel: "Current"
+            )
+        case .added:
+            return makePair(
+                left: DiskSnapshot(bytes: Data()),
+                right: right,
+                leftLabel: "New file",
+                rightLabel: "Current"
+            )
         }
+    }
+
+    private func makePair(
+        left: DiskSnapshot,
+        right: DiskSnapshot,
+        leftLabel: String,
+        rightLabel: String
+    ) -> CodeDiffPair? {
         guard case .available(let pair) = CodeDiffModel.availability(
             left: left,
             right: right,
             leftLabel: leftLabel,
-            rightLabel: "Current"
+            rightLabel: rightLabel
         ) else {
             return nil
         }
@@ -263,9 +327,21 @@ final class CodeWorkspace {
     @discardableResult
     func beginQueueReview(_ item: CodeReviewQueueItem) async -> Bool {
         guard let document = open(url: item.url) else { return false }
+        let root = workspaceRoot
+        let generation = document.identityGeneration
+        let identity = document.fileURL
         guard let pair = await reviewPair(for: item) else {
-            lastError = "The previous content is unavailable. Acknowledge "
-                + "this version to start a new baseline."
+            reviewQueueError = "The previous content is unavailable. Set "
+                + "Baseline to start from this version."
+            return false
+        }
+        guard !document.isClosed,
+              workspaceRoot == root,
+              document.identityGeneration == generation,
+              document.fileURL == identity,
+              documents.contains(where: { $0 === document }) else {
+            reviewQueueError = "The file changed identity while the review "
+                + "was opening."
             return false
         }
         let decision = item.decision.flatMap {
@@ -281,10 +357,14 @@ final class CodeWorkspace {
 
     /// Advances the baseline to the current bytes, or forgets a deleted file.
     func acknowledgeQueueItem(_ item: CodeReviewQueueItem) async {
-        guard let store = ensureReviewStore() else { return }
+        guard let root = workspaceRoot,
+              let store = await ensureReviewStore(for: root) else {
+            reviewQueueError = "Open a folder to review its changes."
+            return
+        }
         do {
             if item.status == .deleted {
-                try store.remove(path: item.path)
+                try await store.remove(path: item.path)
             } else {
                 let reader = self.reader
                 let url = item.url
@@ -292,47 +372,104 @@ final class CodeWorkspace {
                     try reader.boundedData(at: url)
                 }.value
                 guard case .data(let data) = bounded else {
-                    lastError = "The file could not be read."
+                    reviewQueueError = "The file could not be read."
                     return
                 }
-                try store.recordBaseline(
+                try await store.recordBaseline(
                     path: item.path,
                     snapshot: DiskSnapshot(bytes: data)
                 )
             }
             await refreshReviewQueue()
         } catch {
-            lastError = "Cannot update the review baseline: \(error)"
+            reviewQueueError = "Cannot update the review baseline: \(error)"
         }
     }
 
-    /// Records a document's decision in the ledger and advances the cursor.
+    /// Records a document's decision in the ledger. The cursor does not move;
+    /// Set Baseline is the only action that advances it.
     @discardableResult
     func recordReview(
         _ decision: CodeReviewDecision,
         in document: CodeDocument
-    ) -> Bool {
-        guard document.recordReview(decision) else { return false }
-        guard let store = ensureReviewStore() else { return true }
+    ) async -> CodeReviewSaveOutcome {
+        guard !document.isClosed,
+              document.relativePath(relativeTo: workspaceRoot)
+                == decision.path else {
+            return .pairChanged
+        }
+        guard document.recordReview(decision) else { return .pairChanged }
+        // The evidence must be the pair the decision was validated against.
+        // Reading it after the awaits below could pair these hashes with
+        // bytes from a newer autosave.
         let pair = document.displayedDiffPair
+        guard let root = workspaceRoot else { return .saved }
+        guard let store = await ensureReviewStore(for: root) else {
+            return .saveFailed(
+                "The project changed before the decision could be saved."
+            )
+        }
         do {
-            try store.record(
+            try await store.record(
                 decision,
                 before: pair?.left.bytes,
                 after: pair?.right.bytes
             )
         } catch {
-            lastError = "The decision was recorded but not saved: \(error)"
+            lastError = "The decision could not be saved: \(error)"
+            return .saveFailed(
+                "The decision could not be saved, so it applies to this "
+                    + "session only."
+            )
         }
-        return true
+        return .saved
     }
 
-    private func ensureReviewStore() -> CodeReviewStore? {
-        if let reviewStore { return reviewStore }
-        guard let root = workspaceRoot else { return nil }
-        let store = reviewStoreFactory?(root) ?? CodeReviewStore(root: root)
-        reviewStore = store
-        return reviewStore
+    /// Clears the in-memory and persisted decision for a document's path.
+    func clearReviewDecision(in document: CodeDocument) async {
+        document.clearReviewDecision()
+        guard let root = workspaceRoot else { return }
+        guard let store = await ensureReviewStore(for: root) else {
+            lastError = "The project changed before the review decision "
+                + "was cleared."
+            return
+        }
+        let path = document.relativePath(relativeTo: workspaceRoot)
+        do {
+            try await store.clearDecisions(path: path)
+        } catch {
+            lastError = "Cannot clear the saved review decision: \(error)"
+        }
+    }
+
+    /// Creates the ledger lazily and loads it on the store actor, so the
+    /// manifest read never runs on the main thread.
+    ///
+    /// The store is published before the load starts: a second caller that
+    /// arrives during the await must share this actor, not create a rival
+    /// writer for the same ledger. If the workspace switched roots while the
+    /// load ran, the displaced store is never returned; the loop retries
+    /// against whatever is installed for the requested root now.
+    private func ensureReviewStore(for root: URL) async -> CodeReviewStore? {
+        for _ in 0..<3 {
+            guard workspaceRoot == root else { return nil }
+            if let reviewStore, reviewStoreRoot == root {
+                return reviewStore
+            }
+            let store = reviewStoreFactory?(root)
+                ?? CodeReviewStore(root: root)
+            reviewStore = store
+            reviewStoreRoot = root
+            await store.load()
+            if workspaceRoot == root, reviewStore === store {
+                return store
+            }
+            if reviewStore === store {
+                reviewStore = nil
+                reviewStoreRoot = nil
+            }
+        }
+        return nil
     }
 
     // MARK: - Documents

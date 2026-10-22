@@ -691,6 +691,9 @@ final class CodeDocument: Identifiable {
         identityGeneration += 1
         isMissingOnDisk = false
         reviewedDiff = nil
+        // A decision belonged to the old identity; the same hashes at a new
+        // path are a different review.
+        reviewDecision = nil
         adoptSave(outcome, revisionAtStart: revisionAtStart)
         refreshReadOnlyPolicy()
         return outcome

@@ -157,6 +157,10 @@ final class CodeReviewTests: XCTestCase {
         XCTAssertTrue(text.contains("Rename the\nvariable"))
 
         let oneLine = CodeReviewInstruction.oneLine(for: decision)
+        XCTAssertTrue(
+            oneLine.hasPrefix("src/a.swift:3:5 — review "),
+            "the one-line payload must lead with the reference"
+        )
         XCTAssertFalse(oneLine.contains("\n"))
         XCTAssertTrue(oneLine.contains("Rename the variable"))
         XCTAssertTrue(oneLine.contains("changes requested"))

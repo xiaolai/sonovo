@@ -68,7 +68,7 @@ struct CodeWorkspaceView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appCanvas)
         .sheet(isPresented: $showReviewQueue) {
-            CodeReviewQueueSheet(workspace: workspace, project: project)
+            CodeReviewQueueSheet(workspace: workspace)
         }
     }
 
@@ -110,6 +110,10 @@ struct CodeViewer: View {
     @State private var showReviewQueue = false
     @State private var reviewDisposition: CodeReviewDisposition = .seen
     @State private var reviewNote = ""
+    @State private var reviewPair: CodeDiffPair?
+    @State private var reviewPath = ""
+    @State private var reviewReference = ""
+    @State private var reviewMessage: String?
     @State private var goToLineText = ""
     @State private var referenceMessage: String?
     @State private var symbols: [CodeSymbol] = []
@@ -231,7 +235,7 @@ struct CodeViewer: View {
             reviewSheet
         }
         .sheet(isPresented: $showReviewQueue) {
-            CodeReviewQueueSheet(workspace: workspace, project: project)
+            CodeReviewQueueSheet(workspace: workspace)
         }
         .task {
             workspace.controller(for: document)
@@ -556,7 +560,11 @@ struct CodeViewer: View {
                 }
                 Spacer(minLength: AppTheme.Spacing.sm)
                 Button("Instruction…") { presentReview() }
-                Button("Clear") { document.clearReviewDecision() }
+                Button("Clear") {
+                    Task {
+                        await workspace.clearReviewDecision(in: document)
+                    }
+                }
             } else {
                 Text("No review decision for this pair.")
                     .font(.system(size: AppTheme.TypeScale.xs))
@@ -576,7 +584,7 @@ struct CodeViewer: View {
             Text("Review This Change")
                 .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
 
-            if let pair = document.displayedDiffPair {
+            if let pair = reviewPair {
                 Text(document.relativePath(relativeTo: project.root))
                     .font(
                         .system(
@@ -598,6 +606,11 @@ struct CodeViewer: View {
                 Text("This diff cannot be reviewed at its current size.")
                     .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
+            }
+            if let message = reviewMessage {
+                Text(message)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(Color(AppTheme.Palette.warning))
             }
 
             Picker("Decision", selection: $reviewDisposition) {
@@ -676,11 +689,17 @@ struct CodeViewer: View {
     }
 
     private var draftDecision: CodeReviewDecision? {
-        document.makeReviewDecision(
-            reviewDisposition,
-            note: reviewNote,
-            path: document.relativePath(relativeTo: project.root),
-            reference: document.reference(relativeTo: project.root)
+        guard let pair = reviewPair else { return nil }
+        return CodeReviewDecision(
+            path: reviewPath,
+            leftLabel: pair.leftLabel,
+            rightLabel: pair.rightLabel,
+            leftHash: pair.left.sha256,
+            rightHash: pair.right.sha256,
+            disposition: reviewDisposition,
+            note: reviewNote.trimmingCharacters(in: .whitespacesAndNewlines),
+            reference: reviewReference,
+            createdAt: Date()
         )
     }
 
@@ -701,7 +720,14 @@ struct CodeViewer: View {
     }
 
     private func presentReview() {
-        if let decision = document.reviewDecision {
+        guard let pair = document.displayedDiffPair else { return }
+        reviewPair = pair
+        reviewPath = document.relativePath(relativeTo: project.root)
+        reviewReference = document.reference(relativeTo: project.root)
+        reviewMessage = nil
+        if let decision = document.reviewDecision,
+           decision.leftHash == pair.left.sha256,
+           decision.rightHash == pair.right.sha256 {
             reviewDisposition = decision.disposition
             reviewNote = decision.note
         } else {
@@ -712,11 +738,18 @@ struct CodeViewer: View {
     }
 
     private func saveReview() {
-        guard let decision = draftDecision,
-              workspace.recordReview(decision, in: document) else {
-            return
+        guard let decision = draftDecision else { return }
+        Task {
+            switch await workspace.recordReview(decision, in: document) {
+            case .saved:
+                showReview = false
+            case .pairChanged:
+                reviewMessage = "The pair changed while this sheet was open. "
+                    + "Reopen Review to see the current pair."
+            case .saveFailed(let message):
+                reviewMessage = message
+            }
         }
-        showReview = false
     }
 
     private func copyReviewInstruction() {
@@ -726,18 +759,16 @@ struct CodeViewer: View {
 
     private func sendReviewOneLine() {
         guard let decision = draftDecision else { return }
-        let outcome = referenceDelivery().deliver(
-            reference: CodeReviewInstruction.oneLine(for: decision),
-            multiline: false
-        )
-        switch outcome {
-        case .sent:
-            referenceMessage = "Sent to the terminal."
-        case .copied:
-            referenceMessage = "Copied to the clipboard."
-        case .rejected:
-            referenceMessage = "Nothing to send."
+        copyToPasteboard(CodeReviewInstruction.text(for: decision))
+        let line = CodeReviewInstruction.oneLine(for: decision)
+        let delivery = referenceDelivery()
+        guard let send = delivery.send,
+              let clean = CodeReferenceDelivery.sanitized(line),
+              send(clean) else {
+            referenceMessage = "Full instruction copied to the clipboard."
+            return
         }
+        referenceMessage = "Sent to the terminal; full instruction copied."
     }
 
     private func refusalCard(_ refusal: CodeRefusal) -> some View {

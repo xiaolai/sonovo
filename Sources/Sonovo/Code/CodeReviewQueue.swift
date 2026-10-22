@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SonovoCore
 
@@ -30,7 +31,20 @@ enum CodeReviewQueueStatus: String, Equatable, Sendable {
     }
 }
 
-/// One changed file, bound to the baseline it is compared against.
+/// Which exact pair a queue item reviews.
+enum CodeReviewPairBasis: Equatable, Sendable {
+    /// The active decision matches both sides of the current pair.
+    case decision(StoredReviewDecision)
+    /// A decision is newer than the baseline but does not cover the current
+    /// bytes; the pair is last decided → current.
+    case lastDecided(StoredReviewDecision)
+    /// The baseline → current pair, with an older or absent decision.
+    case baseline(CodeReviewCursor)
+    /// A newly added file: empty → current.
+    case added
+}
+
+/// One changed file, bound to the exact pair it reviews.
 struct CodeReviewQueueItem: Identifiable, Equatable, Sendable {
     let path: String
     let url: URL
@@ -39,20 +53,17 @@ struct CodeReviewQueueItem: Identifiable, Equatable, Sendable {
     let currentHash: String?
     let baseline: CodeReviewCursor?
     let decision: StoredReviewDecision?
+    /// Whether the store retains every blob needed to build the pair.
+    let canReviewContent: Bool
 
     var id: String { path }
-
-    /// Whether the queue can show the previous bytes for a diff.
-    var canReviewContent: Bool {
-        status != .deleted && (baseline?.hasContent == true || baseline == nil)
-    }
 }
 
-/// One file captured while establishing the first baseline.
+/// One file captured while establishing the first baseline. Only the bytes
+/// retained within the budget are kept; the hash is always available.
 struct CodeReviewBaseline: Equatable, Sendable {
     let path: String
-    let snapshot: DiskSnapshot
-    /// Retained only within the baseline content budget.
+    let hash: String
     let bytes: Data?
 }
 
@@ -62,6 +73,7 @@ struct CodeReviewScan: Equatable, Sendable {
     let coveredFiles: Int
     let unavailableFiles: Int
     let truncated: Bool
+    let coverageComplete: Bool
     let establishedBaseline: Bool
     let scannedAt: Date
 
@@ -71,6 +83,7 @@ struct CodeReviewScan: Equatable, Sendable {
             coveredFiles: coveredFiles,
             unavailableFiles: unavailableFiles,
             truncated: truncated,
+            coverageComplete: coverageComplete,
             establishedBaseline: establishedBaseline,
             scannedAt: scannedAt
         )
@@ -84,6 +97,7 @@ struct CodeReviewQueueSnapshot: Equatable, Sendable {
     let coveredFiles: Int
     let unavailableFiles: Int
     let truncated: Bool
+    let coverageComplete: Bool
     let establishedBaseline: Bool
     let scannedAt: Date
 
@@ -96,15 +110,20 @@ struct CodeReviewQueueSnapshot: Equatable, Sendable {
 ///
 /// Coverage is explicit: code and plain-text files only, hidden files and
 /// ignored directories excluded, symlinks skipped, at most
-/// `CodeLimits.discoveryFiles` entries. The queue says so instead of implying
-/// it sees the whole project.
+/// `CodeLimits.discoveryFiles` entries. Enumeration failures and inaccessible
+/// paths are reported as incomplete coverage, never as deletions.
 enum CodeReviewInventory {
     /// Reads at most 512 KB of any single file into the baseline budget and
     /// 64 MB in total; larger or unlucky files keep a hash without bytes.
     static let baselineFileBudget = 512 * 1024
     static let baselineContentBudget = 64 * 1024 * 1024
 
-    static func files(in root: URL) -> (files: [URL], truncated: Bool) {
+    private static let emptyHash = DiskSnapshot(bytes: Data()).sha256
+
+    static func files(
+        in root: URL
+    ) -> (files: [URL], truncated: Bool, complete: Bool) {
+        var complete = true
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [
@@ -112,9 +131,13 @@ enum CodeReviewInventory {
                 .isDirectoryKey,
                 .isSymbolicLinkKey
             ],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, _ in
+                complete = false
+                return true
+            }
         ) else {
-            return ([], false)
+            return ([], false, false)
         }
         var files: [URL] = []
         var visited = 0
@@ -146,7 +169,79 @@ enum CodeReviewInventory {
             }
             files.append(url.standardizedFileURL)
         }
-        return (files.sorted { $0.path < $1.path }, truncated)
+        return (
+            files.sorted { $0.path < $1.path },
+            truncated,
+            complete
+        )
+    }
+
+    /// The pair a current decision is about, or the pair the queue should
+    /// offer when no single decision covers both sides.
+    static func pairBasis(
+        decision: StoredReviewDecision?,
+        baseline: CodeReviewCursor?,
+        currentHash: String
+    ) -> CodeReviewPairBasis {
+        let activeLeft = baseline?.hash ?? emptyHash
+        if let decision,
+           decision.rightHash == currentHash,
+           decision.leftHash == activeLeft,
+           baseline.map({ decision.createdAt > $0.capturedAt }) ?? true {
+            return .decision(decision)
+        }
+        if let baseline {
+            if let decision,
+               decision.rightHash != baseline.hash,
+               decision.createdAt > baseline.capturedAt {
+                return .lastDecided(decision)
+            }
+            return .baseline(baseline)
+        }
+        if let decision {
+            return .lastDecided(decision)
+        }
+        return .added
+    }
+
+    static func status(
+        for basis: CodeReviewPairBasis,
+        hasDecision: Bool,
+        currentHash: String
+    ) -> CodeReviewQueueStatus {
+        switch basis {
+        case .decision(let decision):
+            return decision.disposition == .seen ? .seen : .changesRequested
+        case .lastDecided(let decision):
+            guard decision.rightHash == currentHash else { return .stale }
+            return decision.disposition == .seen ? .seen : .changesRequested
+        case .baseline:
+            return hasDecision ? .stale : .unreviewed
+        case .added:
+            return .unreviewed
+        }
+    }
+
+    static func hasEvidence(
+        for basis: CodeReviewPairBasis,
+        currentHash: String,
+        retained: Set<String>
+    ) -> Bool {
+        switch basis {
+        case .decision(let decision):
+            return retained.contains(decision.leftHash)
+                && retained.contains(decision.rightHash)
+        case .lastDecided(let decision):
+            if decision.rightHash == currentHash {
+                return retained.contains(decision.leftHash)
+                    && retained.contains(decision.rightHash)
+            }
+            return retained.contains(decision.rightHash)
+        case .baseline(let cursor):
+            return retained.contains(cursor.hash)
+        case .added:
+            return true
+        }
     }
 
     /// Scans the project against the stored cursors. Runs off the main actor;
@@ -155,6 +250,7 @@ enum CodeReviewInventory {
         root: URL,
         cursors: [String: CodeReviewCursor],
         decisions: [StoredReviewDecision],
+        retained: Set<String>,
         establishesBaseline: Bool,
         now: Date = Date()
     ) -> CodeReviewScan {
@@ -162,7 +258,7 @@ enum CodeReviewInventory {
         let rootPath = canonicalRoot.path.hasSuffix("/")
             ? canonicalRoot.path
             : canonicalRoot.path + "/"
-        let (files, truncated) = files(in: canonicalRoot)
+        let (files, truncated, complete) = files(in: canonicalRoot)
         let reader = CodeFileReader()
         var items: [CodeReviewQueueItem] = []
         var baselines: [CodeReviewBaseline] = []
@@ -187,44 +283,49 @@ enum CodeReviewInventory {
             }
             let snapshot = DiskSnapshot(bytes: data)
             if establishesBaseline {
-                var retained: Data?
+                var retainedBytes: Data?
                 if data.count <= baselineFileBudget,
                    retainedBaselineBytes + data.count <= baselineContentBudget {
-                    retained = data
+                    retainedBytes = data
                     retainedBaselineBytes += data.count
                 }
                 baselines.append(
                     CodeReviewBaseline(
                         path: relative,
-                        snapshot: snapshot,
-                        bytes: retained
+                        hash: snapshot.sha256,
+                        bytes: retainedBytes
                     )
                 )
                 continue
             }
+            let cursor = cursors[relative]
             let decision = decisions.last { $0.path == relative }
-            guard let cursor = cursors[relative] else {
-                items.append(
-                    CodeReviewQueueItem(
-                        path: relative,
-                        url: url,
-                        status: .unreviewed,
-                        currentHash: snapshot.sha256,
-                        baseline: nil,
-                        decision: decision
-                    )
-                )
+            let basis = pairBasis(
+                decision: decision,
+                baseline: cursor,
+                currentHash: snapshot.sha256
+            )
+            if case .baseline(let active) = basis,
+               active.hash == snapshot.sha256 {
                 continue
             }
-            guard cursor.hash != snapshot.sha256 else { continue }
             items.append(
                 CodeReviewQueueItem(
                     path: relative,
                     url: url,
-                    status: status(for: decision, currentHash: snapshot.sha256),
+                    status: status(
+                        for: basis,
+                        hasDecision: decision != nil,
+                        currentHash: snapshot.sha256
+                    ),
                     currentHash: snapshot.sha256,
                     baseline: cursor,
-                    decision: decision
+                    decision: decision,
+                    canReviewContent: hasEvidence(
+                        for: basis,
+                        currentHash: snapshot.sha256,
+                        retained: retained
+                    )
                 )
             )
         }
@@ -232,7 +333,9 @@ enum CodeReviewInventory {
         if !establishesBaseline {
             for cursor in cursors.values where !seen.contains(cursor.path) {
                 let url = canonicalRoot.appendingPathComponent(cursor.path)
-                guard !FileManager.default.fileExists(atPath: url.path) else {
+                let decision = decisions.last { $0.path == cursor.path }
+                guard deletionConfirmed(url) else {
+                    unavailable += 1
                     continue
                 }
                 items.append(
@@ -242,7 +345,8 @@ enum CodeReviewInventory {
                         status: .deleted,
                         currentHash: nil,
                         baseline: cursor,
-                        decision: decisions.last { $0.path == cursor.path }
+                        decision: decision,
+                        canReviewContent: false
                     )
                 )
             }
@@ -268,20 +372,23 @@ enum CodeReviewInventory {
             coveredFiles: covered,
             unavailableFiles: unavailable,
             truncated: truncated,
+            coverageComplete: complete,
             establishedBaseline: establishesBaseline,
             scannedAt: now
         )
     }
 
-    private static func status(
-        for decision: StoredReviewDecision?,
-        currentHash: String
-    ) -> CodeReviewQueueStatus {
-        guard let decision else { return .unreviewed }
-        guard decision.rightHash == currentHash else { return .stale }
-        switch decision.disposition {
-        case .seen: return .seen
-        case .changesRequested: return .changesRequested
+    /// True only when the path itself is confirmed absent, not merely
+    /// inaccessible. A deleted parent directory is confirmed absence too; a
+    /// permission failure is not.
+    private static func deletionConfirmed(_ url: URL) -> Bool {
+        let parent = url.deletingLastPathComponent()
+        if access(parent.path, R_OK | X_OK) != 0 {
+            let parentError = errno
+            return parentError == ENOENT || parentError == ENOTDIR
         }
+        guard access(url.path, F_OK) != 0 else { return false }
+        let fileError = errno
+        return fileError == ENOENT || fileError == ENOTDIR
     }
 }

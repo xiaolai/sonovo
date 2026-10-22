@@ -4,7 +4,6 @@ import SwiftUI
 /// baseline, each bound to the version it was compared against.
 struct CodeReviewQueueSheet: View {
     let workspace: CodeWorkspace
-    let project: Project
 
     @Environment(\.dismiss) private var dismiss
     @State private var busyPath: String?
@@ -39,32 +38,31 @@ struct CodeReviewQueueSheet: View {
                     .foregroundStyle(Color(AppTheme.Palette.warning))
             }
 
-            if let queue = workspace.reviewQueue,
-               !queue.establishedBaseline,
-               queue.items.isEmpty {
-                Text("No changes since the last baseline.")
+            if let queue = workspace.reviewQueue {
+                if queue.establishedBaseline {
+                    Text(
+                        "Baseline established for \(queue.coveredFiles) files. "
+                            + "Changes appear here after they differ from it."
+                    )
                     .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
-            } else if let queue = workspace.reviewQueue,
-                      queue.establishedBaseline {
-                Text(
-                    "Baseline established for \(queue.coveredFiles) files. "
-                        + "Changes appear here after they differ from it."
-                )
-                .font(.system(size: AppTheme.TypeScale.sm))
-                .foregroundStyle(.secondary)
-            } else if let queue = workspace.reviewQueue {
-                ScrollView {
-                    LazyVStack(
-                        alignment: .leading,
-                        spacing: AppTheme.Spacing.xs
-                    ) {
-                        ForEach(queue.items) { item in
-                            row(item)
+                } else if queue.items.isEmpty {
+                    Text("No changes since the last baseline.")
+                        .font(.system(size: AppTheme.TypeScale.sm))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(
+                            alignment: .leading,
+                            spacing: AppTheme.Spacing.xs
+                        ) {
+                            ForEach(queue.items) { item in
+                                row(item)
+                            }
                         }
                     }
+                    .frame(height: AppTheme.Code.reviewQueueHeight)
                 }
-                .frame(height: AppTheme.Code.reviewQueueHeight)
             }
 
             HStack {
@@ -141,6 +139,14 @@ struct CodeReviewQueueSheet: View {
                             .lineLimit(1)
                     }
                 }
+                if !item.canReviewContent, item.status != .deleted {
+                    Text(
+                        "Previous content is unavailable. "
+                            + "Set Baseline to continue from this version."
+                    )
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(Color(AppTheme.Palette.warning))
+                }
             }
             Spacer(minLength: AppTheme.Spacing.sm)
             if busyPath == item.path {
@@ -150,9 +156,9 @@ struct CodeReviewQueueSheet: View {
                 Button("Review") {
                     busyPath = item.path
                     Task {
-                        _ = await workspace.beginQueueReview(item)
+                        let opened = await workspace.beginQueueReview(item)
                         busyPath = nil
-                        dismiss()
+                        if opened { dismiss() }
                     }
                 }
                 .disabled(!item.canReviewContent)
