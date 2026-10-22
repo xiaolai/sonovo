@@ -13,6 +13,7 @@ enum AssetKind: String, Hashable, Sendable {
     case archive
     case delivery
     case other
+    case code
 
     var icon: String {
         switch self {
@@ -28,6 +29,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .archive: "archivebox"
         case .delivery: "shippingbox"
         case .other: "questionmark.square.dashed"
+        case .code: "chevron.left.forwardslash.chevron.right"
         }
     }
 
@@ -36,6 +38,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .stills: "photo"
         case .model3d: "cube"
         case .html: "globe"
+        case .code: "chevron.left.forwardslash.chevron.right"
         default: icon
         }
     }

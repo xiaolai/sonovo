@@ -13,13 +13,10 @@ struct DocumentCommands: Commands {
             .keyboardShortcut("s", modifiers: [.command])
             .disabled(!state.canSaveSelectedDocument)
             Button("Save As…") {
-                Task { await state.markdown.saveSelectedAs() }
+                Task { await state.saveSelectedDocumentAs() }
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(
-                state.selectedTab?.kind != .script
-                    || state.terminalPresentation == .full
-            )
+            .disabled(!state.canSaveSelectedDocumentAs)
         }
         SidebarCommands()
         CommandGroup(after: .sidebar) {

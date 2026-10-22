@@ -39,9 +39,14 @@ struct MainWindow: View {
         .alert(
             "Unsaved Changes",
             isPresented: Binding(
-                get: { state.pendingCloseDocument != nil },
+                get: { state.hasPendingCloseDecision },
                 set: { presented in
-                    if !presented { state.pendingCloseOwner?.markdown.dismissCloseAlert() }
+                    if !presented {
+                        state.pendingCloseOwner?.markdown
+                            .dismissCloseAlert()
+                        state.pendingCodeCloseOwner?.code
+                            .dismissCloseAlert()
+                    }
                 }
             )
         ) {

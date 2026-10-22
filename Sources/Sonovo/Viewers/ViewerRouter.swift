@@ -19,7 +19,7 @@ enum ViewerRouter {
 
     static let quickLookExtensions: Set<String> = [
         "docx", "rtf", "odt", "pages", "key", "pptx", "xlsx",
-        "txt", "csv", "tsv", "json", "xml", "fountain", "fdx",
+        "csv", "tsv", "fountain", "fdx",
         "otio", "edl", "fcpxml", "epub", "psd", "psb", "ai", "eps"
     ]
 

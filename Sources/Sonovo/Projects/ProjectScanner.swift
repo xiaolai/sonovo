@@ -26,7 +26,7 @@ struct ProjectScanner: Sendable {
 
     var limits = Limits()
 
-    private static let ignoredDirectories: Set<String> = [
+    static let ignoredDirectories: Set<String> = [
         ".git", ".svn", ".hg", "node_modules", "DerivedData", ".build",
         "Caches", ".cache", ".Trash"
     ]
@@ -43,7 +43,7 @@ struct ProjectScanner: Sendable {
     private static let markdownExtensions: Set<String> = ["md", "markdown"]
     private static let documentExtensions: Set<String> = [
         "pdf", "docx", "rtf", "odt", "pages", "key", "pptx", "xlsx",
-        "csv", "tsv", "txt", "fountain", "fdx", "epub",
+        "csv", "tsv", "fountain", "fdx", "epub",
         "otio", "edl", "fcpxml"
     ]
     private static let audioExtensions: Set<String> = [
@@ -153,7 +153,7 @@ struct ProjectScanner: Sendable {
                 }
                 guard resolvedValues?.isRegularFile == true,
                       let kind = Self.kind(
-                        forExtension: resolved.pathExtension
+                        forFilename: entry.lastPathComponent
                       ) else {
                     continue
                 }
@@ -219,7 +219,20 @@ struct ProjectScanner: Sendable {
         if webExtensions.contains(ext) { return .html }
         if archiveExtensions.contains(ext) { return .archive }
         if documentExtensions.contains(ext) { return .document }
+        if CodeLanguage.isCodeExtension(ext) { return .code }
         return nil
+    }
+
+    /// Classification for one visible filename. Special names such as
+    /// `Makefile` and `Dockerfile` are code without an extension.
+    static func kind(forFilename name: String) -> AssetKind? {
+        if CodeLanguage.language(forFilename: name) != nil {
+            // The Markdown, subtitle, model, and web families keep their own
+            // dedicated viewers; `CodeLanguage` never claims those
+            // extensions.
+            return .code
+        }
+        return kind(forExtension: (name as NSString).pathExtension)
     }
 
     static func groups(from assets: [ProjectAsset]) -> [ProjectAssetGroup] {

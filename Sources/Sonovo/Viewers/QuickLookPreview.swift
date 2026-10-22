@@ -10,8 +10,11 @@ enum QuickLookSupport {
     static func canPreview(_ url: URL) async -> Bool {
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
-            size: CGSize(width: 512, height: 512),
-            scale: 2,
+            size: CGSize(
+                width: AppTheme.Size.previewProbe,
+                height: AppTheme.Size.previewProbe
+            ),
+            scale: AppTheme.Size.previewProbeScale,
             representationTypes: .all
         )
         let gate = PreviewGate()

@@ -70,6 +70,11 @@ public struct SaveRequest: Sendable {
     public let data: Data
     public let mode: SaveMode
     public let hooks: SaveHooks?
+    /// The largest existing destination this save may read and displace.
+    /// `nil` keeps the historic unbounded read. An unconditional overwrite
+    /// (no expected snapshot) sets this so a destination that grew past the
+    /// caller's cap is refused instead of allocated.
+    public let maximumReplacedBytes: Int?
 
     public init(
         documentID: UUID,
@@ -79,7 +84,8 @@ public struct SaveRequest: Sendable {
         expectedDisk: DiskSnapshot?,
         data: Data,
         mode: SaveMode,
-        hooks: SaveHooks? = nil
+        hooks: SaveHooks? = nil,
+        maximumReplacedBytes: Int? = nil
     ) {
         self.documentID = documentID
         self.identityGeneration = identityGeneration
@@ -89,6 +95,7 @@ public struct SaveRequest: Sendable {
         self.data = data
         self.mode = mode
         self.hooks = hooks
+        self.maximumReplacedBytes = maximumReplacedBytes
     }
 }
 
@@ -230,6 +237,58 @@ public struct MarkdownFileStore: Sendable {
         }
     }
 
+    /// The read bound for the pre-swap destination. A compare-and-swap
+    /// request can be bounded by its expected size because a larger file
+    /// cannot match — the mismatched read ends in `diskChanged` either way.
+    /// An unconditional overwrite is bounded only by its explicit maximum.
+    private func preflightLimit(for request: SaveRequest) -> Int? {
+        if let maximum = request.maximumReplacedBytes {
+            return max(request.expectedDisk?.byteCount ?? 0, maximum)
+        }
+        return request.expectedDisk?.byteCount
+    }
+
+    /// Reads a file with a hard allocation bound. Returns nil when the file
+    /// is larger than `limit`; never allocates past `limit + 1`.
+    private func readBoundedFile(at url: URL, limit: Int) throws -> Data? {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var data = Data()
+        let cap = limit + 1
+        while data.count < cap {
+            let chunk = try handle.read(
+                upToCount: min(1 << 18, cap - data.count)
+            )
+            guard let chunk, !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        return data.count <= limit ? data : nil
+    }
+
+    /// Reads the existing destination within the bound this request can
+    /// justify. A compare-and-swap request is bounded by its expected
+    /// snapshot — a file that grew past it cannot match, so `diskChanged` is
+    /// the correct result — and an unconditional overwrite is bounded by
+    /// `maximumReplacedBytes`, beyond which the save refuses rather than
+    /// allocate an arbitrary file.
+    private func readPreviousBytes(for request: SaveRequest) throws -> Data {
+        let destination = request.destination
+        guard let limit = preflightLimit(for: request) else {
+            return try Data(contentsOf: destination)
+        }
+        guard let data = try readBoundedFile(at: destination, limit: limit)
+        else {
+            if request.expectedDisk != nil {
+                throw SaveError.diskChanged(.none)
+            }
+            throw SaveError.writeFailed(
+                "The destination is larger than the "
+                    + "\(limit)-byte replace limit."
+            )
+        }
+        return data
+    }
+
     /// Validates the compare-and-swap precondition and creates the two
     /// replacement files. Every replacement strategy works from this state.
     private func prepare(_ request: SaveRequest) throws -> SaveWorkspace {
@@ -237,7 +296,7 @@ public struct MarkdownFileStore: Sendable {
         let fileManager = FileManager.default
         let exists = fileManager.fileExists(atPath: destination.path)
         let previousBytes: Data? = exists
-            ? try Data(contentsOf: destination)
+            ? try readPreviousBytes(for: request)
             : nil
 
         if let expected = request.expectedDisk {
@@ -391,7 +450,21 @@ public struct MarkdownFileStore: Sendable {
 
         let displaced: Data
         do {
-            displaced = try Data(contentsOf: workspace.temporary)
+            if let limit = request.maximumReplacedBytes {
+                guard let data = try readBoundedFile(
+                    at: workspace.temporary,
+                    limit: limit
+                ) else {
+                    // The file grew past the save's bound after the swap.
+                    // The temporary file is now the only copy of the
+                    // external bytes; keep it and report the recovery path.
+                    workspace.keepTemporary = true
+                    throw SaveError.recoveryRequired(workspace.temporary.path)
+                }
+                displaced = data
+            } else {
+                displaced = try Data(contentsOf: workspace.temporary)
+            }
         } catch {
             // The temporary file may be the only copy of an external edit.
             // Keep it and report its recovery path.
@@ -474,10 +547,29 @@ public struct MarkdownFileStore: Sendable {
 
         // Re-read immediately before replacing: this path cannot
         // compare-and-swap, so an edit that arrived after the initial read
-        // must be detected and preserved now.
-        let latest: Data?
+        // must be detected and preserved now. The same bound applies, so a
+        // late growth cannot allocate without limit.
+        var latest: Data?
         do {
-            latest = try Data(contentsOf: workspace.destination)
+            if let limit = request.maximumReplacedBytes {
+                latest = try readBoundedFile(
+                    at: workspace.destination,
+                    limit: limit
+                )
+                if latest == nil, request.expectedDisk != nil {
+                    throw SaveError.diskChanged(.none)
+                }
+                if latest == nil {
+                    throw SaveError.writeFailed(
+                        "The destination is larger than the "
+                            + "\(limit)-byte replace limit."
+                    )
+                }
+            } else {
+                latest = try Data(contentsOf: workspace.destination)
+            }
+        } catch let error as SaveError {
+            throw error
         } catch {
             latest = nil
         }
@@ -574,7 +666,12 @@ public struct MarkdownFileStore: Sendable {
         }
 
         // `restoreURL` now holds what the destination held at the swap.
-        guard let swappedOut = try? Data(contentsOf: restoreURL) else {
+        // Bounded by this save's own data: a larger file cannot be our own
+        // bytes, and it is preserved rather than read without limit.
+        guard let swappedOut = try? readBoundedFile(
+            at: restoreURL,
+            limit: requestData.count
+        ) else {
             // It cannot be inspected, so it must not be deleted: it may be
             // the only copy of a newer external version.
             return restoreURL
@@ -593,14 +690,18 @@ public struct MarkdownFileStore: Sendable {
         }
     }
 
-    /// Confirms the destination holds the bytes this save wrote.
+    /// Confirms the destination holds the bytes this save wrote. Bounded by
+    /// the expected size: a larger file cannot match.
     private func verify(
         _ destination: URL,
         holds expected: Data,
         artifacts: SaveArtifacts
     ) throws {
-        guard let written = try? Data(contentsOf: destination),
-              written == expected else {
+        let written = try? readBoundedFile(
+            at: destination,
+            limit: expected.count
+        )
+        guard let written, written == expected else {
             throw SaveError.verificationFailed(artifacts)
         }
     }

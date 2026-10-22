@@ -6,7 +6,7 @@ enum SubtitleCueMapStyle {
     case overlay
 
     var palette: [Color] {
-        [.blue, .teal, .indigo, .purple, .pink, .orange, .green]
+        AppTheme.Palette.cueTracks
     }
 
     func color(forOrdinal ordinal: Int) -> Color {

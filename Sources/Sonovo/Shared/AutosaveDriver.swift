@@ -6,7 +6,7 @@ import SonovoCore
 @MainActor
 protocol Autosaveable: AnyObject {
     var id: UUID { get }
-    var conflict: ExternalConflict? { get }
+    var hasUnresolvedConflict: Bool { get }
     var isDirty: Bool { get }
     func autosaveDelay(now: Date) -> TimeInterval?
     /// A no-argument save. The documents' own `save` takes defaulted
@@ -16,6 +16,8 @@ protocol Autosaveable: AnyObject {
 }
 
 extension MarkdownDocument: Autosaveable {
+    var hasUnresolvedConflict: Bool { conflict != nil }
+
     func autosave() async throws {
         _ = try await save()
     }
@@ -26,6 +28,8 @@ extension MarkdownDocument: Autosaveable {
 }
 
 extension SubtitleDocument: Autosaveable {
+    var hasUnresolvedConflict: Bool { conflict != nil }
+
     func autosave() async throws {
         _ = try await save()
     }
@@ -92,7 +96,7 @@ final class AutosaveDriver<Document: Autosaveable> {
         }
         for document in due {
             // A conflict must never be overwritten by autosave.
-            guard document.conflict == nil else { continue }
+            guard !document.hasUnresolvedConflict else { continue }
             // The document may have been closed while an earlier await in
             // this batch was running.
             guard documents().contains(where: { $0.id == document.id }) else {

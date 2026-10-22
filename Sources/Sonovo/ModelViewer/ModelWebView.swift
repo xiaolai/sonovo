@@ -103,7 +103,7 @@ struct ModelWebView: NSViewRepresentable {
         webView.navigationDelegate = coordinator
         webView.uiDelegate = coordinator
         webView.allowsMagnification = false
-        webView.underPageBackgroundColor = .black
+        webView.underPageBackgroundColor = AppTheme.AppKitColor.mediaCanvas
         webView.isInspectable = isDebugBuild
         coordinator.attach(webView)
 

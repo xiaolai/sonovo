@@ -41,6 +41,13 @@ final class MarkdownWorkspace {
     /// A Save As changed a document's file identity. Tabs naming the old
     /// path must follow it rather than keep pointing at a stale file.
     var onDocumentMoved: ((URL, URL) -> Void)?
+    /// Whether another workspace of the project holds a Save As reservation.
+    var isDestinationReserved: ((String) -> Bool)?
+    /// Whether another workspace already owns this path.
+    var isPathOwnedElsewhere: ((String) -> Bool)?
+    /// Reserves a destination across every workspace of the project.
+    var reserveSharedDestination: ((String, UUID) -> Bool)?
+    var releaseSharedDestination: ((String, UUID) -> Void)?
 
     func dismissError() {
         lastError = nil
@@ -140,10 +147,15 @@ final class MarkdownWorkspace {
             setSelectedDocument(existing)
             return existing
         }
-        guard !reservedDestinations.contains(key) else {
+        guard !reservedDestinations.contains(key),
+              isDestinationReserved?(key) != true else {
             // A Save As is about to write this path; opening it now would
             // create a second model that the completed save cannot see.
             lastError = "That file is being saved in another tab."
+            return nil
+        }
+        guard isPathOwnedElsewhere?(key) != true else {
+            lastError = "That file is already open in another tab."
             return nil
         }
 
@@ -313,7 +325,7 @@ final class MarkdownWorkspace {
         ) else {
             return false
         }
-        defer { releaseDestination(reservation) }
+        defer { releaseDestination(reservation, owner: document.id) }
         let previousURL = document.fileURL
         do {
             try await document.saveAs(to: target)
@@ -359,7 +371,8 @@ final class MarkdownWorkspace {
         let key = MarkdownSecurity.canonical(
             url.standardizedFileURL
         ).path
-        guard !reservedDestinations.contains(key) else {
+        guard !reservedDestinations.contains(key),
+              isDestinationReserved?(key) != true else {
             lastError = "That file is already being saved."
             return nil
         }
@@ -376,12 +389,17 @@ final class MarkdownWorkspace {
             lastError = "That file is already open in another tab."
             return nil
         }
+        guard reserveSharedDestination?(key, document.id) ?? true else {
+            lastError = "That file is being saved in another tab."
+            return nil
+        }
         reservedDestinations.insert(key)
         return key
     }
 
-    private func releaseDestination(_ key: String) {
+    private func releaseDestination(_ key: String, owner: UUID) {
         reservedDestinations.remove(key)
+        releaseSharedDestination?(key, owner)
     }
 
     func saveSelectedAs() async {

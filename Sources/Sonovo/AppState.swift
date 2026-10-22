@@ -111,6 +111,7 @@ final class AppState {
     var markdown: MarkdownWorkspace { liveProject.markdown }
     var subtitles: SubtitleWorkspace { liveProject.subtitles }
     var models: Model3DWorkspace { liveProject.models }
+    var code: CodeWorkspace { liveProject.code }
     var terminalSessions: TerminalSessionsStore {
         liveProject.terminalSessions
     }
@@ -413,6 +414,8 @@ final class AppState {
             return true
         case .subtitle:
             return subtitles.selectedDocument != nil
+        case .code:
+            return code.selectedDocument?.canAttemptSave == true
         default:
             return false
         }
@@ -424,6 +427,31 @@ final class AppState {
             await markdown.saveSelected()
         case .subtitle:
             await subtitles.saveSelected()
+        case .code:
+            await code.saveSelected()
+        default:
+            break
+        }
+    }
+
+    var canSaveSelectedDocumentAs: Bool {
+        guard terminalPresentation != .full else { return false }
+        switch selectedTab?.kind {
+        case .script:
+            return true
+        case .code:
+            return code.selectedDocument != nil
+        default:
+            return false
+        }
+    }
+
+    func saveSelectedDocumentAs() async {
+        switch selectedTab?.kind {
+        case .script:
+            await markdown.saveSelectedAs()
+        case .code:
+            await code.saveAsSelected()
         default:
             break
         }
@@ -463,6 +491,17 @@ final class AppState {
                         return false
                     }
                 }
+                if project.code.hasDirtyDocuments {
+                    let saved = await project.code.flushAllForTermination()
+                    guard saved else {
+                        activateProject(project)
+                        if let document = project.code.pendingClose
+                            ?? project.code.selectedDocument {
+                            revealCodeDocument(document)
+                        }
+                        return false
+                    }
+                }
             }
             if !workspace.hasDirtyDocuments {
                 return true
@@ -482,26 +521,56 @@ final class AppState {
         pendingCloseOwner?.markdown.pendingClose
     }
 
+    var pendingCodeCloseOwner: Project? {
+        workspace.allProjects.first { $0.code.pendingClose != nil }
+    }
+
+    var pendingCodeCloseDocument: CodeDocument? {
+        pendingCodeCloseOwner?.code.pendingClose
+    }
+
+    var hasPendingCloseDecision: Bool {
+        pendingCloseDocument != nil || pendingCodeCloseDocument != nil
+    }
+
     func savePendingClose() {
-        guard let owner = pendingCloseOwner,
-              let document = owner.markdown.pendingClose else { return }
-        revealMarkdownDocument(document)
-        Task { await owner.markdown.saveAndClose(document) }
+        if let owner = pendingCloseOwner,
+           let document = owner.markdown.pendingClose {
+            revealMarkdownDocument(document)
+            Task { await owner.markdown.saveAndClose(document) }
+            return
+        }
+        if let owner = pendingCodeCloseOwner,
+           let document = owner.code.pendingClose {
+            revealCodeDocument(document)
+            Task { await owner.code.saveAndClose(document) }
+        }
     }
 
     func discardPendingClose() {
-        guard let owner = pendingCloseOwner,
-              let document = owner.markdown.pendingClose else { return }
-        owner.markdown.discardAndClose(document)
+        if let owner = pendingCloseOwner,
+           let document = owner.markdown.pendingClose {
+            owner.markdown.discardAndClose(document)
+            return
+        }
+        if let owner = pendingCodeCloseOwner,
+           let document = owner.code.pendingClose {
+            owner.code.discardAndClose(document)
+        }
     }
 
     func cancelPendingClose() {
-        guard let owner = pendingCloseOwner else { return }
-        owner.markdown.cancelPendingClose()
-        // A bulk close that stopped at this decision stays stopped; its
-        // remaining tabs must not close later when this document is closed
-        // for some other reason.
-        owner.cancelBulkClose()
+        if let owner = pendingCloseOwner {
+            owner.markdown.cancelPendingClose()
+            // A bulk close that stopped at this decision stays stopped; its
+            // remaining tabs must not close later when this document is
+            // closed for some other reason.
+            owner.cancelBulkClose()
+        }
+        if let owner = pendingCodeCloseOwner {
+            owner.code.cancelPendingClose()
+            owner.cancelBulkClose()
+        }
     }
 
     var hasDirtyDocuments: Bool {
@@ -525,6 +594,41 @@ final class AppState {
         ) { project in
             project.markdown.select(document)
         }
+    }
+
+    /// Brings a code document to the front for the same reason.
+    func revealCodeDocument(_ document: CodeDocument) {
+        let owner = workspace.allProjects.first { project in
+            project.code.documents.contains { $0 === document }
+        }
+        revealDocument(
+            kind: .code,
+            url: document.fileURL,
+            owner: owner
+        ) { project in
+            project.code.select(document)
+        }
+    }
+
+    /// The production sink for a code reference. The active project and the
+    /// selected terminal session are captured synchronously; the sink never
+    /// creates a session.
+    func codeReferenceDelivery(for project: Project) -> CodeReferenceDelivery {
+        var send: ((String) -> Bool)?
+        if terminalPresentation != .hidden,
+           project === liveProject,
+           let session = project.terminalSessions.selectedSession {
+            send = { text in
+                session.view.insertLiteral(text)
+            }
+        }
+        return CodeReferenceDelivery(
+            send: send,
+            copy: { text in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        )
     }
 
     /// The shared path for revealing a document: leave full-screen terminal,

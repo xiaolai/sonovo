@@ -67,7 +67,14 @@ struct ProjectEditorRoot: View {
         .environment(\.projectIsVisible, context.isVisible)
         .environment(\.colorScheme, context.colorScheme)
         .environment(\.displayScale, context.displayScale)
+        .onAppear {
+            project.code.setProjectVisible(context.isVisible)
+        }
         .onChange(of: context.isVisible) { _, visible in
+            // External-change policy follows the editor's actual visibility:
+            // an inactive project and one hidden by the full-screen terminal
+            // both advance only the disk until the user reviews.
+            project.code.setProjectVisible(visible)
             guard !visible else { return }
             // Hidden media must be silent, including subtitle media owned by
             // the workspace and the demo transport.

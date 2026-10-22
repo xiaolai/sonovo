@@ -638,6 +638,19 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         }
     }
 
+    /// Writes literal text into the session without an input event. Used by
+    /// the code viewer to deliver a one-line reference; it never appends
+    /// Enter, so the text lands at the prompt for the user to submit.
+    func insertLiteral(_ text: String) -> Bool {
+        guard let surface else { return false }
+        let length = text.utf8CString.count
+        guard length > 1 else { return false }
+        text.withCString { pointer in
+            GhosttyFFI.surfaceText(surface, text: pointer, len: UInt(length - 1))
+        }
+        return true
+    }
+
     override func doCommand(by selector: Selector) {
         // The key event is forwarded after interpretKeyEvents; swallowing the
         // selector prevents NSBeep for terminal keys AppKit does not know.

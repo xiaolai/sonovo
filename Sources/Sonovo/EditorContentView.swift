@@ -38,6 +38,8 @@ struct EditorContentView: View {
             HTMLPreviewView(state: state)
         case .delivery:
             DeliveryView(state: state, project: project)
+        case .code:
+            EmptyEditorView()
         case .document, .image, .archive, .other:
             EmptyEditorView()
         }
@@ -52,6 +54,8 @@ struct EditorContentView: View {
             SubtitleWorkspaceView(project: project)
         case .model3d:
             Model3DWorkspaceView(project: project)
+        case .code:
+            CodeWorkspaceView(workspace: project.code, project: project)
         case .audio, .video:
             if let asset = project.selectedAsset {
                 MediaAssetView(asset: asset)

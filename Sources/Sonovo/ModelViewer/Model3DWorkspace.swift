@@ -26,6 +26,10 @@ final class Model3DWorkspace {
     /// Fires after a document is removed. Without it, closing through the
     /// application menu leaves an asset tab that reopens the model.
     var onDocumentClosed: ((URL) -> Void)?
+    /// Whether a Save As in another workspace is still writing this path.
+    var isDestinationReserved: ((String) -> Bool)?
+    /// Whether another workspace already owns this path.
+    var isPathOwnedElsewhere: ((String) -> Bool)?
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -74,6 +78,14 @@ final class Model3DWorkspace {
         }) {
             select(existing)
             return existing
+        }
+        guard isDestinationReserved?(target.path) != true else {
+            lastError = "That file is being saved in another tab."
+            return nil
+        }
+        guard isPathOwnedElsewhere?(target.path) != true else {
+            lastError = "That file is already open in another tab."
+            return nil
         }
 
         var isDirectory: ObjCBool = false

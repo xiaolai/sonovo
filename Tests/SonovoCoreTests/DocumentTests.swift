@@ -126,9 +126,118 @@ struct FileStoreTests {
         #expect(try Data(contentsOf: url) == Data("external".utf8))
     }
 
-    @Test("A successful swap verifies the target and keeps artifacts")
-    func swapArtifacts() throws {
+    @Test("An unconditional overwrite refuses a destination past its limit")
+    func boundedOverwrite() throws {
         let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("big.md")
+        let original = Data(repeating: 0x61, count: 2_048)
+        try original.write(to: url)
+
+        let request = SaveRequest(
+            documentID: UUID(),
+            identityGeneration: 0,
+            sourceRevision: 1,
+            destination: url,
+            expectedDisk: nil,
+            data: Data("new".utf8),
+            mode: .explicitOverwrite,
+            maximumReplacedBytes: 1_024
+        )
+        #expect(throws: SaveError.self) {
+            _ = try MarkdownFileStore().save(request)
+        }
+        #expect(try Data(contentsOf: url) == original)
+    }
+
+    @Test("A grown destination is a conflict without an unbounded read")
+    func boundedCompare() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data("one".utf8).write(to: url)
+        let snapshot = try #require(try MarkdownFileStore().diskSnapshot(at: url))
+        let grown = Data(repeating: 0x61, count: 2_048)
+        try grown.write(to: url)
+
+        let request = SaveRequest(
+            documentID: UUID(),
+            identityGeneration: 0,
+            sourceRevision: 1,
+            destination: url,
+            expectedDisk: snapshot,
+            data: Data("two".utf8),
+            mode: .automatic,
+            maximumReplacedBytes: 1_024
+        )
+        #expect(throws: SaveError.self) {
+            _ = try MarkdownFileStore().save(request)
+        }
+        #expect(try Data(contentsOf: url) == grown)
+    }
+
+    @Test("A late growth is refused on the no-swap path")
+    func lateGrowthWithoutSwapIsBounded() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data().write(to: url)
+        let store = MarkdownFileStore(
+            options: FileStoreOptions(supportsAtomicSwap: false)
+        )
+        let request = SaveRequest(
+            documentID: UUID(),
+            identityGeneration: 0,
+            sourceRevision: 1,
+            destination: url,
+            expectedDisk: nil,
+            data: Data("new".utf8),
+            mode: .explicitOverwrite,
+            hooks: SaveHooks(beforeRename: { target in
+                try? Data(repeating: 0x61, count: 2_048).write(to: target)
+            }),
+            maximumReplacedBytes: 1_024
+        )
+        #expect(throws: SaveError.self) {
+            _ = try store.save(request)
+        }
+        #expect(try Data(contentsOf: url).count == 2_048)
+    }
+
+    @Test("A displaced file above the save limit is kept for recovery")
+    func lateGrowthAcrossASwapIsKept() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data().write(to: url)
+        let store = MarkdownFileStore()
+        let request = SaveRequest(
+            documentID: UUID(),
+            identityGeneration: 0,
+            sourceRevision: 1,
+            destination: url,
+            expectedDisk: nil,
+            data: Data("new".utf8),
+            mode: .explicitOverwrite,
+            hooks: SaveHooks(beforeRename: { target in
+                try? Data(repeating: 0x61, count: 2_048).write(to: target)
+            }),
+            maximumReplacedBytes: 1_024
+        )
+        do {
+            _ = try store.save(request)
+            Issue.record("a displaced file above the limit needs recovery")
+        } catch let error as SaveError {
+            guard case .recoveryRequired(let path) = error else {
+                Issue.record("expected recoveryRequired, got \(error)")
+                return
+            }
+            #expect(try Data(contentsOf: URL(fileURLWithPath: path)).count == 2_048)
+        }
+    }
+
+    @Test("A successful swap verifies the target and keeps artifacts")
+    func swapArtifacts() throws {        let directory = try temporaryDirectory()
         defer { cleanup(directory) }
         let url = directory.appendingPathComponent("doc.md")
         try Data("old".utf8).write(to: url)

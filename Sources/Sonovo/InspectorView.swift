@@ -181,6 +181,47 @@ struct InspectorView: View {
             )
             MetadataRow(label: "Path", value: asset.relativePath)
         }
+
+        if asset.kind == .code,
+           let document = state.code.selectedDocument,
+           MarkdownSecurity.canonical(document.fileURL)
+            == MarkdownSecurity.canonical(asset.url) {
+            InspectorSection("Code") {
+                MetadataRow(
+                    label: "Language",
+                    value: document.language.displayName
+                )
+                MetadataRow(
+                    label: "Lines",
+                    value: "\(document.source.components(separatedBy: "\n").count)"
+                )
+                MetadataRow(
+                    label: "Encoding",
+                    value: document.hasBOM ? "UTF-8 BOM" : "UTF-8"
+                )
+                MetadataRow(
+                    label: "Line endings",
+                    value: document.lineEnding == .crlf ? "CRLF" : "LF"
+                )
+                MetadataRow(
+                    label: "State",
+                    value: codeStateLabel(document)
+                )
+            }
+        }
+    }
+
+    private func codeStateLabel(_ document: CodeDocument) -> String {
+        if let reason = document.readOnlyReason {
+            return reason.explanation
+        }
+        if document.isDirty {
+            return "Unsaved changes"
+        }
+        if document.pendingReview {
+            return "Changed on disk"
+        }
+        return "Ready"
     }
 
     private var noSelection: some View {
@@ -331,7 +372,7 @@ struct InspectorView: View {
                 MetadataItem(label: "Codec", value: "H.264"),
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
-        case .document, .image, .archive, .other:
+        case .document, .image, .archive, .other, .code:
             []
         }
     }
@@ -406,7 +447,7 @@ struct InspectorView: View {
                 MetadataItem(label: "Preset", value: "1080p · H.264"),
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
-        case .document, .image, .archive, .other:
+        case .document, .image, .archive, .other, .code:
             []
         }
     }

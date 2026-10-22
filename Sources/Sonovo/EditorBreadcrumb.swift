@@ -4,6 +4,9 @@ struct EditorBreadcrumb: View {
     let state: AppState
     let project: Project
 
+    @State private var codeSymbols: [CodeSymbol] = []
+    @State private var codeSymbolRevision: UInt64?
+
     var body: some View {
         HStack(spacing: AppTheme.Spacing.xs) {
             if let content {
@@ -22,6 +25,11 @@ struct EditorBreadcrumb: View {
                     .fontWeight(.medium)
                     .lineLimit(1)
 
+                if project.selectedTab?.kind == .code,
+                   let document = project.code.selectedDocument {
+                    symbolMenu(document)
+                }
+
                 Spacer(minLength: AppTheme.Spacing.sm)
 
                 Text(content.detail)
@@ -37,6 +45,60 @@ struct EditorBreadcrumb: View {
         .padding(.horizontal, AppTheme.Spacing.md)
         .frame(height: AppTheme.Layout.breadcrumbHeight)
         .background(Color.appWindow)
+        .task(id: codeRevision) {
+            await loadCodeSymbols()
+        }
+    }
+
+    private var codeRevision: UInt64 {
+        project.code.selectedDocument?.revision ?? 0
+    }
+
+    private func symbolMenu(_ document: CodeDocument) -> some View {
+        Menu {
+            if codeSymbols.isEmpty {
+                Text("No Symbols")
+            } else {
+                ForEach(codeSymbols) { symbol in
+                    Button {
+                        project.code.controller(for: document)
+                            .goToLine(symbol.line)
+                    } label: {
+                        Text(
+                            "\(symbol.kind.label)  \(symbol.name)"
+                        )
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "list.bullet.indent")
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Go to Symbol")
+        .accessibilityLabel("Go to Symbol")
+    }
+
+    private func loadCodeSymbols() async {
+        guard project.selectedTab?.kind == .code,
+              let document = project.code.selectedDocument,
+              document.language.supportsOutline,
+              document.isReady else {
+            codeSymbols = []
+            codeSymbolRevision = nil
+            return
+        }
+        let revision = document.revision
+        let source = document.source
+        let language = document.language
+        let symbols = await Task.detached(priority: .utility) {
+            CodeSymbolIndex.symbols(in: source, language: language)
+        }.value
+        guard document.revision == revision else { return }
+        codeSymbols = symbols
+        codeSymbolRevision = revision
     }
 
     /// The breadcrumb trail for the selected asset, workspace document, or
@@ -48,7 +110,7 @@ struct EditorBreadcrumb: View {
                 rootTitle: project.name,
                 groupTitle: asset.kind.projectGroup.title,
                 name: asset.name,
-                detail: asset.detail
+                detail: codeDetail(for: asset) ?? asset.detail
             )
         }
         if !project.isDemo,
@@ -81,6 +143,28 @@ struct EditorBreadcrumb: View {
         Image(systemName: "chevron.right")
             .font(.system(size: AppTheme.TypeScale.tiny, weight: .semibold))
             .foregroundStyle(.tertiary)
+    }
+
+    /// `path › file › symbol` for code: the language, the nearest symbol, and
+    /// the caret position, from the same retained controller the editor uses.
+    private func codeDetail(for asset: ProjectAsset) -> String? {
+        guard asset.kind == .code,
+              let document = project.code.selectedDocument,
+              document.fileURL.standardizedFileURL
+                == asset.url.standardizedFileURL else {
+            return nil
+        }
+        let controller = project.code.editorCache.cachedController(
+            for: document.id
+        )
+        var parts = [document.language.displayName]
+        if let symbol = controller?.symbolName {
+            parts.append(symbol)
+        }
+        if let controller {
+            parts.append("L\(controller.cursorLine):\(controller.cursorColumn)")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

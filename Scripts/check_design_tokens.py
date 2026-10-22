@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Reject raw visual literals in Sonovo view files.
+"""Reject raw visual literals in Sonovo Swift sources.
 
 The generated ledger lives in the documentation repository. Token definitions
-live in Sources/Sonovo/Theme.swift. Generated art and the embedded HTML sample
-are content renderers, not app chrome, and are exempt.
+live in Sources/Sonovo/Theme.swift. Content renderers are exempt; the shared
+table in design_token_rule.py is read by both this checker and the ledger
+generator so the two cannot drift.
 
 The editor is NSTextView-based, so AppKit literals are scanned with the same
 rule as SwiftUI literals. A built-in self-test proves the scanner still catches
@@ -16,15 +17,28 @@ import re
 import sys
 from pathlib import Path
 
+from design_token_rule import CONTENT_RENDERERS
+
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "Sources" / "Sonovo"
 
-EXEMPT = {
-    "Theme.swift",
-    "CoastalSceneView.swift",
-    "WaveformView.swift",
-    "SampleHTML.swift",
+CONTENT_RENDERER_PATHS = {
+    Path(path).as_posix() for path, _ in CONTENT_RENDERERS
 }
+EXEMPT_NAMES = {"Theme.swift"} | {
+    Path(path).name for path in CONTENT_RENDERER_PATHS
+}
+
+
+def is_exempt(path: Path) -> bool:
+    """Theme defines tokens; content renderers draw content, not chrome.
+
+    Renderers are matched by repository-relative path so a same-named file
+    elsewhere cannot inherit the exemption.
+    """
+    if path.name == "Theme.swift":
+        return True
+    return path.relative_to(ROOT).as_posix() in CONTENT_RENDERER_PATHS
 
 CALL_PATTERNS = (
     # AppKit visual values.
@@ -41,10 +55,15 @@ CALL_PATTERNS = (
     ".padding(",
     ".frame(",
     ".font(.system(size:",
+    ".font(.custom(",
+    "Font.custom(",
     "lineWidth:",
     ".opacity(",
     ".tracking(",
     ".lineSpacing(",
+    ".kerning(",
+    ".baselineOffset(",
+    ".minimumScaleFactor(",
     ".shadow(",
     ".offset(",
     ".aspectRatio(",
@@ -53,6 +72,13 @@ CALL_PATTERNS = (
     ".brightness(",
     ".contrast(",
     ".saturation(",
+    # Motion durations and curves.
+    ".easeInOut(duration:",
+    ".easeIn(duration:",
+    ".easeOut(duration:",
+    ".linear(duration:",
+    ".spring(response:",
+    ".timingCurve(",
     ".background(.bar",
     ".background(.regularMaterial",
     ".background(.ultraThinMaterial",
@@ -66,6 +92,45 @@ CALL_PATTERNS = (
     "VStack(",
     "LazyVStack(",
     "cornerRadius:",
+)
+
+# Geometry constructors carry layout values outside the modifier list. A zero
+# origin is not a design value, so these are checked for nonzero numbers only.
+GEOMETRY_CALLS = (
+    "CGSize(",
+    "CGRect(",
+    "NSRect(",
+    "NSMakeSize(",
+    "NSMakeRect(",
+    "NSEdgeInsets(",
+    "NSPoint(",
+)
+
+NAMED_COLORS = (
+    "red", "blue", "green", "orange", "yellow", "purple", "pink",
+    "gray", "grey", "white", "black", "brown", "cyan", "magenta",
+    "teal", "indigo", "mint",
+)
+NAMED_COLOR_NAMES = "|".join(NAMED_COLORS)
+NAMED_COLOR = re.compile(
+    r"\b(?:Color|NSColor)\s*\.\s*(?:" + NAMED_COLOR_NAMES + r")\b"
+)
+COLOR_MODIFIERS = (
+    "foregroundStyle", "foregroundColor", "background", "tint",
+    "fill", "stroke", "borderColor", "textColor", "backgroundColor",
+    "underPageBackgroundColor",
+)
+MODIFIER_NAMED_COLOR = re.compile(
+    r"\b(?:" + "|".join(COLOR_MODIFIERS) + r")\s*\(\s*\.\s*(?:"
+    + NAMED_COLOR_NAMES + r")\b"
+)
+COLOR_ASSIGNMENT = re.compile(
+    r"\.(?:backgroundColor|underPageBackgroundColor|textColor|fillColor"
+    r"|strokeColor)\s*=\s*\.\s*(?:" + NAMED_COLOR_NAMES + r")\b"
+)
+COLOR_ARRAY = re.compile(
+    r"\[\s*\.(?:" + NAMED_COLOR_NAMES + r")"
+    r"(?:\s*,\s*\.(?:" + NAMED_COLOR_NAMES + r"))+\s*\]"
 )
 
 LINE_PATTERNS = (
@@ -194,7 +259,44 @@ SELF_TEST_FIXTURES = (
         False,
     ),
     ("TextView.swift", "let color = NSColor(named: .textBackgroundColor)", False),
-    ("Theme.swift", "static let body: CGFloat = 13", False),
+    ("TextView.swift", "let size = CGSize(width: 32, height: 32)", True),
+    (
+        "TextView.swift",
+        "let rect = CGRect(x: 0, y: 0, width: viewWidth, height: viewHeight)",
+        False,
+    ),
+    ("TextView.swift", "let point = NSPoint(x: max(0, x), y: y)", False),
+    (
+        "TextView.swift",
+        "let inset = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)",
+        True,
+    ),
+    ("TextView.swift", "let c = Color.red", True),
+    ("TextView.swift", ".foregroundStyle(.red)", True),
+    ("TextView.swift", ".foregroundStyle(.primary)", False),
+    ("TextView.swift", "let c = NSColor.white", True),
+    (
+        "TextView.swift",
+        "let colors: [Color] = [.blue, .teal, .indigo]",
+        True,
+    ),
+    ("TextView.swift", "webView.underPageBackgroundColor = .black", True),
+    (
+        "TextView.swift",
+        "let a = Animation.easeInOut(duration: 0.2)",
+        True,
+    ),
+    (
+        "TextView.swift",
+        "let a = Animation.easeInOut(duration: AppTheme.Motion.panelDuration)",
+        False,
+    ),
+    (
+        "TextView.swift",
+        "let f = Font.custom(\"Mono\", size: 12)",
+        True,
+    ),
+    ("TextView.swift", ".minimumScaleFactor(0.8)", True),
 )
 
 
@@ -423,6 +525,22 @@ def has_visual_number(text: str) -> bool:
     return False
 
 
+def has_nonzero_number(text: str) -> bool:
+    """Like `has_visual_number`, but zero is not a design value.
+
+    Geometry constructors use zero origins and clamps (`CGRect(x: 0, y: 0,
+    ...)`, `max(0, x)`) that are structure, not tokens. A nonzero width,
+    height, inset, or coordinate is still a raw value.
+    """
+    for match in NUMBER.finditer(text):
+        if is_comparison_operand(text, match.start(), match.end()):
+            continue
+        if float(match.group()) == 0:
+            continue
+        return True
+    return False
+
+
 def needs_continuation(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -606,6 +724,25 @@ def scan_text(name: str, text: str) -> list[str]:
             elif has_visual_number(masked[start:end]):
                 record(start, fragment)
 
+    for pattern in GEOMETRY_CALLS:
+        pattern_squashed = re.sub(r"\s+", "", pattern)
+        for start in pattern_starts(masked, squashed, mapping, pattern):
+            open_index = masked.find("(", start, min(len(masked), start + 160))
+            if open_index < 0:
+                continue
+            end, _ = call_at(masked, open_index)
+            if has_nonzero_number(masked[start:end]):
+                record(start, text[start:end])
+
+    for regex in (
+        NAMED_COLOR,
+        MODIFIER_NAMED_COLOR,
+        COLOR_ASSIGNMENT,
+        COLOR_ARRAY,
+    ):
+        for match in regex.finditer(masked):
+            record(match.start(), text[match.start() : match.end()])
+
     return findings
 
 
@@ -616,7 +753,10 @@ def scan(path: Path) -> list[str]:
 def self_test() -> list[str]:
     failures: list[str] = []
     for name, text, should_flag in SELF_TEST_FIXTURES:
-        if name in EXEMPT:
+        if name in EXEMPT_NAMES:
+            failures.append(
+                f"self-test fixture {name} is exempt from scanning"
+            )
             continue
         flagged = bool(scan_text(name, text))
         if flagged != should_flag:
@@ -624,6 +764,16 @@ def self_test() -> list[str]:
             failures.append(
                 f"self-test {name}: expected to {expectation}: {text}"
             )
+
+    # The shared renderer table must name real files and actually exempt them.
+    for path in CONTENT_RENDERER_PATHS:
+        full = ROOT / path
+        if not full.exists():
+            failures.append(f"content renderer path does not exist: {path}")
+        elif not is_exempt(full):
+            failures.append(f"content renderer is not exempt: {path}")
+    if "Theme.swift" not in EXEMPT_NAMES:
+        failures.append("Theme.swift must be exempt from scanning")
 
     duplicate = scan_text(
         "TextView.swift",
@@ -668,7 +818,7 @@ def main() -> int:
     files = sorted(SOURCE.rglob("*.swift"))
     findings: list[str] = []
     for path in files:
-        if path.name in EXEMPT:
+        if is_exempt(path):
             continue
         findings.extend(scan(path))
 

@@ -243,7 +243,10 @@ struct ProjectAssetThumbnailView: View {
             guard shouldLoadThumbnail else { return }
             let result = await ThumbnailProvider.shared.thumbnail(
                 for: asset.url,
-                size: CGSize(width: 32, height: 32),
+                size: CGSize(
+                    width: AppTheme.Size.rowThumbnail,
+                    height: AppTheme.Size.rowThumbnail
+                ),
                 revision: asset.revision
             )
             // The revision changed while this request ran; do not let the

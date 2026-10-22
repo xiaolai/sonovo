@@ -8,6 +8,8 @@ import re
 from collections import OrderedDict
 from pathlib import Path
 
+from design_token_rule import CONTENT_RENDERERS
+
 ROOT = Path(__file__).resolve().parent.parent
 THEME = ROOT / "Sources" / "Sonovo" / "Theme.swift"
 
@@ -92,7 +94,11 @@ def main() -> None:
     out.append(
         "The check fails on raw numbers in visual modifiers (`padding`, `frame`, "
         "`font`, `cornerRadius`, `lineWidth`, `opacity`, `tracking`, `lineSpacing`, "
-        "`shadow`, `offset`, `aspectRatio`), raw colors, and raw material names."
+        "`shadow`, `offset`, `aspectRatio`, `minimumScaleFactor`), AppKit geometry "
+        "constructors (`CGSize`, `CGRect`, `NSRect`, `NSEdgeInsets`, `NSPoint`), "
+        "motion durations and curves, raw colors (including named system colors "
+        "outside the palette), and raw material names. Zero origins and clamps "
+        "are structure, not design values."
     )
     out.append("")
     out.append("## Allowed system semantics")
@@ -111,9 +117,8 @@ def main() -> None:
         "algorithm parameters are not design tokens:"
     )
     out.append("")
-    out.append("- `Sources/Sonovo/CoastalSceneView.swift` — procedural scene artwork.")
-    out.append("- `Sources/Sonovo/WaveformView.swift` — audio waveform geometry and amplitude.")
-    out.append("- `Sources/Sonovo/SampleHTML.swift` — the embedded storyboard document.")
+    for path, description in CONTENT_RENDERERS:
+        out.append(f"- `{path}` — {description}.")
     out.append("")
     out.append(
         "The Ghostty theme backgrounds in `Resources/ghostty-themes/light.conf` and "

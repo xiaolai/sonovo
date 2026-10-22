@@ -143,7 +143,7 @@ struct ComparisonView: View {
                 ? CGSize(
                     width: max(
                         (container.width - gap) * AppTheme.Comparison.half,
-                        1
+                        AppTheme.Comparison.minimumPaneWidth
                     ),
                     height: container.height
                 )

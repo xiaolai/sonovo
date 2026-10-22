@@ -36,17 +36,24 @@ struct SettingsView: View {
     @AppStorage("sonovo.canvasRadius") private var canvasRadius = AppTheme.Canvas.roundedRadius
 
     @State private var selectedSection: SettingsSection = .appearance
-    @State private var foregroundIntensity = 0.48
-    @State private var backgroundIntensity = 0.34
+    @State private var foregroundIntensity =
+        AppTheme.Preferences.foregroundIntensityDefault
+    @State private var backgroundIntensity =
+        AppTheme.Preferences.backgroundIntensityDefault
     @State private var theme = "Standard"
 
     @AppStorage("sonovo.restoreTabs") private var restoreTabs = true
     @AppStorage("sonovo.confirmClose") private var confirmClose = true
     @AppStorage("sonovo.reopenLast") private var reopenLast = true
-    @AppStorage("sonovo.editorFontSize") private var editorFontSize = 13.0
+    @AppStorage("sonovo.editorFontSize") private var editorFontSize =
+        AppTheme.Preferences.editorFontSizeDefault
     @AppStorage("sonovo.showBreadcrumbs") private var showBreadcrumbs = true
     @AppStorage("sonovo.markdownRendered") private var markdownRendered = true
     @AppStorage("sonovo.wrapLines") private var wrapLines = true
+    @AppStorage("sonovo.codeTabWidth") private var codeTabWidth =
+        AppTheme.Code.tabWidthDefault
+    @AppStorage("sonovo.codeUsesTabs") private var codeUsesTabs = false
+    @AppStorage("sonovo.codeWrapLines") private var codeWrapLines = false
     @AppStorage("sonovo.audioDevice") private var audioDevice = "System Default"
     @AppStorage("sonovo.sampleRate") private var sampleRate = "48 kHz"
     @AppStorage("sonovo.followPlayhead") private var followPlayhead = true
@@ -280,6 +287,37 @@ struct SettingsView: View {
                 SettingsRow {
                     Toggle("Wrap long lines", isOn: $wrapLines)
                     Text("Wrap source lines to the width of the editor.")
+                }
+            }
+
+            SettingsGroup {
+                SettingsRow {
+                    HStack {
+                        Text("Code tab width")
+                        Spacer()
+                        Stepper(
+                            value: $codeTabWidth,
+                            in: 2...8
+                        ) {
+                            Text("\(codeTabWidth)")
+                                .monospacedDigit()
+                        }
+                        .fixedSize()
+                    }
+                }
+                SettingsRow {
+                    Toggle("Insert tabs in code", isOn: $codeUsesTabs)
+                    Text(
+                        "Use tab characters instead of spaces when Tab is "
+                            + "pressed in the code editor."
+                    )
+                }
+                SettingsRow {
+                    Toggle("Wrap code lines", isOn: $codeWrapLines)
+                    Text(
+                        "Wrap long code lines instead of scrolling "
+                            + "horizontally."
+                    )
                 }
             }
         }

@@ -25,7 +25,7 @@ final class PlayerHostView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         playerLayer.videoGravity = .resizeAspect
-        playerLayer.backgroundColor = NSColor.black.cgColor
+        playerLayer.backgroundColor = AppTheme.AppKitColor.mediaCanvas.cgColor
     }
 
     required init?(coder: NSCoder) {

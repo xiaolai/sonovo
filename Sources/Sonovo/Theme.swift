@@ -116,6 +116,144 @@ enum AppTheme {
         static let minimumTextSize: CGFloat = 0
     }
 
+    /// Code viewer and editor geometry. The code surface is read at a glance,
+    /// so the gutter is narrow, the status strip is one line, and the diff
+    /// gutter reserves room for a sign plus two line-number columns.
+    enum Code {
+        static let fontSize: CGFloat = 13
+        static let lineNumberFontSize: CGFloat = 10.5
+        static let statusFontSize: CGFloat = 10
+        static let lineHeightMultiple: CGFloat = 1.35
+        static let lineNumberWidth: CGFloat = 44
+        static let lineNumberInset: CGFloat = 8
+        static let contentInsetHorizontal: CGFloat = 10
+        static let contentInsetVertical: CGFloat = 8
+        static let statusBarHeight: CGFloat = 24
+        static let toolbarHeight: CGFloat = 34
+        static let diffGutterWidth: CGFloat = 22
+        static let diffLineNumberWidth: CGFloat = 40
+        static let searchResultRowHeight: CGFloat = 26
+        static let symbolSheetWidth: CGFloat = 420
+        static let symbolSheetHeight: CGFloat = 360
+        static let goToLineFieldWidth: CGFloat = 120
+        static let tabWidthDefault: Int = 4
+        static let indentGuideWidth: CGFloat = 1
+        static let currentLineOpacity: Double = 0.055
+        static let bracketOpacity: Double = 0.22
+        static let diffAddedOpacity: Double = 0.16
+        static let diffRemovedOpacity: Double = 0.16
+        static let viewportMargin: Int = 2_000
+    }
+
+    /// Syntax roles, not colors: the code lexer names a role and the theme
+    /// decides how it looks in light, dark, and high contrast.
+    enum SyntaxRole: Sendable {
+        case keyword
+        case typeName
+        case string
+        case comment
+        case number
+        case function
+        case property
+        case punctuation
+        case identifier
+        case markup
+        case inserted
+        case deleted
+    }
+
+    enum Syntax {
+        static func color(for role: SyntaxRole) -> NSColor {
+            switch role {
+            case .keyword: keyword
+            case .typeName: typeName
+            case .string: string
+            case .comment: comment
+            case .number: number
+            case .function: function
+            case .property: property
+            case .punctuation: punctuation
+            case .identifier: identifier
+            case .markup: markup
+            case .inserted: inserted
+            case .deleted: deleted
+            }
+        }
+
+        private static let keyword = dynamic(
+            light: NSColor.systemPurple,
+            dark: NSColor.systemPink
+        )
+        private static let typeName = dynamic(
+            light: NSColor.systemTeal,
+            dark: NSColor.systemTeal
+        )
+        private static let string = dynamic(
+            light: NSColor.systemRed,
+            dark: NSColor.systemOrange
+        )
+        private static let comment = NSColor.secondaryLabelColor
+        private static let number = dynamic(
+            light: NSColor.systemOrange,
+            dark: NSColor.systemYellow
+        )
+        private static let function = dynamic(
+            light: NSColor.systemBlue,
+            dark: NSColor.systemBlue
+        )
+        private static let property = dynamic(
+            light: NSColor.systemIndigo,
+            dark: NSColor.systemIndigo
+        )
+        private static let punctuation = NSColor.tertiaryLabelColor
+        private static let identifier = NSColor.labelColor
+        private static let markup = dynamic(
+            light: NSColor.systemBrown,
+            dark: NSColor.systemOrange
+        )
+        private static let inserted = dynamic(
+            light: NSColor.systemGreen,
+            dark: NSColor.systemGreen
+        )
+        private static let deleted = dynamic(
+            light: NSColor.systemRed,
+            dark: NSColor.systemRed
+        )
+
+        /// High contrast swaps the quiet roles for full-strength label
+        /// colors and lets the code surface keep the marks, not the tint.
+        static func resolvedColor(
+            for role: SyntaxRole,
+            highContrast: Bool
+        ) -> NSColor {
+            guard highContrast else { return color(for: role) }
+            switch role {
+            case .comment, .punctuation: return NSColor.labelColor
+            default: return color(for: role)
+            }
+        }
+
+        /// Comments and punctuation are quiet; in high contrast they become
+        /// bold instead of a lighter tint.
+        static func isBoldInHighContrast(_ role: SyntaxRole) -> Bool {
+            switch role {
+            case .comment, .punctuation: return true
+            default: return false
+            }
+        }
+
+        private static func dynamic(
+            light: NSColor,
+            dark: NSColor
+        ) -> NSColor {
+            NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? dark
+                    : light
+            }
+        }
+    }
+
     /// Subtitle preview and cue-list geometry. Caption text is read at a
     /// glance over moving pictures, so it is sans, semibold, and larger than
     /// prose; the cue list itself uses `Reading` sizes.
@@ -144,6 +282,9 @@ enum AppTheme {
         static let handleDiameter: CGFloat = 22
         static let handleRadius: CGFloat = 11
         static let half: CGFloat = 0.5
+        /// The narrowest side-by-side pane: keeps the stage measurable when
+        /// the window is smaller than two panes plus the gap.
+        static let minimumPaneWidth: CGFloat = 1
         static let metadataStripHeight: CGFloat = 68
         static let metadataDividerHeight: CGFloat = 32
         static let pickerWidth: CGFloat = 420
@@ -284,6 +425,10 @@ enum AppTheme {
         static let unitRange: ClosedRange<Double> = 0...1
         static let editorFontSizeRange: ClosedRange<Double> = 11...18
         static let editorFontSizeStep: Double = 1
+        static let editorFontSizeDefault: Double = 13
+        /// Settings-preview slider defaults, as fractions of their ranges.
+        static let foregroundIntensityDefault: Double = 0.48
+        static let backgroundIntensityDefault: Double = 0.34
     }
 
     /// The editor canvas is the rounded, recessed surface inside the workspace.
@@ -352,6 +497,12 @@ enum AppTheme {
         static let thumbnailHeight: CGFloat = 65
         static let stillThumbnailWidth: CGFloat = 96
         static let stillThumbnailHeight: CGFloat = 54
+        /// Small row thumbnail in the asset lists.
+        static let rowThumbnail: CGFloat = 32
+        /// Quick Look probe request: large enough to distinguish a real
+        /// document preview from an icon, and its rasterization scale.
+        static let previewProbe: CGFloat = 512
+        static let previewProbeScale: CGFloat = 2
         static let compareHandle: CGFloat = 30
         static let compareSummaryWidth: CGFloat = 104
         static let settingsPreviewHeight: CGFloat = 92
@@ -443,6 +594,10 @@ enum AppTheme {
         static let info = Color(nsColor: .systemBlue)
         static let white = Color.white
         static let black = Color.black
+        /// Cue-map track colors. A fixed categorical set, not an adaptive
+        /// surface: hue distinguishes tracks, and the map is drawn on the
+        /// panel or the video overlay rather than used for text.
+        static let cueTracks: [Color] = [.blue, .teal, .indigo, .purple, .pink, .orange, .green]
         // Keep these in sync with the Ghostty theme files. They match
         // NSColor.textBackgroundColor, the main editor surface.
         static let terminalLight = Color.white
@@ -466,6 +621,13 @@ enum AppTheme {
         static let floating: Material = .regularMaterial
         static let mediaOverlay: Material = .ultraThinMaterial
         static let sidebar: NSVisualEffectView.Material = .sidebar
+    }
+
+    /// AppKit-only colors for layers that are not SwiftUI views.
+    enum AppKitColor {
+        /// Video and embedded-page canvases letterbox to black in both
+        /// appearances; the content supplies every visible pixel.
+        static let mediaCanvas = NSColor.black
     }
 
     // MARK: - Shadow
@@ -523,6 +685,16 @@ extension Color {
     static var appSecondaryLabel: Color { AppTheme.Palette.secondaryLabel }
     static var appTertiaryLabel: Color { AppTheme.Palette.tertiaryLabel }
     static var appSeparator: Color { AppTheme.Palette.separator }
+
+    /// Diff signs and row tints. The sign and the accessibility label still
+    /// carry the meaning; color is never the only channel.
+    static var appSyntaxInserted: Color {
+        Color(nsColor: AppTheme.Syntax.color(for: .inserted))
+    }
+
+    static var appSyntaxDeleted: Color {
+        Color(nsColor: AppTheme.Syntax.color(for: .deleted))
+    }
 }
 
 // MARK: - Shared view helpers

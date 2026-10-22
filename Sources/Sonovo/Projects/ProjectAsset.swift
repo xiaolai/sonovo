@@ -81,49 +81,55 @@ extension AssetKind {
             ProjectGroupDescriptor(
                 id: "subtitles",
                 title: "Subtitles",
+                order: 2
+            )
+        case .code:
+            ProjectGroupDescriptor(
+                id: "code",
+                title: "Code",
                 order: 1
             )
         case .audio:
             ProjectGroupDescriptor(
                 id: "audio",
                 title: "Audio",
-                order: 2
+                order: 3
             )
         case .video:
             ProjectGroupDescriptor(
                 id: "video",
                 title: "Video",
-                order: 3
+                order: 4
             )
         case .stills, .image:
             ProjectGroupDescriptor(
                 id: "images",
                 title: "Images",
-                order: 4
+                order: 5
             )
         case .model3d:
             ProjectGroupDescriptor(
                 id: "models",
                 title: "3D",
-                order: 5
+                order: 6
             )
         case .html:
             ProjectGroupDescriptor(
                 id: "web",
                 title: "Web",
-                order: 6
+                order: 7
             )
         case .archive:
             ProjectGroupDescriptor(
                 id: "archives",
                 title: "Archives",
-                order: 7
+                order: 8
             )
         case .delivery, .other:
             ProjectGroupDescriptor(
                 id: "other",
                 title: "Other",
-                order: 8
+                order: 9
             )
         }
     }

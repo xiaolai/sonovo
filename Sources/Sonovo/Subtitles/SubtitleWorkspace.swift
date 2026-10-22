@@ -50,6 +50,10 @@ final class SubtitleWorkspace {
     /// A selection change made inside the workspace. The owning project
     /// keeps its tab, breadcrumb, and persisted selection on the same file.
     var onDocumentActivated: ((URL) -> Void)?
+    /// Whether another workspace of the project holds a Save As reservation.
+    var isDestinationReserved: ((String) -> Bool)?
+    /// Whether another workspace already owns this path.
+    var isPathOwnedElsewhere: ((String) -> Bool)?
     /// The player serves the selected document; media is attached per
     /// document, so switching documents reloads it.
     let player = SubtitleMediaPlayer()
@@ -123,6 +127,15 @@ final class SubtitleWorkspace {
         }) {
             select(existing)
             return existing
+        }
+        guard isDestinationReserved?(key) != true else {
+            // A Save As in another workspace is still writing this path.
+            lastError = "That file is being saved in another tab."
+            return nil
+        }
+        guard isPathOwnedElsewhere?(key) != true else {
+            lastError = "That file is already open in another tab."
+            return nil
         }
 
         do {
