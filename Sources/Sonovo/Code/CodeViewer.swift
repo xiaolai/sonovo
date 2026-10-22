@@ -50,6 +50,8 @@ struct CodeWorkspaceView: View {
     let workspace: CodeWorkspace
     let project: Project
 
+    @State private var showReviewQueue = false
+
     var body: some View {
         Group {
             if let document = workspace.selectedDocument {
@@ -65,6 +67,9 @@ struct CodeWorkspaceView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appCanvas)
+        .sheet(isPresented: $showReviewQueue) {
+            CodeReviewQueueSheet(workspace: workspace, project: project)
+        }
     }
 
     private var emptyState: some View {
@@ -82,7 +87,10 @@ struct CodeWorkspaceView: View {
             Text("Open a code file from the project navigator.")
                 .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(.secondary)
-            Button("Open…") { workspace.presentOpenPanel() }
+            HStack(spacing: AppTheme.Spacing.sm) {
+                Button("Open…") { workspace.presentOpenPanel() }
+                Button("Project Changes…") { showReviewQueue = true }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -99,6 +107,7 @@ struct CodeViewer: View {
     @State private var showSymbols = false
     @State private var showSearch = false
     @State private var showReview = false
+    @State private var showReviewQueue = false
     @State private var reviewDisposition: CodeReviewDisposition = .seen
     @State private var reviewNote = ""
     @State private var goToLineText = ""
@@ -221,6 +230,9 @@ struct CodeViewer: View {
         .sheet(isPresented: $showReview) {
             reviewSheet
         }
+        .sheet(isPresented: $showReviewQueue) {
+            CodeReviewQueueSheet(workspace: workspace, project: project)
+        }
         .task {
             workspace.controller(for: document)
                 .updateSettings(editorSettings)
@@ -298,6 +310,15 @@ struct CodeViewer: View {
             .buttonStyle(.plain)
             .help("Search Project")
             .accessibilityLabel("Search Project")
+
+            Button {
+                showReviewQueue = true
+            } label: {
+                toolbarIcon("clock.arrow.circlepath")
+            }
+            .buttonStyle(.plain)
+            .help("Project Changes")
+            .accessibilityLabel("Project Changes")
 
             Divider().frame(height: AppTheme.Size.toolbarDividerHeight)
 
@@ -692,7 +713,7 @@ struct CodeViewer: View {
 
     private func saveReview() {
         guard let decision = draftDecision,
-              document.recordReview(decision) else {
+              workspace.recordReview(decision, in: document) else {
             return
         }
         showReview = false

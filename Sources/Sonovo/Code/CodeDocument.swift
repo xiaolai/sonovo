@@ -417,6 +417,21 @@ final class CodeDocument: Identifiable {
         reviewDecision = nil
     }
 
+    /// Shows a project-queue pair. The pair is frozen; it does not advance
+    /// any save baseline.
+    func beginQueueReview(
+        _ pair: CodeDiffPair,
+        decision: CodeReviewDecision? = nil
+    ) {
+        reviewedDiff = pair
+        viewMode = .unifiedDiff
+        if let decision,
+           decision.leftHash == pair.left.sha256,
+           decision.rightHash == pair.right.sha256 {
+            reviewDecision = decision
+        }
+    }
+
     // MARK: - Editing
 
     func replaceSource(

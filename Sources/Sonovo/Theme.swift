@@ -137,6 +137,7 @@ enum AppTheme {
         static let symbolSheetHeight: CGFloat = 360
         static let reviewSheetWidth: CGFloat = 460
         static let reviewNoteHeight: CGFloat = 96
+        static let reviewQueueHeight: CGFloat = 440
         static let goToLineFieldWidth: CGFloat = 120
         static let tabWidthDefault: Int = 4
         static let indentGuideWidth: CGFloat = 1

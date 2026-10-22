@@ -1,7 +1,7 @@
 import Foundation
 
 /// What the reviewer concluded about one frozen diff pair.
-enum CodeReviewDisposition: String, CaseIterable, Sendable, Identifiable {
+enum CodeReviewDisposition: String, CaseIterable, Codable, Sendable, Identifiable {
     case seen
     case changesRequested
 
