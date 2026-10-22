@@ -356,6 +356,67 @@ final class CodeDocument: Identifiable {
         reviewedDiff = nil
     }
 
+    // MARK: - Review
+
+    /// The decision recorded for the pair currently on screen. Session-scoped:
+    /// persistence needs the app-owned content store and is not part of this
+    /// step.
+    private(set) var reviewDecision: CodeReviewDecision?
+
+    /// The exact pair a decision would bind to.
+    var displayedDiffPair: CodeDiffPair? {
+        if case .available(let pair) = availableDiff { return pair }
+        return nil
+    }
+
+    /// A decision from a different pair is stale, never applied to this one.
+    var reviewDecisionIsStale: Bool {
+        guard let reviewDecision else { return false }
+        guard let pair = displayedDiffPair else { return true }
+        return reviewDecision.leftHash != pair.left.sha256
+            || reviewDecision.rightHash != pair.right.sha256
+    }
+
+    /// Builds a decision bound to the pair currently on screen.
+    func makeReviewDecision(
+        _ disposition: CodeReviewDisposition,
+        note: String,
+        path: String,
+        reference: String,
+        now: Date = Date()
+    ) -> CodeReviewDecision? {
+        guard let pair = displayedDiffPair else { return nil }
+        return CodeReviewDecision(
+            path: path,
+            leftLabel: pair.leftLabel,
+            rightLabel: pair.rightLabel,
+            leftHash: pair.left.sha256,
+            rightHash: pair.right.sha256,
+            disposition: disposition,
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines),
+            reference: reference,
+            createdAt: now
+        )
+    }
+
+    /// Stores a decision only while the pair it was made against is still the
+    /// one on screen. A changed pair rejects the record instead of silently
+    /// rebinding the decision.
+    @discardableResult
+    func recordReview(_ decision: CodeReviewDecision) -> Bool {
+        guard let pair = displayedDiffPair,
+              decision.leftHash == pair.left.sha256,
+              decision.rightHash == pair.right.sha256 else {
+            return false
+        }
+        reviewDecision = decision
+        return true
+    }
+
+    func clearReviewDecision() {
+        reviewDecision = nil
+    }
+
     // MARK: - Editing
 
     func replaceSource(
@@ -906,16 +967,19 @@ final class CodeDocument: Identifiable {
     func reference(relativeTo root: URL?) -> String {
         let offset = selection?.lowerBound ?? 0
         let location = lineColumn(at: offset)
-        let path: String
+        return "\(relativePath(relativeTo: root)):"
+            + "\(location.line):\(location.column)"
+    }
+
+    /// The file's path relative to the project root when it is inside it.
+    func relativePath(relativeTo root: URL?) -> String {
         if let root,
            MarkdownSecurity.contains(fileURL, in: root) {
             let rootPath = MarkdownSecurity.canonical(root).path
             let full = MarkdownSecurity.canonical(fileURL).path
-            path = String(full.dropFirst(rootPath.count + 1))
-        } else {
-            path = fileURL.path
+            return String(full.dropFirst(rootPath.count + 1))
         }
-        return "\(path):\(location.line):\(location.column)"
+        return fileURL.path
     }
 
     func lineColumn(at offset: Int) -> (line: Int, column: Int) {

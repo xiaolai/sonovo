@@ -135,6 +135,8 @@ enum AppTheme {
         static let searchResultRowHeight: CGFloat = 26
         static let symbolSheetWidth: CGFloat = 420
         static let symbolSheetHeight: CGFloat = 360
+        static let reviewSheetWidth: CGFloat = 460
+        static let reviewNoteHeight: CGFloat = 96
         static let goToLineFieldWidth: CGFloat = 120
         static let tabWidthDefault: Int = 4
         static let indentGuideWidth: CGFloat = 1

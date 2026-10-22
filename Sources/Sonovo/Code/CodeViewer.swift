@@ -98,6 +98,9 @@ struct CodeViewer: View {
     @State private var showGoToLine = false
     @State private var showSymbols = false
     @State private var showSearch = false
+    @State private var showReview = false
+    @State private var reviewDisposition: CodeReviewDisposition = .seen
+    @State private var reviewNote = ""
     @State private var goToLineText = ""
     @State private var referenceMessage: String?
     @State private var symbols: [CodeSymbol] = []
@@ -214,6 +217,9 @@ struct CodeViewer: View {
         }
         .sheet(isPresented: $showSearch) {
             CodeSearchSheet(workspace: workspace, project: project)
+        }
+        .sheet(isPresented: $showReview) {
+            reviewSheet
         }
         .task {
             workspace.controller(for: document)
@@ -456,15 +462,19 @@ struct CodeViewer: View {
         if let refusal = document.refusal {
             refusalCard(refusal)
         } else if document.viewMode.isDiff {
-            CodeDiffView(
-                document: document,
-                pair: diffPair,
-                split: document.viewMode == .splitDiff,
-                onCopyReference: {
-                    deliverReference(copyOnly: true)
-                },
-                onCopyDiff: copyDiff
-            )
+            VStack(spacing: AppTheme.Spacing.zero) {
+                reviewBar
+                Divider()
+                CodeDiffView(
+                    document: document,
+                    pair: diffPair,
+                    split: document.viewMode == .splitDiff,
+                    onCopyReference: {
+                        deliverReference(copyOnly: true)
+                    },
+                    onCopyDiff: copyDiff
+                )
+            }
         } else {
             CodeSourceView(document: document, workspace: workspace)
         }
@@ -478,6 +488,235 @@ struct CodeViewer: View {
             return pair
         }
         return nil
+    }
+
+    // MARK: Review
+
+    private var reviewBar: some View {
+        HStack(spacing: AppTheme.Spacing.sm) {
+            if let decision = document.reviewDecision {
+                Image(
+                    systemName: decision.disposition == .seen
+                        ? "eye"
+                        : "exclamationmark.bubble"
+                )
+                .font(.system(size: AppTheme.TypeScale.xs, weight: .medium))
+                .foregroundStyle(
+                    decision.disposition == .seen
+                        ? Color.secondary
+                        : Color(AppTheme.Palette.warning)
+                )
+                Text(decision.disposition.label)
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.xs,
+                            weight: .medium
+                        )
+                    )
+                Text(decision.pairSummary)
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.xs,
+                            design: .monospaced
+                        )
+                    )
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if document.reviewDecisionIsStale {
+                    Text("Stale")
+                        .font(
+                            .system(
+                                size: AppTheme.TypeScale.xs,
+                                weight: .semibold
+                            )
+                        )
+                        .foregroundStyle(Color(AppTheme.Palette.warning))
+                        .help("The pair changed since this decision.")
+                }
+                Spacer(minLength: AppTheme.Spacing.sm)
+                Button("Instruction…") { presentReview() }
+                Button("Clear") { document.clearReviewDecision() }
+            } else {
+                Text("No review decision for this pair.")
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: AppTheme.Spacing.sm)
+                Button("Review…") { presentReview() }
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, AppTheme.Spacing.md)
+        .padding(.vertical, AppTheme.Spacing.xs)
+        .background(Color.appCard)
+    }
+
+    private var reviewSheet: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.md) {
+            Text("Review This Change")
+                .font(.system(size: AppTheme.TypeScale.lg, weight: .semibold))
+
+            if let pair = document.displayedDiffPair {
+                Text(document.relativePath(relativeTo: project.root))
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.sm,
+                            design: .monospaced
+                        )
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(pairSummary(pair))
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.xs,
+                            design: .monospaced
+                        )
+                    )
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("This diff cannot be reviewed at its current size.")
+                    .font(.system(size: AppTheme.TypeScale.sm))
+                    .foregroundStyle(.secondary)
+            }
+
+            Picker("Decision", selection: $reviewDisposition) {
+                ForEach(CodeReviewDisposition.allCases) { disposition in
+                    Text(disposition.label).tag(disposition)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text("Note for the worker")
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.secondary)
+            TextEditor(text: $reviewNote)
+                .font(
+                    .system(
+                        size: AppTheme.TypeScale.sm,
+                        design: .monospaced
+                    )
+                )
+                .frame(height: AppTheme.Code.reviewNoteHeight)
+                .overlay(
+                    RoundedRectangle(
+                        cornerRadius: AppTheme.Radius.control
+                    )
+                    .strokeBorder(
+                        Color.appSeparator,
+                        lineWidth: AppTheme.BorderWidth.hairline
+                    )
+                )
+
+            if let decision = draftDecision {
+                Text("Instruction")
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
+                ScrollView {
+                    Text(CodeReviewInstruction.text(for: decision))
+                        .font(
+                            .system(
+                                size: AppTheme.TypeScale.xs,
+                                design: .monospaced
+                            )
+                        )
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(AppTheme.Spacing.sm)
+                }
+                .frame(height: AppTheme.Code.reviewNoteHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: AppTheme.Radius.control)
+                        .fill(Color.appCanvas)
+                )
+            }
+
+            Text(recipientLine)
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: AppTheme.Spacing.sm) {
+                Button("Copy Instruction") { copyReviewInstruction() }
+                    .disabled(draftDecision == nil)
+                Button("Send One-line") { sendReviewOneLine() }
+                    .disabled(
+                        draftDecision == nil
+                            || project.terminalSessions.selectedSession == nil
+                    )
+                Spacer()
+                Button("Cancel") { showReview = false }
+                Button("Save Decision") { saveReview() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(draftDecision == nil)
+            }
+        }
+        .padding(AppTheme.Spacing.lg)
+        .frame(width: AppTheme.Code.reviewSheetWidth)
+    }
+
+    private var draftDecision: CodeReviewDecision? {
+        document.makeReviewDecision(
+            reviewDisposition,
+            note: reviewNote,
+            path: document.relativePath(relativeTo: project.root),
+            reference: document.reference(relativeTo: project.root)
+        )
+    }
+
+    private var recipientLine: String {
+        if let session = project.terminalSessions.selectedSession {
+            return "Terminal recipient: \(session.title). The one-line decision "
+                + "is inserted without Enter; the full instruction is copied."
+        }
+        return "No terminal is selected. The instruction copies to the "
+            + "clipboard."
+    }
+
+    private func pairSummary(_ pair: CodeDiffPair) -> String {
+        let left = String(pair.left.sha256.prefix(7))
+        let right = String(pair.right.sha256.prefix(7))
+        return "\(pair.leftLabel) → \(pair.rightLabel) "
+            + "(\(left) → \(right))"
+    }
+
+    private func presentReview() {
+        if let decision = document.reviewDecision {
+            reviewDisposition = decision.disposition
+            reviewNote = decision.note
+        } else {
+            reviewDisposition = .seen
+            reviewNote = ""
+        }
+        showReview = true
+    }
+
+    private func saveReview() {
+        guard let decision = draftDecision,
+              document.recordReview(decision) else {
+            return
+        }
+        showReview = false
+    }
+
+    private func copyReviewInstruction() {
+        guard let decision = draftDecision else { return }
+        copyToPasteboard(CodeReviewInstruction.text(for: decision))
+    }
+
+    private func sendReviewOneLine() {
+        guard let decision = draftDecision else { return }
+        let outcome = referenceDelivery().deliver(
+            reference: CodeReviewInstruction.oneLine(for: decision),
+            multiline: false
+        )
+        switch outcome {
+        case .sent:
+            referenceMessage = "Sent to the terminal."
+        case .copied:
+            referenceMessage = "Copied to the clipboard."
+        case .rejected:
+            referenceMessage = "Nothing to send."
+        }
     }
 
     private func refusalCard(_ refusal: CodeRefusal) -> some View {
