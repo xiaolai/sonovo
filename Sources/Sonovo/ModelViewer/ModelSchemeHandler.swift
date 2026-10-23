@@ -38,6 +38,14 @@ final class ModelReadBudget: @unchecked Sendable {
     }
 }
 
+/// A bounded read and the charge it still holds. The caller releases the
+/// charge after the bytes are handed to WebKit: releasing when the read
+/// returns would let a completed but undelivered body overlap the next one.
+struct BoundedRead: Sendable {
+    let data: Data
+    let charged: Int
+}
+
 enum ModelResourceLimits {
     /// Viewer documents are small; model assets can be large but not
     /// unbounded. The cap is a memory bound, not a product size limit.
@@ -129,11 +137,11 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             let cap = resource.route == .asset
                 ? ModelResourceLimits.maxAssetBytes
                 : ModelResourceLimits.maxViewerBytes
-            let data: Data
+            let budget = self?.readBudget
+            let read: BoundedRead
             do {
                 // Cancelling this task must reach the detached reader;
                 // otherwise a stopped request keeps the read alive.
-                let budget = self?.readBudget
                 let worker = Task.detached(priority: .userInitiated) {
                     try await Self.readBounded(
                         url,
@@ -141,7 +149,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
                         budget: budget
                     )
                 }
-                data = try await withTaskCancellationHandler {
+                read = try await withTaskCancellationHandler {
                     try await worker.value
                 } onCancel: {
                     worker.cancel()
@@ -180,6 +188,12 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
                 )
                 return
             }
+
+            // The bytes are still charged while they are handed to WebKit;
+            // releasing at read completion would let a completed but
+            // undelivered body overlap the next read.
+            defer { budget?.release(read.charged) }
+            let data = read.data
 
             guard let self, self.isActive(identifier) else { return }
 
@@ -237,7 +251,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         _ url: URL,
         cap: Int,
         budget: ModelReadBudget? = nil
-    ) async throws -> Data {
+    ) async throws -> BoundedRead {
         if let size = try? url.resourceValues(
             forKeys: [.fileSizeKey]
         ).fileSize, size > cap {
@@ -249,27 +263,40 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         var data = Data()
         // Charge what is buffered as it arrives; the observed size above
         // cannot be trusted, because the file may grow after it is read.
+        // One chunk is read before it is charged, so the aggregate can
+        // overshoot by less than a chunk per reader.
         var charged = 0
-        defer {
-            if charged > 0 { budget?.release(charged) }
-        }
-        while data.count < limit {
-            // A stopped request must stop reading, not finish the budget.
-            try Task.checkCancellation()
-            let chunk = try handle.read(
-                upToCount: min(1 << 20, limit - data.count)
-            )
-            guard let chunk, !chunk.isEmpty else { break }
-            if let budget {
-                try budget.charge(chunk.count)
-                charged += chunk.count
+        func releaseCharge() {
+            if charged > 0 {
+                budget?.release(charged)
+                charged = 0
             }
-            data.append(chunk)
+        }
+        do {
+            while data.count < limit {
+                // A stopped request must stop reading, not finish the budget.
+                try Task.checkCancellation()
+                let chunk = try handle.read(
+                    upToCount: min(1 << 20, limit - data.count)
+                )
+                guard let chunk, !chunk.isEmpty else { break }
+                if let budget {
+                    try budget.charge(chunk.count)
+                    charged += chunk.count
+                }
+                data.append(chunk)
+            }
+        } catch {
+            releaseCharge()
+            throw error
         }
         guard data.count <= cap else {
+            releaseCharge()
             throw ModelResourceError.tooLarge
         }
-        return data
+        // The charge travels with the bytes; the caller releases it after
+        // delivery.
+        return BoundedRead(data: data, charged: charged)
     }
 
     /// Releases everything a task holds. Safe to call more than once.

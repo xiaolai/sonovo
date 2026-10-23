@@ -363,7 +363,7 @@ final class ModelResourceResolverTests: XCTestCase {
             url,
             cap: data.count
         )
-        XCTAssertEqual(exact, data)
+        XCTAssertEqual(exact.data, data)
 
         do {
             _ = try await ModelSchemeHandler.readBounded(
