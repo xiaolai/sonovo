@@ -194,7 +194,7 @@ enum MediaTimecodeFormatter {
             // A two-thousandth of a frame per second: wide enough for
             // 29.97's decimal spelling, narrow enough to reject 29.979,
             // whose own rounding walks the label backwards.
-            let isNTSC = abs(fps * 1.001 - Double(nominal)) < 0.002
+            let isNTSC = abs(fps * 1.001 - Double(nominal)) < 0.0005
             guard nominal == Int64(fps.rounded()),
                   nominal % 30 == 0,
                   isNTSC else {

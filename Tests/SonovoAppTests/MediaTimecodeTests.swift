@@ -374,6 +374,22 @@ final class MediaTimecodeTests: XCTestCase {
                 dropFrame: true
             )
         )
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 17_982,
+                fps: 29.971,
+                frameQuanta: 30,
+                dropFrame: true
+            )
+        )
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 35_964,
+                fps: 59.941,
+                frameQuanta: 60,
+                dropFrame: true
+            )
+        )
     }
 
     func testSourceLabelRejectsFrameOverflow() {
