@@ -514,6 +514,18 @@ struct ParserTests {
         #expect(value == text)
     }
 
+    @Test("Frontmatter cannot hide body nesting from the guards")
+    func frontmatterDoesNotHideNesting() {
+        // `~~~: true` is a YAML value, not a fence. Scanning the whole
+        // source let it hide the body from the inline guard.
+        let body = String(repeating: "*a _a\n", count: 200) + "x"
+            + String(repeating: "\na_ a*", count: 200)
+        let parsed = MarkdownParser.parseCanonical(
+            "---\n~~~: true\n---\n" + body
+        )
+        #expect(parsed.exceededNestingLimit)
+    }
+
     @Test("A very long emphasis delimiter run is kept as one raw block")
     func emphasisRunBudget() {
         // A run of n delimiters pairs into about n/2 nested nodes, so the

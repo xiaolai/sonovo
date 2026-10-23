@@ -36,6 +36,40 @@ struct NestingGuardTests {
         )
     }
 
+    @Test("A single long run cannot hide behind weighting")
+    func longRunDepth() {
+        let source = String(repeating: "*", count: 512) + "x\n"
+            + String(repeating: "a*\n", count: 512)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("Single tildes count as delimiter characters")
+    func singleTildeNesting() {
+        // cmark-gfm pairs single tildes across lines; excluding them let a
+        // document nest without being counted.
+        let source = String(repeating: "~a\n", count: 300) + "x"
+            + String(repeating: "\na~", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A combining mark after a delimiter does not hide it")
+    func combiningMarkDelimiter() {
+        // Swift groups the mark into the same grapheme as the asterisk;
+        // cmark sees the asterisk as the delimiter. Compare by first scalar.
+        let source = String(repeating: "*\u{0301}a\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A container-scoped HTML block ends when its container does")
+    func containerScopedHTMLWithoutBlankLine() {
+        // A list item's HTML block ends at the first unindented line, even
+        // without a blank line before it.
+        let source = "- <script>\n"
+            + String(repeating: ">", count: 300) + " x"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("A container-scoped HTML block ends with its container")
     func containerScopedHTMLBlock() {
         // The `<script>` block sits inside a blockquote. Its own terminator
