@@ -20,6 +20,18 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
     private let resolver: ModelResourceResolver
     private let onResourceServed: ((URL) -> Void)?
     private var activeTasks: Set<ObjectIdentifier> = []
+    /// The in-flight read for each task, so `stop` can cancel it instead of
+    /// letting a detached read keep allocating for a request WebKit dropped.
+    private var readTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    /// Bytes promised to in-flight reads. Each read is capped on its own;
+    /// this bounds their sum.
+    private var reservedBytes: [ObjectIdentifier: Int] = [:]
+
+    /// Two maximum-size assets may be in flight at once (a model and its
+    /// sidecar are requested together). Beyond that the handler refuses
+    /// rather than letting concurrent reads multiply the per-file cap.
+    private static let maxConcurrentReadBytes =
+        2 * ModelResourceLimits.maxAssetBytes
 
     init(
         resolver: ModelResourceResolver,
@@ -45,7 +57,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
         guard let requestURL = task.request.url else {
-            activeTasks.remove(identifier)
+            finish(identifier)
             return
         }
 
@@ -68,12 +80,26 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             if resource.route == .asset {
                 onResourceServed?(resource.url)
             }
+            guard reserve(identifier, for: resource) else {
+                // The page can request several large assets at once. Serving
+                // one more would exceed the aggregate read budget.
+                respond(
+                    task,
+                    identifier: identifier,
+                    status: 503,
+                    headers: ["Retry-After": "1"],
+                    body: Data()
+                )
+                return
+            }
             read(resource, for: task, identifier: identifier)
         }
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
-        activeTasks.remove(ObjectIdentifier(task))
+        let identifier = ObjectIdentifier(task)
+        readTasks.removeValue(forKey: identifier)?.cancel()
+        finish(identifier)
     }
 
     private func read(
@@ -82,15 +108,25 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         identifier: ObjectIdentifier
     ) {
         let url = resource.url
-        Task { @MainActor [weak self] in
+        let readTask = Task { @MainActor [weak self] in
             let cap = resource.route == .asset
                 ? ModelResourceLimits.maxAssetBytes
                 : ModelResourceLimits.maxViewerBytes
             let data: Data
             do {
-                data = try await Task.detached(priority: .userInitiated) {
-                    try Self.readBounded(url, cap: cap)
-                }.value
+                // Cancelling this task must reach the detached reader;
+                // otherwise a stopped request keeps the read alive.
+                let worker = Task.detached(priority: .userInitiated) {
+                    try await Self.readBounded(url, cap: cap)
+                }
+                data = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
+            } catch is CancellationError {
+                // WebKit stopped this request; `stop` already released it.
+                return
             } catch ModelResourceError.tooLarge {
                 guard let self, self.isActive(identifier) else { return }
                 self.respond(
@@ -157,6 +193,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
                 body: data
             )
         }
+        readTasks[identifier] = readTask
     }
 
     /// Owned, bounded read. A mapped file can fault with SIGBUS if it is
@@ -165,7 +202,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
     nonisolated static func readBounded(
         _ url: URL,
         cap: Int
-    ) throws -> Data {
+    ) async throws -> Data {
         if let size = try? url.resourceValues(
             forKeys: [.fileSizeKey]
         ).fileSize, size > cap {
@@ -176,6 +213,8 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         let limit = cap + 1
         var data = Data()
         while data.count < limit {
+            // A stopped request must stop reading, not finish the budget.
+            try Task.checkCancellation()
             let chunk = try handle.read(
                 upToCount: min(1 << 20, limit - data.count)
             )
@@ -186,6 +225,33 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             throw ModelResourceError.tooLarge
         }
         return data
+    }
+
+    /// Promises the file's bytes against the aggregate budget before the read
+    /// starts. A missing size is charged at the cap, so an unmeasurable file
+    /// cannot be used to bypass the budget.
+    private func reserve(
+        _ identifier: ObjectIdentifier,
+        for resource: ModelResourceResolver.Resource
+    ) -> Bool {
+        let cap = resource.route == .asset
+            ? ModelResourceLimits.maxAssetBytes
+            : ModelResourceLimits.maxViewerBytes
+        let values = try? resource.url.resourceValues(forKeys: [.fileSizeKey])
+        let reservation = min(max(values?.fileSize ?? cap, 1), cap)
+        let used = reservedBytes.values.reduce(0, +)
+        guard used <= Self.maxConcurrentReadBytes - reservation else {
+            return false
+        }
+        reservedBytes[identifier] = reservation
+        return true
+    }
+
+    /// Releases everything a task holds. Safe to call more than once.
+    private func finish(_ identifier: ObjectIdentifier) {
+        activeTasks.remove(identifier)
+        reservedBytes.removeValue(forKey: identifier)
+        readTasks.removeValue(forKey: identifier)
     }
 
     private func isActive(_ identifier: ObjectIdentifier) -> Bool {
@@ -200,7 +266,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         body: Data
     ) {
         guard isActive(identifier), let requestURL = task.request.url else {
-            activeTasks.remove(identifier)
+            finish(identifier)
             return
         }
 
@@ -218,7 +284,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             httpVersion: "HTTP/1.1",
             headerFields: fields
         ) else {
-            activeTasks.remove(identifier)
+            finish(identifier)
             return
         }
 
@@ -227,7 +293,7 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             task.didReceive(body)
         }
         task.didFinish()
-        activeTasks.remove(identifier)
+        finish(identifier)
     }
 
     private static let noncePlaceholder = "__CSP_NONCE__"
