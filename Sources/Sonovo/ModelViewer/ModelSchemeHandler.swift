@@ -3,6 +3,39 @@ import WebKit
 
 enum ModelResourceError: Error {
     case tooLarge
+    /// The aggregate in-flight read budget cannot accommodate another chunk.
+    case budgetExceeded
+}
+
+/// Tracks the bytes buffered by in-flight reads.
+///
+/// A budget charged from a file's observed size can be beaten: the file may
+/// grow between the metadata read and the read itself, so several
+/// individually compliant reads can allocate the cap each. Charging the
+/// bytes as they arrive bounds what is actually held.
+final class ModelReadBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var used = 0
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func charge(_ bytes: Int) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard bytes > 0, bytes <= limit - used else {
+            throw ModelResourceError.budgetExceeded
+        }
+        used += bytes
+    }
+
+    func release(_ bytes: Int) {
+        lock.lock()
+        used = max(0, used - bytes)
+        lock.unlock()
+    }
 }
 
 enum ModelResourceLimits {
@@ -23,15 +56,11 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
     /// The in-flight read for each task, so `stop` can cancel it instead of
     /// letting a detached read keep allocating for a request WebKit dropped.
     private var readTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
-    /// Bytes promised to in-flight reads. Each read is capped on its own;
-    /// this bounds their sum.
-    private var reservedBytes: [ObjectIdentifier: Int] = [:]
-
-    /// Two maximum-size assets may be in flight at once (a model and its
-    /// sidecar are requested together). Beyond that the handler refuses
-    /// rather than letting concurrent reads multiply the per-file cap.
-    private static let maxConcurrentReadBytes =
-        2 * ModelResourceLimits.maxAssetBytes
+    /// Bytes actually buffered by in-flight reads. Each read is capped on
+    /// its own; this bounds their sum.
+    private let readBudget = ModelReadBudget(
+        limit: 2 * ModelResourceLimits.maxAssetBytes
+    )
 
     init(
         resolver: ModelResourceResolver,
@@ -80,18 +109,6 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             if resource.route == .asset {
                 onResourceServed?(resource.url)
             }
-            guard reserve(identifier, for: resource) else {
-                // The page can request several large assets at once. Serving
-                // one more would exceed the aggregate read budget.
-                respond(
-                    task,
-                    identifier: identifier,
-                    status: 503,
-                    headers: ["Retry-After": "1"],
-                    body: Data()
-                )
-                return
-            }
             read(resource, for: task, identifier: identifier)
         }
     }
@@ -116,8 +133,13 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
             do {
                 // Cancelling this task must reach the detached reader;
                 // otherwise a stopped request keeps the read alive.
+                let budget = self?.readBudget
                 let worker = Task.detached(priority: .userInitiated) {
-                    try await Self.readBounded(url, cap: cap)
+                    try await Self.readBounded(
+                        url,
+                        cap: cap,
+                        budget: budget
+                    )
                 }
                 data = try await withTaskCancellationHandler {
                     try await worker.value
@@ -133,6 +155,18 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
                     task,
                     identifier: identifier,
                     status: 413,
+                    body: Data()
+                )
+                return
+            } catch ModelResourceError.budgetExceeded {
+                // Concurrent reads already hold the aggregate budget; this
+                // one stops rather than allocating into it.
+                guard let self, self.isActive(identifier) else { return }
+                self.respond(
+                    task,
+                    identifier: identifier,
+                    status: 503,
+                    headers: ["Retry-After": "1"],
                     body: Data()
                 )
                 return
@@ -201,7 +235,8 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
     /// makes the response independent of later disk changes.
     nonisolated static func readBounded(
         _ url: URL,
-        cap: Int
+        cap: Int,
+        budget: ModelReadBudget? = nil
     ) async throws -> Data {
         if let size = try? url.resourceValues(
             forKeys: [.fileSizeKey]
@@ -212,6 +247,12 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         defer { try? handle.close() }
         let limit = cap + 1
         var data = Data()
+        // Charge what is buffered as it arrives; the observed size above
+        // cannot be trusted, because the file may grow after it is read.
+        var charged = 0
+        defer {
+            if charged > 0 { budget?.release(charged) }
+        }
         while data.count < limit {
             // A stopped request must stop reading, not finish the budget.
             try Task.checkCancellation()
@@ -219,6 +260,10 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
                 upToCount: min(1 << 20, limit - data.count)
             )
             guard let chunk, !chunk.isEmpty else { break }
+            if let budget {
+                try budget.charge(chunk.count)
+                charged += chunk.count
+            }
             data.append(chunk)
         }
         guard data.count <= cap else {
@@ -227,30 +272,9 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
         return data
     }
 
-    /// Promises the file's bytes against the aggregate budget before the read
-    /// starts. A missing size is charged at the cap, so an unmeasurable file
-    /// cannot be used to bypass the budget.
-    private func reserve(
-        _ identifier: ObjectIdentifier,
-        for resource: ModelResourceResolver.Resource
-    ) -> Bool {
-        let cap = resource.route == .asset
-            ? ModelResourceLimits.maxAssetBytes
-            : ModelResourceLimits.maxViewerBytes
-        let values = try? resource.url.resourceValues(forKeys: [.fileSizeKey])
-        let reservation = min(max(values?.fileSize ?? cap, 1), cap)
-        let used = reservedBytes.values.reduce(0, +)
-        guard used <= Self.maxConcurrentReadBytes - reservation else {
-            return false
-        }
-        reservedBytes[identifier] = reservation
-        return true
-    }
-
     /// Releases everything a task holds. Safe to call more than once.
     private func finish(_ identifier: ObjectIdentifier) {
         activeTasks.remove(identifier)
-        reservedBytes.removeValue(forKey: identifier)
         readTasks.removeValue(forKey: identifier)
     }
 

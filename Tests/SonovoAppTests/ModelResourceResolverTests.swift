@@ -342,6 +342,16 @@ final class ModelResourceResolverTests: XCTestCase {
         try Data(contents.utf8).write(to: url)
     }
 
+    func testReadBudgetRefusesBeyondTheLimit() throws {
+        let budget = ModelReadBudget(limit: 10)
+        try budget.charge(6)
+        XCTAssertThrowsError(try budget.charge(5)) { error in
+            XCTAssertTrue(error is ModelResourceError)
+        }
+        budget.release(6)
+        XCTAssertNoThrow(try budget.charge(10))
+    }
+
     func testBoundedReadRefusesAFileOverTheCap() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
