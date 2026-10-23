@@ -16,20 +16,8 @@ enum MediaLimits {
 /// native bitmap first, which a crafted image can turn into gigabytes.
 enum BoundedImageLoader {
     static func image(at url: URL) -> NSImage? {
-        guard let values = try? url.resourceValues(
-            forKeys: [.fileSizeKey]
-        ),
-        let size = values.fileSize,
-        size <= MediaLimits.maxImageBytes else {
-            return nil
-        }
-        guard let source = CGImageSourceCreateWithURL(
-            url as CFURL,
-            [kCGImageSourceShouldCache: false] as CFDictionary
-        ) else {
-            return nil
-        }
-        return image(from: source)
+        guard let data = boundedData(at: url) else { return nil }
+        return image(from: data)
     }
 
     static func image(from data: Data) -> NSImage? {
@@ -53,15 +41,34 @@ enum BoundedImageLoader {
     }
 
     static func pngData(at url: URL) -> Data? {
-        guard let values = try? url.resourceValues(
-            forKeys: [.fileSizeKey]
-        ),
-        let size = values.fileSize,
-        size <= MediaLimits.maxImageBytes,
-        let data = try? Data(contentsOf: url) else {
+        guard let data = boundedData(at: url) else { return nil }
+        return pngData(from: data)
+    }
+
+    /// Reads at most `maxImageBytes` plus one byte. A file-size check before
+    /// the read is not enough: the file can grow between the check and
+    /// `Data(contentsOf:)`, which would then allocate without a bound.
+    private static func boundedData(at url: URL) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
             return nil
         }
-        return pngData(from: data)
+        defer { try? handle.close() }
+        let limit = MediaLimits.maxImageBytes + 1
+        var data = Data()
+        while data.count < limit {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(
+                    upToCount: min(1 << 20, limit - data.count)
+                )
+            } catch {
+                return nil
+            }
+            guard let chunk, !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= MediaLimits.maxImageBytes else { return nil }
+        return data
     }
 
     private static func image(from source: CGImageSource) -> NSImage? {
