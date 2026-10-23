@@ -272,22 +272,50 @@ enum NestingGuard {
 
         var bracketDepth = 0
         var delimiterCount = 0
+        // Unmatched emphasis delimiters, in the order they were opened.
+        // Emphasis pairs across line breaks inside one paragraph, so a
+        // per-line count cannot see `("*a _a\n" x N) + "x" + ("\na_ a*" x N)`:
+        // every line looks harmless, and cmark still builds 2N nested nodes.
+        var openDelimiters: [Character] = []
         var fence: (Character, Int)?
         for line in source.split(
             separator: "\n",
             omittingEmptySubsequences: false
         ) {
             if let active = fence {
-                let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
-                if trimmed.first == active.0,
+                var indent = 0
+                var cursor = line.startIndex
+                while cursor < line.endIndex, line[cursor] == " " {
+                    indent += 1
+                    cursor = line.index(after: cursor)
+                }
+                let trimmed = line[cursor...]
+                if indent <= 3, trimmed.first == active.0,
                    trimmed.prefix(while: { $0 == active.0 }).count
                     >= active.1 {
                     fence = nil
+                    openDelimiters.removeAll()
                 }
                 continue
             }
-            let trimmed = line.drop(while: { $0 == " " })
-            if let first = trimmed.first,
+            if line.allSatisfy({ $0 == " " || $0 == "\t" }) {
+                // A blank line ends the paragraph whose delimiters pair.
+                openDelimiters.removeAll()
+                bracketDepth = 0
+            }
+
+            // A code fence may be indented at most three spaces. At four it
+            // is an indented code block or a lazy paragraph continuation,
+            // never a fence, so its content must still be scanned.
+            var indent = 0
+            var cursor = line.startIndex
+            while cursor < line.endIndex, line[cursor] == " " {
+                indent += 1
+                cursor = line.index(after: cursor)
+            }
+            let trimmed = line[cursor...]
+            if indent <= 3,
+               let first = trimmed.first,
                first == "`" || first == "~" {
                 let run = trimmed.prefix(while: { $0 == first }).count
                 // A backtick fence's info string may not contain a
@@ -298,13 +326,12 @@ enum NestingGuard {
                 let opensFence = first == "~" || !info.contains("`")
                 if run >= 3, opensFence {
                     fence = (first, run)
+                    openDelimiters.removeAll()
                     continue
                 }
             }
 
             var lineDelimiters = 0
-            var delimiterRun = 0
-            var previous: Character?
             var index = line.startIndex
             while index < line.endIndex {
                 let character = line[index]
@@ -313,8 +340,6 @@ enum NestingGuard {
                     if index < line.endIndex {
                         index = line.index(after: index)
                     }
-                    delimiterRun = 0
-                    previous = nil
                     continue
                 }
                 if character == "`" {
@@ -326,8 +351,6 @@ enum NestingGuard {
                         from: after,
                         run: run
                     ) ?? after
-                    delimiterRun = 0
-                    previous = nil
                     continue
                 }
 
@@ -340,29 +363,52 @@ enum NestingGuard {
                     if bracketDepth > 0 { bracketDepth -= 1 }
                     lineDelimiters += 1
                     delimiterCount += 1
-                    delimiterRun = 0
-                    previous = nil
-                case "*", "_":
-                    lineDelimiters += 1
-                    delimiterCount += 1
-                    if previous == character {
-                        delimiterRun += 1
-                    } else {
-                        delimiterRun = 1
-                        previous = character
+                case "*", "_", "~":
+                    let run = line[index...]
+                        .prefix(while: { $0 == character }).count
+                    let after = line.index(index, offsetBy: run)
+                    lineDelimiters += run
+                    delimiterCount += run
+                    // One run nests by itself: a run of n delimiters pairs
+                    // into about n/2 nested strong/emphasis nodes.
+                    if run > limit { return true }
+                    // A single tilde is literal text, not strikethrough.
+                    if character == "~", run < 2 {
+                        index = after
+                        continue
                     }
+                    let before = index > line.startIndex
+                        ? line[line.index(before: index)]
+                        : nil
+                    let next = after < line.endIndex ? line[after] : nil
+                    // Underscores inside a word are literal.
+                    let beforeIsWord = before?.isLetter == true
+                        || before?.isNumber == true
+                    let nextIsWord = next?.isLetter == true
+                        || next?.isNumber == true
+                    let wordInterior = character == "_"
+                        && beforeIsWord && nextIsWord
+                    // Mirrors cmark's flanking rules closely enough for a
+                    // depth bound: a delimiter can close if text precedes
+                    // it, and can open if text follows it.
+                    let canClose = before?.isWhitespace == false && !wordInterior
+                    let canOpen = next?.isWhitespace == false && !wordInterior
+                    if canClose, openDelimiters.last == character {
+                        openDelimiters.removeLast()
+                    } else if canOpen {
+                        openDelimiters.append(character)
+                    }
+                    index = after
+                    continue
                 case "!":
                     lineDelimiters += 1
                     delimiterCount += 1
-                    delimiterRun = 0
-                    previous = nil
                 default:
-                    delimiterRun = 0
-                    previous = nil
+                    break
                 }
 
                 if bracketDepth > limit
-                    || delimiterRun > limit
+                    || openDelimiters.count > limit
                     || lineDelimiters
                         > MarkdownLimits.maxInlineDelimitersPerLine
                     || delimiterCount
