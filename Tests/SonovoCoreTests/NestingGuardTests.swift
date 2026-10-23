@@ -61,6 +61,22 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
     }
 
+    @Test("A delimiter inside a same-line code span is literal")
+    func codeSpanContentIsLiteral() {
+        // The span closes on the line, so cmark pairs exactly these two
+        // runs; its content cannot close the opener before it.
+        let source = String(repeating: "*a `x*` b\n", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A tag's delimiters count as openers")
+    func tagDelimitersCountAsOpeners() {
+        // Whether cmark treats the tag as literal or as markup, counting
+        // its delimiters as openers cannot let a real opener disappear.
+        let source = String(repeating: "<b x*>\n", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
     @Test("A cross-line code span makes closers uncertain")
     func multilineCodeSpanUncertainty() {
         // cmark hides the closer inside a cross-line code span; counting it

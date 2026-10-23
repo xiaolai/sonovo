@@ -385,14 +385,25 @@ enum NestingGuard {
                             $0.unicodeScalars.first == scalar
                         }).count
                     let after = line.index(index, offsetBy: run)
-                    if sameLineRun(line, from: after, length: run) == nil {
-                        // The span may close on a later line, where cmark
-                        // treats everything up to the closer as literal.
-                        paragraphCertain = false
-                    }
                     lineDelimiters += run
                     delimiterCount += run
-                    index = after
+                    if let close = sameLineRun(
+                        line,
+                        from: after,
+                        length: run
+                    ) {
+                        // Closed on this line: cmark pairs the same two
+                        // runs, so the content is certainly literal and
+                        // contributes no delimiters.
+                        index = close
+                    } else {
+                        // The span may close on a later line, where cmark
+                        // treats everything up to the closer as literal.
+                        // Scan the content, and stop letting closers remove
+                        // openers for the rest of the paragraph.
+                        paragraphCertain = false
+                        index = after
+                    }
                     if delimiterCount
                         > MarkdownLimits.maxInlineDelimiters {
                         return true
@@ -405,8 +416,23 @@ enum NestingGuard {
                     if after < line.endIndex,
                        startsHTMLTag(line[after]) {
                         if let close = line[after...].firstIndex(of: ">") {
-                            // A tag closed on this line is literal content
-                            // to cmark, so its delimiters are not markup.
+                            // A valid tag is literal to cmark; an invalid
+                            // one is not. Counting the tag's delimiters as
+                            // openers is conservative either way, and it
+                            // cannot remove a real opener.
+                            var cursor = after
+                            while cursor < close {
+                                if let inner = line[cursor]
+                                    .unicodeScalars.first,
+                                   inner == "*" || inner == "_"
+                                    || inner == "~" {
+                                    openDelimiters.append(inner)
+                                }
+                                cursor = line.index(after: cursor)
+                            }
+                            if openDelimiters.count > nestingBudget {
+                                return true
+                            }
                             index = line.index(after: close)
                             continue
                         }
