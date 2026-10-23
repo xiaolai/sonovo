@@ -186,8 +186,15 @@ enum MediaTimecodeFormatter {
         // values that also walk a label backwards, so those rates cannot be
         // drop-frame at all.
         if dropFrame {
+            // The flag is only meaningful for NTSC rates: the actual rate
+            // is the nominal rate divided by 1.001. A true 30.000 fps
+            // track with the flag set is inconsistent metadata, and the
+            // skip arithmetic resets its labels at the ten-minute and
+            // 24-hour boundaries.
+            let isNTSC = abs(fps * 1.001 - Double(nominal)) < 0.01
             guard nominal == Int64(fps.rounded()),
-                  nominal % 30 == 0 else {
+                  nominal % 30 == 0,
+                  isNTSC else {
                 return false
             }
         }

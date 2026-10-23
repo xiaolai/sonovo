@@ -354,6 +354,16 @@ final class MediaTimecodeTests: XCTestCase {
                 dropFrame: false
             )
         )
+        // A true 30.000 fps track cannot be drop-frame; the label resets
+        // at the ten-minute and 24-hour boundaries.
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 17_999,
+                fps: 30,
+                frameQuanta: 30,
+                dropFrame: true
+            )
+        )
     }
 
     func testSourceLabelRejectsFrameOverflow() {
