@@ -296,6 +296,11 @@ enum NestingGuard {
         var delimiterCount = 0
         // Unmatched delimiter characters, in the order they were opened.
         var openDelimiters: [Unicode.Scalar] = []
+        // Every opener in the paragraph, never decremented. The stack above
+        // is a tighter heuristic, but it can be talked into removing an
+        // opener cmark keeps; this count cannot fall, so it is the bound
+        // that holds when the heuristic is wrong.
+        var openerCount = 0
         // False once the paragraph contains something whose content cmark
         // may treat as literal (an inline code span or an inline HTML tag
         // that does not close on the line). While uncertain, a closer is not
@@ -327,6 +332,7 @@ enum NestingGuard {
                    }) {
                     fence = nil
                     openDelimiters.removeAll()
+                    openerCount = 0
                     paragraphCertain = true
                 }
                 continue
@@ -335,6 +341,7 @@ enum NestingGuard {
             if line.allSatisfy({ $0 == " " || $0 == "\t" }) {
                 // A blank line ends the paragraph whose delimiters pair.
                 openDelimiters.removeAll()
+                openerCount = 0
                 bracketDepth = 0
                 paragraphCertain = true
                 continue
@@ -354,6 +361,7 @@ enum NestingGuard {
                 if run >= 3, opensFence {
                     fence = (first, run)
                     openDelimiters.removeAll()
+                    openerCount = 0
                     paragraphCertain = true
                     continue
                 }
@@ -427,10 +435,15 @@ enum NestingGuard {
                                    inner == "*" || inner == "_"
                                     || inner == "~" {
                                     openDelimiters.append(inner)
+                                    openerCount += 1
+                                } else if line[cursor] == "[" {
+                                    openerCount += 1
                                 }
                                 cursor = line.index(after: cursor)
                             }
-                            if openDelimiters.count > nestingBudget {
+                            if openDelimiters.count > nestingBudget
+                                || openerCount
+                                    > MarkdownLimits.maxInlineOpenerBudget {
                                 return true
                             }
                             index = line.index(after: close)
@@ -444,6 +457,7 @@ enum NestingGuard {
                 switch scalar {
                 case "[":
                     bracketDepth += 1
+                    openerCount += 1
                     lineDelimiters += 1
                     delimiterCount += 1
                 case "]":
@@ -489,6 +503,7 @@ enum NestingGuard {
                         // Both-flanking runs count as openers: the rule of
                         // three may keep them unpaired, so popping there
                         // could undercount.
+                        openerCount += run
                         openDelimiters.append(
                             contentsOf: repeatElement(delimiter, count: run)
                         )
@@ -509,6 +524,7 @@ enum NestingGuard {
                 }
 
                 if bracketDepth > limit
+                    || openerCount > MarkdownLimits.maxInlineOpenerBudget
                     || bracketDepth + openDelimiters.count > nestingBudget
                     || lineDelimiters
                         > MarkdownLimits.maxInlineDelimitersPerLine
@@ -520,6 +536,27 @@ enum NestingGuard {
             }
         }
         return false
+    }
+
+    /// Container markers consumed from the start of a line: quote markers
+    /// plus list markers, in order.
+    private static func containerPrefixDepth(_ prefix: Substring) -> Int {
+        var count = 0
+        var index = prefix.startIndex
+        while index < prefix.endIndex {
+            if prefix[index] == ">" {
+                count += 1
+                index = prefix.index(after: index)
+                continue
+            }
+            if let length = listMarkerLength(at: index, in: prefix) {
+                count += 1
+                index = prefix.index(index, offsetBy: length)
+                continue
+            }
+            index = prefix.index(after: index)
+        }
+        return count
     }
 
     /// The index just past the next run of exactly `length` backticks, or
@@ -584,8 +621,9 @@ enum NestingGuard {
                 // nesting. A raw-text block (types 1-5) is genuinely literal
                 // until its terminator.
                 if end.isEmpty,
-                   splitContainers(line).prefix
-                    .filter({ $0 == ">" }).count > limit {
+                   Self.containerPrefixDepth(
+                       splitContainers(line).prefix
+                   ) > limit {
                     return true
                 }
                 let (prefix, rest) = splitContainers(line)
@@ -868,9 +906,12 @@ enum NestingGuard {
             return lower.contains("?>") ? nil : "?>"
         }
         // Type 4: a declaration, ended by `>`. The uppercase test must use
-        // the original text; `lower` has already lost the case.
+        // the original text and must accept only ASCII: the HTML grammar
+        // allows no other letter, and `Ä`.isUppercase would otherwise start
+        // a block cmark does not recognize.
         if trimmed.hasPrefix("<!"),
-           trimmed.dropFirst(2).first?.isUppercase == true {
+           let first = trimmed.dropFirst(2).first,
+           first.isASCII, first.isUppercase {
             return lower.contains(">") ? nil : ">"
         }
 

@@ -61,6 +61,33 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
     }
 
+    @Test("The monotone opener budget bounds balanced text too")
+    func openerBudgetIsSound() {
+        // Every pair is balanced, so the stack stays empty; the opener
+        // count cannot fall, and it is what the sound bound relies on.
+        let source = String(
+            repeating: "*a* ",
+            count: MarkdownLimits.maxInlineOpenerBudget / 2 + 100
+        )
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A non-ASCII declaration does not open a raw-HTML block")
+    func declarationRequiresASCII() {
+        let source = "<!\u{00C4}\n"
+            + String(repeating: ">", count: 300) + " x"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("List markers count toward container depth")
+    func listMarkersCountTowardDepth() {
+        // 128 quote markers plus one list marker exceed the limit, even
+        // though only the quote markers are `>` characters.
+        let source = "<a / garbage>\n- "
+            + String(repeating: ">", count: 128) + " x"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("A delimiter inside a same-line code span is literal")
     func codeSpanContentIsLiteral() {
         // The span closes on the line, so cmark pairs exactly these two

@@ -39,6 +39,12 @@ public enum MarkdownLimits {
     /// nodes a run can form.
     public static let maxInlineNestingBudget = 2 * maxParseDepth
 
+    /// Maximum opener runs in one paragraph. This is the sound backstop:
+    /// every nested inline node needs an opener, so the count bounds the
+    /// depth no matter how closers and literal regions interact. It is sized
+    /// so the worst case stays well inside the parse thread's stack.
+    public static let maxInlineOpenerBudget = 32 * maxParseDepth
+
     /// Documents larger than this are routed to source-only/read-only mode.
     ///
     /// Provisional until the M0 measurement; adjust only with a measurement.
