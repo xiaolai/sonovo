@@ -34,6 +34,14 @@ cp "$binary" "$app/Contents/MacOS/Sonovo"
 cp -R "$resources" "$app/Contents/Resources/"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 
+# A bundle without the xterm-ghostty entry starts every shell with a
+# database that does not exist; fail the build rather than ship it.
+terminfo_entry="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/terminfo/78/xterm-ghostty"
+[[ -e "$terminfo_entry" ]] || {
+    echo "bundle is missing the xterm-ghostty terminfo entry" >&2
+    exit 1
+}
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

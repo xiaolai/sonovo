@@ -133,7 +133,7 @@ final class GhosttyAppController {
 
     private func applyGhosttyResources() {
         guard let resources = Bundle.module.url(forResource: "ghostty", withExtension: nil) else {
-            logger.warning("Bundled Ghostty resources not found")
+            logger.error("Bundled Ghostty resources not found")
             return
         }
 
@@ -141,11 +141,25 @@ final class GhosttyAppController {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: shellIntegration.path, isDirectory: &isDirectory),
               isDirectory.boolValue else {
-            logger.warning("Ghostty resources are incomplete")
+            logger.error("Ghostty resources are incomplete")
             return
         }
 
         setenv("GHOSTTY_RESOURCES_DIR", resources.path, 1)
+
+        // Ghostty derives the shell's TERMINFO from the resources directory,
+        // but only when it sees one; without it the child inherits whatever
+        // TERMINFO the launching process had, and a `/dev/null` there makes
+        // every shell in the terminal fail to load a database. Set the value
+        // here as well so it cannot depend on that derivation.
+        if let terminfo = Bundle.module.url(
+            forResource: "terminfo",
+            withExtension: nil
+        ) {
+            setenv("TERMINFO", terminfo.path, 1)
+        } else {
+            logger.error("Bundled terminfo database not found")
+        }
     }
 
     private func makeConfig(isDark: Bool) -> ghostty_config_t? {
