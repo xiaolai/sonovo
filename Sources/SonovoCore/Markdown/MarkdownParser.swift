@@ -853,6 +853,20 @@ enum NestingGuard {
         return false
     }
 
+    /// The column reached by `text`, with a tab advancing to the next
+    /// multiple of four.
+    private static func columnWidth(_ text: Substring) -> Int {
+        var columns = 0
+        for character in text {
+            if character == "\t" {
+                columns = (columns / 4 + 1) * 4
+            } else {
+                columns += 1
+            }
+        }
+        return columns
+    }
+
     /// The column of the first list marker on a line, after any quote
     /// markers, or nil when the line starts with something else.
     private static func firstListMarkerColumn(
@@ -1048,19 +1062,20 @@ enum NestingGuard {
             $0 == ">" || $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
         }
         // A fence may be indented at most three columns past its
-        // container. That applies inside a container too: `>     ``` ` is
-        // indented code, not a fence.
-        var trailingSpaces = 0
-        for character in prefix.reversed() {
-            if character == " " {
-                trailingSpaces += 1
-            } else if character == "\t" {
-                trailingSpaces += 4
-            } else {
-                break
-            }
-        }
-        if trailingSpaces > 3 { return nil }
+        // container. Measure both positions in columns: a tab advances to
+        // the next multiple of four, so `> \t``` ` sits two columns past
+        // the quote (a fence), while `>     ``` ` sits four (code).
+        let fenceColumn = columnWidth(line[line.startIndex..<trimmed.startIndex])
+        let markerText = prefix.reversed()
+            .drop(while: { $0 == " " || $0 == "\t" })
+            .reversed()
+        // Trailing whitespace is the marker's optional padding only when
+        // a marker precedes it; at top level the whole run is indentation.
+        let padding = !markerText.isEmpty
+            && markerText.count < prefix.count ? 1 : 0
+        let containerColumn = columnWidth(Substring(markerText)) + padding
+        let overIndent = fenceColumn - containerColumn
+        if overIndent > 3 || overIndent < 0 { return nil }
         return (
             first,
             length,

@@ -88,6 +88,16 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("A hidden deep line is caught by its own markers")
+    func hiddenDeepLineBackstop() {
+        // The fence is misclassified after a tab, so comment state hides
+        // the last line from the block walkers; the line's own markers
+        // still bound its depth.
+        let source = "> \t```\n> <!--\n> ```\n"
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("A blank line after a list fence does not trap")
     func blankLineAfterListFence() {
         // The sibling check used to subscript the end index of a blank
