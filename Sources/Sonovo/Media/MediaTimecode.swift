@@ -253,9 +253,11 @@ enum MediaTimecodeFormatter {
                 exactly: Double(nominal) * 60
                     - Double(dropFrames)
             ) ?? 1
-            let (framesPer24Hours, overflowDay) = Int64(
-                (fps * 3600).rounded()
-            ).multipliedReportingOverflow(by: 24)
+            // A day is 144 ten-minute blocks, whatever the track rate's
+            // last decimal is; deriving it from the float shifts the
+            // boundary by a frame for rates a hair off 29.97.
+            let (framesPer24Hours, overflowDay) = framesPer10Minutes
+                .multipliedReportingOverflow(by: 6 * 24)
             guard !overflowDay, framesPer24Hours > 0 else {
                 return "00:00:00:00"
             }

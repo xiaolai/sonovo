@@ -251,6 +251,29 @@ final class MediaTimecodeTests: XCTestCase {
         XCTAssertEqual(MediaTimecodeFormatter.elapsed(1e300), "—")
     }
 
+    func testDropFrameWrapsAtTheTenMinuteDayBoundary() {
+        // The day is 144 ten-minute blocks, so the wrap does not move with
+        // the rate's last decimal. Frame 2,589,408 starts the next loop.
+        XCTAssertEqual(
+            MediaTimecodeFormatter.timecode(
+                frameNumber: 2_589_408,
+                fps: 29.9704,
+                frameQuanta: 30,
+                dropFrame: true
+            ),
+            "00:00:00;00"
+        )
+        XCTAssertEqual(
+            MediaTimecodeFormatter.timecode(
+                frameNumber: 0,
+                fps: 29.9704,
+                frameQuanta: 30,
+                dropFrame: true
+            ),
+            "00:00:00;00"
+        )
+    }
+
     func testUnsupportedDropFrameMetadataCannotOverflow() {
         XCTAssertEqual(
             MediaTimecodeFormatter.timecode(
