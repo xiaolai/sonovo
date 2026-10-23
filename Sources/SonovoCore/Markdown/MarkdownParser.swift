@@ -401,11 +401,11 @@ enum NestingGuard {
                     // another, and the greedy same-line pairing this
                     // scanner can do is not cmark's; hiding content it
                     // parses as markup is the direction that undercounts.
-                    let run = line[index...]
-                        .prefix(while: {
-                            $0.unicodeScalars.first == scalar
-                        }).count
-                    let after = line.index(index, offsetBy: run)
+                    let (run, after) = scalarRun(
+                        line,
+                        from: index,
+                        scalar: scalar
+                    )
                     lineDelimiters += run
                     delimiterCount += run
                     if paragraphCertain,
@@ -566,18 +566,41 @@ enum NestingGuard {
         var index = start
         while index < line.endIndex {
             if line[index].unicodeScalars.first == "`" {
-                let run = line[index...].prefix(while: {
-                    $0.unicodeScalars.first == "`"
-                }).count
-                if run == length {
-                    return line.index(index, offsetBy: run)
-                }
-                index = line.index(index, offsetBy: run)
+                let (run, after) = scalarRun(
+                    line,
+                    from: index,
+                    scalar: "`"
+                )
+                if run == length { return after }
+                index = after
             } else {
                 index = line.index(after: index)
             }
         }
         return nil
+    }
+
+    /// A run of `scalar` at `start`, counted in Unicode scalars.
+    ///
+    /// A grapheme whose first scalar is the delimiter but which continues
+    /// with a combining mark contributes one scalar to the run and then
+    /// ends it: cmark counts code points, so a backtick-backtick-combining
+    /// sequence is a run of two, not three.
+    private static func scalarRun(
+        _ line: Substring,
+        from start: Substring.Index,
+        scalar: Unicode.Scalar
+    ) -> (length: Int, end: Substring.Index) {
+        var length = 0
+        var index = start
+        while index < line.endIndex {
+            let scalars = line[index].unicodeScalars
+            guard scalars.first == scalar else { break }
+            length += 1
+            index = line.index(after: index)
+            if scalars.count > 1 { break }
+        }
+        return (length, index)
     }
 
     /// Whether `character` can begin an inline HTML tag. A bare `<` in
@@ -698,6 +721,14 @@ enum NestingGuard {
                 continue
             }
             if let end = htmlBlockEnd(line) {
+                // The opening line's own container markers are structural.
+                if Self.lineExceedsContainerLimit(
+                    line,
+                    limit: limit,
+                    indentStack: &indentStack
+                ) {
+                    return true
+                }
                 htmlEnd = end
                 let prefix = splitContainers(line).prefix
                 htmlContainer = prefix.isEmpty
@@ -730,13 +761,15 @@ enum NestingGuard {
         // markers but is not a container.
         if isThematicBreak(line) { return false }
 
-        // A leading tab advances to column 4, which is an indented code
-        // block, not a container marker.
-        if line.drop(while: { $0 == " " }).first == "\t" {
-            return false
-        }
 
-        let leadingSpaces = line.prefix(while: { $0 == " " }).count
+        // A tab advances to column four, so it must grow the accumulated
+        // indent; counting only spaces let tab-indented lists nest freely.
+        var leadingSpaces = 0
+        for character in line.prefix(while: {
+            $0 == " " || $0 == "\t"
+        }) {
+            leadingSpaces += character == "\t" ? 4 : 1
+        }
         var index = line.startIndex
         var depth = 0
         var afterMarker = false
@@ -870,6 +903,13 @@ enum NestingGuard {
         // list marker makes the fence's prefix a scope requirement.
         let hasContainer = prefix.contains {
             $0 == ">" || $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
+        }
+        if !hasContainer {
+            // A top-level fence may be indented at most three spaces; at
+            // four the line is an indented code block, and a tab reaches
+            // column four.
+            let spaces = prefix.prefix(while: { $0 == " " }).count
+            if spaces > 3 || prefix.contains("\t") { return nil }
         }
         return (
             first,

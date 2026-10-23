@@ -88,6 +88,40 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("A combining mark does not merge inline backtick runs")
+    func combiningInsideInlineRun() {
+        // Each line's backticks are two runs of one scalar, not a two-run
+        // span; the emphasis between them is real and must be counted.
+        let line = "`\u{0301}` " + String(repeating: "*a ", count: 7)
+            + "`\u{0301}`x\n"
+        let source = String(repeating: line, count: 1_000) + "x"
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("The HTML opening line's own containers count")
+    func htmlOpeningLineContainers() {
+        let lists = (1..<129).map { level in
+            String(repeating: "  ", count: level) + "- x\n"
+        }.joined()
+        let source = "- <a / garbage>\n" + lists
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("Tab indentation still accumulates container depth")
+    func tabIndentedContainers() {
+        let lists = (0..<129).map { level in
+            String(repeating: "\t", count: level) + "- x\n"
+        }.joined()
+        #expect(NestingGuard.exceedsLimit(lists, limit: 100))
+    }
+
+    @Test("A four-space indented fence is not a fence")
+    func indentedFenceIsNotAFence() {
+        let source = "    ```\n"
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("A combining mark inside a backtick run does not open a fence")
     func combiningInsideFenceRun() {
         // cmark counts code points: two backticks, a combining mark, one
