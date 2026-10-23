@@ -176,6 +176,11 @@ enum MediaTimecodeFormatter {
         // picture is a ratio of 1.25.
         let ratio = Double(nominal) / fps
         guard ratio >= 0.25, ratio <= 4 else { return false }
+        // Drop-frame arithmetic mixes the track rate (for the skipped
+        // labels) with the quanta (for the modulo). They must describe the
+        // same nominal rate or the label runs backwards at minute
+        // boundaries; 29.97 fps pairs with 30, not with 15.
+        if dropFrame, nominal != Int64(fps.rounded()) { return false }
         guard dropFrame else { return true }
         let drop = (fps * 0.066_666).rounded()
         let perTenMinutes = (fps * 600).rounded()

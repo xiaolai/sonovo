@@ -312,6 +312,30 @@ final class MediaTimecodeTests: XCTestCase {
         )
     }
 
+    func testDropFrameQuantaMustMatchTheNominalRate() {
+        // Drop-frame mixes the track rate with the quanta; a quanta of 15
+        // on a 29.97 track produced a label that ran backwards at a minute
+        // boundary (frame 17,981 read 00:20:01;06, frame 17,982 read
+        // 00:20:00;00).
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 17_981,
+                fps: 29.97,
+                frameQuanta: 15,
+                dropFrame: true
+            )
+        )
+        XCTAssertEqual(
+            MediaTimecodeFormatter.timecode(
+                frameNumber: 17_981,
+                fps: 29.97,
+                frameQuanta: 15,
+                dropFrame: true
+            ),
+            "00:00:00:00"
+        )
+    }
+
     func testSourceLabelRejectsFrameOverflow() {
         var timecode = MediaTimecode(
             elapsed: 1,
