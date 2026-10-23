@@ -290,7 +290,13 @@ enum NestingGuard {
             if let first = trimmed.first,
                first == "`" || first == "~" {
                 let run = trimmed.prefix(while: { $0 == first }).count
-                if run >= 3 {
+                // A backtick fence's info string may not contain a
+                // backtick. Treating such a line as a fence would skip
+                // content cmark parses as inline markup — the one direction
+                // this scanner must never err in.
+                let info = trimmed.dropFirst(run)
+                let opensFence = first == "~" || !info.contains("`")
+                if run >= 3, opensFence {
                     fence = (first, run)
                     continue
                 }
