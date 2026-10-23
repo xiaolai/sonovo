@@ -516,13 +516,13 @@ struct ParserTests {
 
     @Test("A very long emphasis delimiter run is kept as one raw block")
     func emphasisRunBudget() {
-        let source = String(
-            repeating: "*",
-            count: MarkdownLimits.maxParseDepth + 1
-        ) + "x" + String(
-            repeating: "*",
-            count: MarkdownLimits.maxParseDepth + 1
-        )
+        // A run of n delimiters pairs into about n/2 nested nodes, so the
+        // run has to be twice the nesting budget before the depth bound
+        // itself, rather than a smaller threshold, rejects it.
+        let run = MarkdownLimits.maxInlineNestingBudget * 2 + 4
+        let source = String(repeating: "*", count: run)
+            + "x"
+            + String(repeating: "*", count: run)
         let parsed = MarkdownParser.parseCanonical(source)
         #expect(parsed.exceededNestingLimit)
     }

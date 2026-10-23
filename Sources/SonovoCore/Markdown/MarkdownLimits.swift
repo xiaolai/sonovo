@@ -32,6 +32,13 @@ public enum MarkdownLimits {
     /// markers is the pathological case.
     public static let maxInlineDelimitersPerLine = 4 * maxParseDepth
 
+    /// Maximum unmatched inline delimiter characters. Every nested inline
+    /// node consumes at least two delimiter characters, so this bounds the
+    /// depth below the recursive converter before the AST mapper's own limit
+    /// can apply. Weighted runs count about half their length, matching the
+    /// nodes a run can form.
+    public static let maxInlineNestingBudget = 2 * maxParseDepth
+
     /// Documents larger than this are routed to source-only/read-only mode.
     ///
     /// Provisional until the M0 measurement; adjust only with a measurement.

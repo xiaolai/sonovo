@@ -256,8 +256,18 @@ enum NestingGuard {
     }
 
     /// Detects inline nesting that the block-container guard cannot see.
-    /// Deeply nested images/links or a huge emphasis delimiter run makes the
-    /// recursive inline converter a stack-overflow candidate.
+    ///
+    /// swift-markdown converts the cmark tree recursively before the AST
+    /// mapper can apply its own depth limit, so a deeply nested inline
+    /// document overflows the stack in the dependency. The bound here is
+    /// conservative by construction: an emphasis/strong/strikethrough node
+    /// consumes delimiter characters, so the number of *unclosed* delimiter
+    /// characters bounds the nesting depth below it.
+    ///
+    /// A run that can only open adds to the depth; a run that can only close
+    /// removes from it; a run that can do both counts as an opener, because
+    /// CommonMark's "rule of three" may refuse to pair it. That direction is
+    /// the safe one: the count can exceed the real depth, never fall short.
     static func exceedsInlineLimit(_ source: String, limit: Int) -> Bool {
         // The budget checks run before splitting so a newline-only file does
         // not allocate one substring per line.
@@ -270,12 +280,10 @@ enum NestingGuard {
             if lineCount > MarkdownLimits.maxSourceLines { return true }
         }
 
+        let nestingBudget = MarkdownLimits.maxInlineNestingBudget
         var bracketDepth = 0
         var delimiterCount = 0
-        // Unmatched emphasis delimiters, in the order they were opened.
-        // Emphasis pairs across line breaks inside one paragraph, so a
-        // per-line count cannot see `("*a _a\n" x N) + "x" + ("\na_ a*" x N)`:
-        // every line looks harmless, and cmark still builds 2N nested nodes.
+        // Unmatched delimiter characters, in the order they were opened.
         var openDelimiters: [Character] = []
         var fence: (Character, Int)?
         for line in source.split(
@@ -283,6 +291,9 @@ enum NestingGuard {
             omittingEmptySubsequences: false
         ) {
             if let active = fence {
+                // A closing fence may be indented at most three spaces and
+                // carries no info string. Anything else is literal content
+                // of the block.
                 var indent = 0
                 var cursor = line.startIndex
                 while cursor < line.endIndex, line[cursor] == " " {
@@ -290,39 +301,31 @@ enum NestingGuard {
                     cursor = line.index(after: cursor)
                 }
                 let trimmed = line[cursor...]
-                if indent <= 3, trimmed.first == active.0,
-                   trimmed.prefix(while: { $0 == active.0 }).count
-                    >= active.1 {
+                let run = trimmed.prefix(while: { $0 == active.0 }).count
+                if indent <= 3, run >= active.1,
+                   trimmed.dropFirst(run).allSatisfy({
+                       $0 == " " || $0 == "\t"
+                   }) {
                     fence = nil
                     openDelimiters.removeAll()
                 }
                 continue
             }
+
             if line.allSatisfy({ $0 == " " || $0 == "\t" }) {
                 // A blank line ends the paragraph whose delimiters pair.
                 openDelimiters.removeAll()
                 bracketDepth = 0
+                continue
             }
 
-            // A code fence may be indented at most three spaces. At four it
-            // is an indented code block or a lazy paragraph continuation,
-            // never a fence, so its content must still be scanned.
-            var indent = 0
-            var cursor = line.startIndex
-            while cursor < line.endIndex, line[cursor] == " " {
-                indent += 1
-                cursor = line.index(after: cursor)
-            }
-            let trimmed = line[cursor...]
-            if indent <= 3,
-               let first = trimmed.first,
-               first == "`" || first == "~" {
-                let run = trimmed.prefix(while: { $0 == first }).count
-                // A backtick fence's info string may not contain a
-                // backtick. Treating such a line as a fence would skip
-                // content cmark parses as inline markup — the one direction
-                // this scanner must never err in.
-                let info = trimmed.dropFirst(run)
+            // A fence opens only at the start of a line. A fence indented
+            // inside a container ends with that container, which this
+            // scanner does not model; scanning container content instead
+            // over-counts, while skipping it could hide real nesting.
+            if let first = line.first, first == "`" || first == "~" {
+                let run = line.prefix(while: { $0 == first }).count
+                let info = line.dropFirst(run)
                 let opensFence = first == "~" || !info.contains("`")
                 if run >= 3, opensFence {
                     fence = (first, run)
@@ -343,17 +346,26 @@ enum NestingGuard {
                     continue
                 }
                 if character == "`" {
+                    // Inline code content is scanned rather than hidden.
+                    // A code span may open on one line and close on
+                    // another, and the greedy same-line pairing this
+                    // scanner can do is not cmark's; hiding content it
+                    // would parse as markup is the one direction that
+                    // undercounts. Counting the span's delimiters if it
+                    // really is code is the safe error.
                     let run = line[index...]
                         .prefix(while: { $0 == "`" }).count
-                    let after = line.index(index, offsetBy: run)
-                    index = closingCodeSpan(
-                        in: line,
-                        from: after,
-                        run: run
-                    ) ?? after
+                    lineDelimiters += run
+                    delimiterCount += run
+                    index = line.index(index, offsetBy: run)
+                    if delimiterCount
+                        > MarkdownLimits.maxInlineDelimiters {
+                        return true
+                    }
                     continue
                 }
 
+                var nextIndex = line.index(after: index)
                 switch character {
                 case "[":
                     bracketDepth += 1
@@ -369,37 +381,44 @@ enum NestingGuard {
                     let after = line.index(index, offsetBy: run)
                     lineDelimiters += run
                     delimiterCount += run
-                    // One run nests by itself: a run of n delimiters pairs
-                    // into about n/2 nested strong/emphasis nodes.
-                    if run > limit { return true }
-                    // A single tilde is literal text, not strikethrough.
-                    if character == "~", run < 2 {
-                        index = after
-                        continue
-                    }
                     let before = index > line.startIndex
                         ? line[line.index(before: index)]
                         : nil
                     let next = after < line.endIndex ? line[after] : nil
-                    // Underscores inside a word are literal.
                     let beforeIsWord = before?.isLetter == true
                         || before?.isNumber == true
                     let nextIsWord = next?.isLetter == true
                         || next?.isNumber == true
                     let wordInterior = character == "_"
                         && beforeIsWord && nextIsWord
-                    // Mirrors cmark's flanking rules closely enough for a
-                    // depth bound: a delimiter can close if text precedes
-                    // it, and can open if text follows it.
-                    let canClose = before?.isWhitespace == false && !wordInterior
-                    let canOpen = next?.isWhitespace == false && !wordInterior
-                    if canClose, openDelimiters.last == character {
-                        openDelimiters.removeLast()
-                    } else if canOpen {
-                        openDelimiters.append(character)
+                    let canClose = before?.isWhitespace == false
+                        && !wordInterior
+                    let canOpen = next?.isWhitespace == false
+                        && !wordInterior
+                    // A single tilde is literal text, not strikethrough.
+                    let counts = character != "~" || run >= 2
+                    if counts, canOpen {
+                        // Both-flanking runs count as openers: the rule of
+                        // three may keep them unpaired, so popping there
+                        // could undercount.
+                        openDelimiters.append(
+                            contentsOf: repeatElement(
+                                character,
+                                count: (run + 1) / 2
+                            )
+                        )
+                    } else if counts, canClose,
+                              openDelimiters.last == character {
+                        // A closer of the same character pairs with the
+                        // opener; both are weighted by the nodes they can
+                        // form.
+                        let weight = min(
+                            (run + 1) / 2,
+                            openDelimiters.count
+                        )
+                        openDelimiters.removeLast(weight)
                     }
-                    index = after
-                    continue
+                    nextIndex = after
                 case "!":
                     lineDelimiters += 1
                     delimiterCount += 1
@@ -408,38 +427,17 @@ enum NestingGuard {
                 }
 
                 if bracketDepth > limit
-                    || openDelimiters.count > limit
+                    || openDelimiters.count > nestingBudget
                     || lineDelimiters
                         > MarkdownLimits.maxInlineDelimitersPerLine
                     || delimiterCount
                         > MarkdownLimits.maxInlineDelimiters {
                     return true
                 }
-                index = line.index(after: index)
+                index = nextIndex
             }
         }
         return false
-    }
-
-    private static func closingCodeSpan(
-        in line: Substring,
-        from start: Substring.Index,
-        run: Int
-    ) -> Substring.Index? {
-        var index = start
-        while index < line.endIndex {
-            if line[index] == "`" {
-                let count = line[index...]
-                    .prefix(while: { $0 == "`" }).count
-                if count == run {
-                    return line.index(index, offsetBy: count)
-                }
-                index = line.index(index, offsetBy: count)
-            } else {
-                index = line.index(after: index)
-            }
-        }
-        return nil
     }
 
     /// Detects blockquote nesting above `limit` before parsing.
@@ -454,24 +452,29 @@ enum NestingGuard {
         var indentStack: [Int] = []
         var fence: (character: Character, length: Int, prefix: String)?
         // An open raw-HTML block: empty means "until a blank line", otherwise
-        // the closing marker to look for.
+        // the closing marker to look for. A block that opened inside a
+        // container ends with that container, which ends at a blank line
+        // even when its own terminator never appears.
         var htmlEnd: String?
+        var htmlInContainer = false
 
         for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
             // Raw HTML is literal text to cmark, so its markers cannot nest.
             if let end = htmlEnd {
+                let blank = stripContainers(line).allSatisfy({
+                    $0 == " " || $0 == "\t"
+                })
                 if end.isEmpty {
                     // A blockquote's blank line is `>`, not whitespace.
-                    if stripContainers(line).allSatisfy({
-                        $0 == " " || $0 == "\t"
-                    }) {
-                        htmlEnd = nil
-                    }
+                    if blank { htmlEnd = nil }
+                } else if htmlInContainer, blank {
+                    htmlEnd = nil
                 } else if line.lowercased().contains(end.lowercased()) {
                     // HTML terminators are case-insensitive: `</SCRIPT>`
                     // closes a `<script>` block.
                     htmlEnd = nil
                 }
+                if htmlEnd == nil { htmlInContainer = false }
                 continue
             }
 
@@ -523,6 +526,7 @@ enum NestingGuard {
             }
             if let end = htmlBlockEnd(line) {
                 htmlEnd = end
+                htmlInContainer = !splitContainers(line).prefix.isEmpty
                 continue
             }
 

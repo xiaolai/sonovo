@@ -36,6 +36,22 @@ struct NestingGuardTests {
         )
     }
 
+    @Test("A container-scoped HTML block ends with its container")
+    func containerScopedHTMLBlock() {
+        // The `<script>` block sits inside a blockquote. Its own terminator
+        // never appears, but the blank line ends the container and the
+        // block with it; the next line's quote markers must still be
+        // counted.
+        let source = "> <script>\n\n"
+            + String(repeating: ">", count: 200) + " x"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+
+        // A top-level raw-text block still runs to its own terminator.
+        let topLevel = "<script>\n\n"
+            + String(repeating: ">", count: 200) + " x\n</script>"
+        #expect(!NestingGuard.exceedsLimit(topLevel, limit: 100))
+    }
+
     @Test("Emphasis nesting is tracked across lines")
     func multilineEmphasisNesting() {
         // Each line opens two delimiters that only the tail closes; cmark
