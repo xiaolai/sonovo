@@ -180,7 +180,17 @@ enum MediaTimecodeFormatter {
         // labels) with the quanta (for the modulo). They must describe the
         // same nominal rate or the label runs backwards at minute
         // boundaries; 29.97 fps pairs with 30, not with 15.
-        if dropFrame, nominal != Int64(fps.rounded()) { return false }
+        //
+        // The skip pattern is defined for 30-based rates. At 23.976 with a
+        // base of 24 the ten-minute block and the per-minute block round to
+        // values that also walk a label backwards, so those rates cannot be
+        // drop-frame at all.
+        if dropFrame {
+            guard nominal == Int64(fps.rounded()),
+                  nominal % 30 == 0 else {
+                return false
+            }
+        }
         guard dropFrame else { return true }
         let drop = (fps * 0.066_666).rounded()
         let perTenMinutes = (fps * 600).rounded()

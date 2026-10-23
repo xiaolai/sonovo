@@ -334,6 +334,26 @@ final class MediaTimecodeTests: XCTestCase {
             ),
             "00:00:00:00"
         )
+        // The skip pattern is defined for 30-based rates. At 23.976 the
+        // ten-minute block rounds to a label that steps backwards across
+        // the boundary, so the metadata cannot be drop-frame.
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 14_385,
+                fps: 23.976,
+                frameQuanta: 24,
+                dropFrame: true
+            )
+        )
+        // The same rate is valid without drop-frame.
+        XCTAssertTrue(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 14_385,
+                fps: 23.976,
+                frameQuanta: 24,
+                dropFrame: false
+            )
+        )
     }
 
     func testSourceLabelRejectsFrameOverflow() {
