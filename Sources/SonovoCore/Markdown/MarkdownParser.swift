@@ -389,8 +389,13 @@ enum NestingGuard {
                     continue
                 }
                 if scalar == "\\" {
+                    // cmark escapes the next code point. When the
+                    // backslash's grapheme already carries that scalar (a
+                    // combining mark), advancing again would swallow the
+                    // following delimiter.
+                    let escapedInside = character.unicodeScalars.count > 1
                     index = line.index(after: index)
-                    if index < line.endIndex {
+                    if !escapedInside, index < line.endIndex {
                         index = line.index(after: index)
                     }
                     continue
@@ -409,6 +414,7 @@ enum NestingGuard {
                     lineDelimiters += run
                     delimiterCount += run
                     if paragraphCertain,
+                       run <= MarkdownLimits.maxCodeSpanBacktickRun,
                        let close = sameLineRun(
                            line,
                            from: after,
@@ -716,6 +722,15 @@ enum NestingGuard {
                 // as ordinary Markdown; it may open a new one.
                 fence = nil
             }
+            // Every line that is not literal content still contributes its
+            // container markers, including a line that opens a fence.
+            if Self.lineExceedsContainerLimit(
+                line,
+                limit: limit,
+                indentStack: &indentStack
+            ) {
+                return true
+            }
             if let opened = openingFence(line) {
                 fence = opened
                 continue
@@ -737,13 +752,6 @@ enum NestingGuard {
                 continue
             }
 
-            if Self.lineExceedsContainerLimit(
-                line,
-                limit: limit,
-                indentStack: &indentStack
-            ) {
-                return true
-            }
         }
         return false
     }
@@ -768,7 +776,13 @@ enum NestingGuard {
         for character in line.prefix(while: {
             $0 == " " || $0 == "\t"
         }) {
-            leadingSpaces += character == "\t" ? 4 : 1
+            if character == "\t" {
+                // A tab advances to the next multiple of four, not four
+                // columns from where it starts.
+                leadingSpaces = (leadingSpaces / 4 + 1) * 4
+            } else {
+                leadingSpaces += 1
+            }
         }
         var index = line.startIndex
         var depth = 0

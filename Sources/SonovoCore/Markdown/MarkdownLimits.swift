@@ -39,6 +39,11 @@ public enum MarkdownLimits {
     /// nodes a run can form.
     public static let maxInlineNestingBudget = 2 * maxParseDepth
 
+    /// cmark ignores a backtick run longer than this as a code-span
+    /// delimiter (its parser caps the opener run), so a longer run is
+    /// ordinary text and its content must stay visible to the scanner.
+    public static let maxCodeSpanBacktickRun = 80
+
     /// Maximum opener runs in one paragraph. This is the sound backstop:
     /// every nested inline node needs an opener, so the count bounds the
     /// depth no matter how closers and literal regions interact. It is sized

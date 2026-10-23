@@ -88,6 +88,39 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("A backtick run longer than cmark's cap is not a code span")
+    func longBacktickRunIsNotACodeSpan() {
+        let fenceRun = String(repeating: "`", count: 1_001)
+        let source = "a " + fenceRun + " " + String(repeating: "*a ", count: 5_000)
+            + fenceRun + "\nx" + String(repeating: "\na*", count: 5_000)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("An escaped combining mark does not swallow the next delimiter")
+    func escapedCombiningMark() {
+        // The backslash escapes the combining scalar, not the asterisk.
+        let source = String(repeating: "a \\\u{0301}*a\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("Mixed tab and space indentation advances by columns")
+    func mixedTabIndentation() {
+        let lists = (0..<200).map { level -> String in
+            let prefix = level % 2 == 0
+                ? String(repeating: "  \t", count: level / 2)
+                : String(repeating: "  ", count: level)
+            return prefix + "- x\n"
+        }.joined()
+        #expect(NestingGuard.exceedsLimit(lists, limit: 100))
+    }
+
+    @Test("A line opening a fence still counts its containers")
+    func fenceOpeningLineContainers() {
+        let source = String(repeating: ">", count: 129) + " ```\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("A combining mark does not merge inline backtick runs")
     func combiningInsideInlineRun() {
         // Each line's backticks are two runs of one scalar, not a two-run
