@@ -88,6 +88,44 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("A combining mark inside a backtick run does not open a fence")
+    func combiningInsideFenceRun() {
+        // cmark counts code points: two backticks, a combining mark, one
+        // backtick is not a run of three. A grapheme-based count invented a
+        // fence and hid the rest of the document.
+        let source = "``\u{0301}`\n"
+            + String(repeating: "*a\n", count: 300) + "x"
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A tag containing a backtick is not skipped")
+    func tagWithBacktickIsNotSkipped() {
+        let source = "<b `>\n"
+            + String(repeating: "*a\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("Brackets inside a tag count toward the opener budget")
+    func tagBracketsCountTowardBudget() {
+        let source = String(
+            repeating: "a <b ![\u{0301}a >\n",
+            count: MarkdownLimits.maxInlineOpenerBudget + 10
+        ) + "x"
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("Skipped HTML lines still accumulate container depth")
+    func htmlSkipAccumulatesContainers() {
+        // Each line opens one more list level; the HTML recognizer must not
+        // stop the depth stack from following them.
+        let lines = (0..<129).map { level in
+            String(repeating: "  ", count: level) + "- x\n"
+        }
+        let source = "<a / garbage>\n" + lines.joined()
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("A span after a cross-line opener is not skipped")
     func spanAfterCrossLineOpener() {
         // The first line's backtick can pair with this line's, making the

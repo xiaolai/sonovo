@@ -323,11 +323,19 @@ enum NestingGuard {
                     cursor = line.index(after: cursor)
                 }
                 let trimmed = line[cursor...]
-                let run = trimmed.prefix(while: {
-                    $0.unicodeScalars.first == active.0
-                }).count
+                // Count the run in scalars: a combining mark inside it ends
+                // the run for cmark, and a grapheme-based count would close
+                // a fence the parser keeps open (hiding real nesting).
+                let scalars = trimmed.unicodeScalars
+                var scalarIndex = scalars.startIndex
+                var run = 0
+                while scalarIndex < scalars.endIndex,
+                      scalars[scalarIndex] == active.0 {
+                    run += 1
+                    scalarIndex = scalars.index(after: scalarIndex)
+                }
                 if indent <= 3, run >= active.1,
-                   trimmed.dropFirst(run).allSatisfy({
+                   scalars[scalarIndex...].allSatisfy({
                        $0 == " " || $0 == "\t"
                    }) {
                     fence = nil
@@ -351,12 +359,17 @@ enum NestingGuard {
             // inside a container ends with that container, which this
             // scanner does not model; scanning container content instead
             // over-counts, while skipping it could hide real nesting.
-            if let first = line.first?.unicodeScalars.first,
+            if let first = line.unicodeScalars.first,
                first == "`" || first == "~" {
-                let run = line.prefix(while: {
-                    $0.unicodeScalars.first == first
-                }).count
-                let info = line.dropFirst(run)
+                let scalars = line.unicodeScalars
+                var scalarIndex = scalars.startIndex
+                var run = 0
+                while scalarIndex < scalars.endIndex,
+                      scalars[scalarIndex] == first {
+                    run += 1
+                    scalarIndex = scalars.index(after: scalarIndex)
+                }
+                let info = scalars[scalarIndex...]
                 let opensFence = first == "~" || !info.contains("`")
                 if run >= 3, opensFence {
                     fence = (first, run)
@@ -424,20 +437,23 @@ enum NestingGuard {
                     let after = line.index(after: index)
                     if after < line.endIndex,
                        startsHTMLTag(line[after]) {
-                        if let close = line[after...].firstIndex(of: ">") {
+                        if let close = line[after...].firstIndex(of: ">"),
+                           !line[after..<close].contains("`") {
                             // A valid tag is literal to cmark; an invalid
                             // one is not. Counting the tag's delimiters as
                             // openers is conservative either way, and it
                             // cannot remove a real opener.
                             var cursor = after
                             while cursor < close {
-                                if let inner = line[cursor]
-                                    .unicodeScalars.first,
-                                   inner == "*" || inner == "_"
+                                let inner = line[cursor]
+                                    .unicodeScalars.first
+                                if inner == "*" || inner == "_"
                                     || inner == "~" {
-                                    openDelimiters.append(inner)
+                                    openDelimiters.append(inner!)
                                     openerCount += 1
-                                } else if line[cursor] == "[" {
+                                } else if inner == "[" {
+                                    // Compare by scalar: a combining mark
+                                    // can join the bracket's grapheme.
                                     openerCount += 1
                                 }
                                 cursor = line.index(after: cursor)
@@ -539,27 +555,6 @@ enum NestingGuard {
         return false
     }
 
-    /// Container markers consumed from the start of a line: quote markers
-    /// plus list markers, in order.
-    private static func containerPrefixDepth(_ prefix: Substring) -> Int {
-        var count = 0
-        var index = prefix.startIndex
-        while index < prefix.endIndex {
-            if prefix[index] == ">" {
-                count += 1
-                index = prefix.index(after: index)
-                continue
-            }
-            if let length = listMarkerLength(at: index, in: prefix) {
-                count += 1
-                index = prefix.index(index, offsetBy: length)
-                continue
-            }
-            index = prefix.index(after: index)
-        }
-        return count
-    }
-
     /// The index just past the next run of exactly `length` backticks, or
     /// nil when the line has none. Used only to decide whether a code span
     /// certainly closes here; the content is still scanned either way.
@@ -622,9 +617,11 @@ enum NestingGuard {
                 // nesting. A raw-text block (types 1-5) is genuinely literal
                 // until its terminator.
                 if end.isEmpty,
-                   Self.containerPrefixDepth(
-                       splitContainers(line).prefix
-                   ) > limit {
+                   Self.lineExceedsContainerLimit(
+                       line,
+                       limit: limit,
+                       indentStack: &indentStack
+                   ) {
                     return true
                 }
                 let (prefix, rest) = splitContainers(line)
@@ -709,90 +706,109 @@ enum NestingGuard {
                 continue
             }
 
-            // A thematic break is made of the same characters as bullet
-            // markers but is not a container.
-            if isThematicBreak(line) { continue }
+            if Self.lineExceedsContainerLimit(
+                line,
+                limit: limit,
+                indentStack: &indentStack
+            ) {
+                return true
+            }
+        }
+        return false
+    }
 
-            // A leading tab advances to column 4, which is an indented code
-            // block, not a container marker.
-            if line.drop(while: { $0 == " " }).first == "\t" {
+    /// Counts the container markers on a line, updates the accumulated
+    /// indentation stack, and reports whether the total depth is over the
+    /// limit. Shared by the ordinary path and the skipped type 6/7 HTML
+    /// path, so a misidentified block cannot hide list or quote nesting.
+    private static func lineExceedsContainerLimit(
+        _ line: Substring,
+        limit: Int,
+        indentStack: inout [Int]
+    ) -> Bool {
+        // A thematic break is made of the same characters as bullet
+        // markers but is not a container.
+        if isThematicBreak(line) { return false }
+
+        // A leading tab advances to column 4, which is an indented code
+        // block, not a container marker.
+        if line.drop(while: { $0 == " " }).first == "\t" {
+            return false
+        }
+
+        let leadingSpaces = line.prefix(while: { $0 == " " }).count
+        var index = line.startIndex
+        var depth = 0
+        var afterMarker = false
+
+        while index < line.endIndex {
+            // Three columns can indent the first marker; a list marker
+            // can be followed by up to four columns of padding. Inside
+            // an open container, the line may also carry that container's
+            // indentation. Tabs count as one column, conservatively.
+            let indentLimit = afterMarker
+                ? 4
+                : (indentStack.isEmpty
+                    ? 3
+                    : max(3, (indentStack.last ?? 0) + 4))
+            var indent = 0
+            while index < line.endIndex,
+                  line[index] == " " || line[index] == "\t",
+                  indent < indentLimit {
+                indent += 1
+                index = line.index(after: index)
+            }
+            if index < line.endIndex,
+               line[index] == " " || line[index] == "\t" {
+                break
+            }
+            guard index < line.endIndex else { break }
+
+            if line[index] == ">" {
+                afterMarker = true
+                depth += 1
+                if depth > limit { return true }
+                index = line.index(after: index)
+                // One optional space or tab belongs to the marker.
+                if index < line.endIndex,
+                   line[index] == " " || line[index] == "\t" {
+                    index = line.index(after: index)
+                }
                 continue
             }
 
-            let leadingSpaces = line.prefix(while: { $0 == " " }).count
-            var index = line.startIndex
-            var depth = 0
-            var afterMarker = false
-
-            while index < line.endIndex {
-                // Three columns can indent the first marker; a list marker
-                // can be followed by up to four columns of padding. Inside
-                // an open container, the line may also carry that container's
-                // indentation. Tabs count as one column, conservatively.
-                let indentLimit = afterMarker
-                    ? 4
-                    : (indentStack.isEmpty
-                        ? 3
-                        : max(3, (indentStack.last ?? 0) + 4))
-                var indent = 0
-                while index < line.endIndex,
-                      line[index] == " " || line[index] == "\t",
-                      indent < indentLimit {
-                    indent += 1
-                    index = line.index(after: index)
-                }
-                if index < line.endIndex,
-                   line[index] == " " || line[index] == "\t" {
-                    break
-                }
-                guard index < line.endIndex else { break }
-
-                if line[index] == ">" {
-                    afterMarker = true
-                    depth += 1
-                    if depth > limit { return true }
-                    index = line.index(after: index)
-                    // One optional space or tab belongs to the marker.
-                    if index < line.endIndex,
-                       line[index] == " " || line[index] == "\t" {
-                        index = line.index(after: index)
-                    }
-                    continue
-                }
-
-                if let markerLength = listMarkerLength(at: index, in: line) {
-                    depth += 1
-                    if depth > limit { return true }
-                    afterMarker = true
-                    index = line.index(index, offsetBy: markerLength)
-                    continue
-                }
-
-                break
+            if let markerLength = listMarkerLength(at: index, in: line) {
+                depth += 1
+                if depth > limit { return true }
+                afterMarker = true
+                index = line.index(index, offsetBy: markerLength)
+                continue
             }
 
-            guard depth > 0 else { continue }
-
-            if indentStack.isEmpty {
-                // Four leading spaces at top level make indented code, not a
-                // container.
-                if leadingSpaces < 4 {
-                    indentStack.append(leadingSpaces)
-                }
-            } else if leadingSpaces > indentStack[indentStack.count - 1] {
-                indentStack.append(leadingSpaces)
-            } else {
-                while let top = indentStack.last, top > leadingSpaces {
-                    indentStack.removeLast()
-                }
-                if indentStack.isEmpty {
-                    indentStack.append(leadingSpaces)
-                }
-            }
-
-            let totalDepth = indentStack.count + max(0, depth - 1)
-            if totalDepth > limit { return true }
+            break
         }
+
+        guard depth > 0 else { return false }
+
+        if indentStack.isEmpty {
+            // Four leading spaces at top level make indented code, not a
+            // container.
+            if leadingSpaces < 4 {
+                indentStack.append(leadingSpaces)
+            }
+        } else if leadingSpaces > indentStack[indentStack.count - 1] {
+            indentStack.append(leadingSpaces)
+        } else {
+            while let top = indentStack.last, top > leadingSpaces {
+                indentStack.removeLast()
+            }
+            if indentStack.isEmpty {
+                indentStack.append(leadingSpaces)
+            }
+        }
+
+        let totalDepth = indentStack.count + max(0, depth - 1)
+        if totalDepth > limit { return true }
         return false
     }
 
