@@ -602,6 +602,18 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     func scheduleParse(immediate: Bool = false) {
         parseTask?.cancel()
 
+        // Above the editable threshold the document is presented as plain
+        // source. Parsing it only to color ranges would build a second
+        // document-sized AST, which is the cost the size policy exists to
+        // avoid.
+        guard !document.isLarge else {
+            parseTask = nil
+            pendingParseRevision = nil
+            lastOutput = nil
+            applyBaseAttributesOnly()
+            return
+        }
+
         let documentID = document.id
         let revision = document.revision
         let source = textView.string
