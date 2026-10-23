@@ -88,6 +88,39 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("Backticks inside an HTML comment do not open a fence")
+    func backticksInsideHTMLComment() {
+        let source = "<!--\n```\n-->\n"
+            + String(repeating: "*a\n", count: 5_000) + "x"
+            + String(repeating: "\na*", count: 5_000)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A fence cannot outlive the list it opened inside")
+    func fenceScopeIncludesList() {
+        let source = "> - ```\n"
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("A fence indented past three columns inside a container is not a fence")
+    func containerFenceIndentation() {
+        let source = ">     ```\n"
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("A format character does not hide a delimiter from the count")
+    func formatCharacterDelimiter() {
+        // U+0600 joins the asterisk into one grapheme; cmark sees the
+        // asterisk, so the opener has to count.
+        let source = String(
+            repeating: "\u{0600}*x*\n",
+            count: MarkdownLimits.maxInlineOpenerBudget + 100
+        )
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
     @Test("A backtick run longer than cmark's cap is not a code span")
     func longBacktickRunIsNotACodeSpan() {
         let fenceRun = String(repeating: "`", count: 1_001)

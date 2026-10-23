@@ -308,10 +308,57 @@ enum NestingGuard {
         // popping there is how an earlier proxy undercounted.
         var paragraphCertain = true
         var fence: (Unicode.Scalar, Int)?
+        // Raw HTML is literal to cmark; a fence marker inside it must not
+        // turn on fence skipping. Openers in the block still count, because
+        // a misidentified block may really be markup.
+        var htmlEnd: String?
         for line in source.split(
             separator: "\n",
             omittingEmptySubsequences: false
         ) {
+            if let end = htmlEnd {
+                var scan = line.unicodeScalars
+                var cursor = scan.startIndex
+                while cursor < scan.endIndex {
+                    let inner = scan[cursor]
+                    if inner == "*" || inner == "_" || inner == "~" {
+                        openerCount += 1
+                        // Types 6/7 are the heuristic ones; treat their
+                        // delimiters as open once so the tight stack bound
+                        // still applies. A raw-text block (types 1-5) is
+                        // reliably literal, so only the sound count sees it.
+                        if end.isEmpty {
+                            openDelimiters.append(inner)
+                        }
+                    } else if inner == "[" {
+                        openerCount += 1
+                        if end.isEmpty { bracketDepth += 1 }
+                    }
+                    if openerCount > MarkdownLimits.maxInlineOpenerBudget
+                        || bracketDepth > limit
+                        || openDelimiters.count > nestingBudget {
+                        return true
+                    }
+                    cursor = scan.index(after: cursor)
+                }
+                let terminated = end.isEmpty
+                    ? stripContainers(line).allSatisfy({
+                        $0 == " " || $0 == "\t"
+                    })
+                    : line.lowercased().contains(end.lowercased())
+                if terminated {
+                    htmlEnd = nil
+                    openDelimiters.removeAll()
+                    paragraphCertain = true
+                }
+                continue
+            }
+            if let end = htmlBlockEnd(line) {
+                htmlEnd = end
+                openDelimiters.removeAll()
+                paragraphCertain = true
+                continue
+            }
             if let active = fence {
                 // A closing fence may be indented at most three spaces and
                 // carries no info string. Anything else is literal content
@@ -543,7 +590,16 @@ enum NestingGuard {
                     lineDelimiters += 1
                     delimiterCount += 1
                 default:
-                    break
+                    // A leading format character (U+0600 and friends)
+                    // joins the following delimiter into one grapheme.
+                    // cmark still sees the delimiter, so count it.
+                    if character.unicodeScalars.count > 1 {
+                        for inner in character.unicodeScalars
+                            where inner == "*" || inner == "_"
+                            || inner == "~" || inner == "[" {
+                            openerCount += 1
+                        }
+                    }
                 }
 
                 if bracketDepth > limit
@@ -687,19 +743,13 @@ enum NestingGuard {
                 // and absorbs every subsequent line. The container only has
                 // to still be open, not identical: `> >` is a valid content
                 // line inside a quoted fence.
-                let scopeOpen: Bool
-                if active.prefix.isEmpty {
-                    scopeOpen = true
-                } else if active.prefix.contains(">") {
-                    // Every quote level of the opening container must still
-                    // be present; ending the inner quote ends the fence.
-                    let required = active.prefix.filter { $0 == ">" }.count
-                    let present = splitContainers(line).prefix
-                        .filter { $0 == ">" }.count
-                    scopeOpen = present >= required
-                } else {
-                    scopeOpen = line.hasPrefix(active.prefix)
-                }
+                // Every container level of the opening line must still be
+                // present. Checking quotes alone let a fence outlive the
+                // list it opened inside, hiding the lines after it.
+                let scopeOpen = active.prefix.isEmpty
+                    || normalizedContainerPrefix(
+                        splitContainers(line).prefix
+                    ).hasPrefix(active.prefix)
                 if scopeOpen {
                     let rest: Substring
                     if active.prefix.isEmpty {
@@ -918,13 +968,12 @@ enum NestingGuard {
         let hasContainer = prefix.contains {
             $0 == ">" || $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
         }
-        if !hasContainer {
-            // A top-level fence may be indented at most three spaces; at
-            // four the line is an indented code block, and a tab reaches
-            // column four.
-            let spaces = prefix.prefix(while: { $0 == " " }).count
-            if spaces > 3 || prefix.contains("\t") { return nil }
-        }
+        // A fence may be indented at most three columns past its
+        // container. That applies inside a container too: `>     ``` ` is
+        // indented code, not a fence.
+        let trailingSpaces = prefix.reversed()
+            .prefix(while: { $0 == " " }).count
+        if trailingSpaces > 3 || prefix.contains("\t") { return nil }
         return (
             first,
             length,
