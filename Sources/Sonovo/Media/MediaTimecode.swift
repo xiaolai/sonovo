@@ -191,7 +191,10 @@ enum MediaTimecodeFormatter {
             // track with the flag set is inconsistent metadata, and the
             // skip arithmetic resets its labels at the ten-minute and
             // 24-hour boundaries.
-            let isNTSC = abs(fps * 1.001 - Double(nominal)) < 0.01
+            // A two-thousandth of a frame per second: wide enough for
+            // 29.97's decimal spelling, narrow enough to reject 29.979,
+            // whose own rounding walks the label backwards.
+            let isNTSC = abs(fps * 1.001 - Double(nominal)) < 0.002
             guard nominal == Int64(fps.rounded()),
                   nominal % 30 == 0,
                   isNTSC else {

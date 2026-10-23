@@ -364,6 +364,16 @@ final class MediaTimecodeTests: XCTestCase {
                 dropFrame: true
             )
         )
+        // Nor can a rate near 29.97 but not the NTSC one: its own rounding
+        // walks the label backwards at a minute boundary.
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 17_986,
+                fps: 29.979,
+                frameQuanta: 30,
+                dropFrame: true
+            )
+        )
     }
 
     func testSourceLabelRejectsFrameOverflow() {
