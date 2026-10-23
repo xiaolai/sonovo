@@ -296,6 +296,12 @@ enum NestingGuard {
         var delimiterCount = 0
         // Unmatched delimiter characters, in the order they were opened.
         var openDelimiters: [Unicode.Scalar] = []
+        // False once the paragraph contains something whose content cmark
+        // may treat as literal (an inline code span or an inline HTML tag
+        // that does not close on the line). While uncertain, a closer is not
+        // allowed to remove an opener: a literal closer cannot pair, and
+        // popping there is how an earlier proxy undercounted.
+        var paragraphCertain = true
         var fence: (Unicode.Scalar, Int)?
         for line in source.split(
             separator: "\n",
@@ -321,6 +327,7 @@ enum NestingGuard {
                    }) {
                     fence = nil
                     openDelimiters.removeAll()
+                    paragraphCertain = true
                 }
                 continue
             }
@@ -329,6 +336,7 @@ enum NestingGuard {
                 // A blank line ends the paragraph whose delimiters pair.
                 openDelimiters.removeAll()
                 bracketDepth = 0
+                paragraphCertain = true
                 continue
             }
 
@@ -346,6 +354,7 @@ enum NestingGuard {
                 if run >= 3, opensFence {
                     fence = (first, run)
                     openDelimiters.removeAll()
+                    paragraphCertain = true
                     continue
                 }
             }
@@ -375,14 +384,34 @@ enum NestingGuard {
                         .prefix(while: {
                             $0.unicodeScalars.first == scalar
                         }).count
+                    let after = line.index(index, offsetBy: run)
+                    if sameLineRun(line, from: after, length: run) == nil {
+                        // The span may close on a later line, where cmark
+                        // treats everything up to the closer as literal.
+                        paragraphCertain = false
+                    }
                     lineDelimiters += run
                     delimiterCount += run
-                    index = line.index(index, offsetBy: run)
+                    index = after
                     if delimiterCount
                         > MarkdownLimits.maxInlineDelimiters {
                         return true
                     }
                     continue
+                }
+
+                if scalar == "<" {
+                    let after = line.index(after: index)
+                    if after < line.endIndex,
+                       startsHTMLTag(line[after]) {
+                        if let close = line[after...].firstIndex(of: ">") {
+                            // A tag closed on this line is literal content
+                            // to cmark, so its delimiters are not markup.
+                            index = line.index(after: close)
+                            continue
+                        }
+                        paragraphCertain = false
+                    }
                 }
 
                 var nextIndex = line.index(after: index)
@@ -420,7 +449,15 @@ enum NestingGuard {
                     // text follows it.
                     let canClose = before?.isWhitespace == false
                         && !wordInterior
-                    let canOpen = next?.isWhitespace == false
+                    // A combining mark in the run's last grapheme follows
+                    // the delimiter scalar, so cmark sees non-whitespace
+                    // text after it even when the next grapheme is a space
+                    // or a line ending.
+                    let lastOfRun = line[line.index(before: after)]
+                    let hasCombiningTail =
+                        lastOfRun.unicodeScalars.count > 1
+                    let canOpen = (hasCombiningTail
+                        || next?.isWhitespace == false)
                         && !wordInterior
                     if canOpen {
                         // Both-flanking runs count as openers: the rule of
@@ -429,7 +466,7 @@ enum NestingGuard {
                         openDelimiters.append(
                             contentsOf: repeatElement(delimiter, count: run)
                         )
-                    } else if canClose {
+                    } else if canClose, paragraphCertain {
                         var remaining = run
                         while remaining > 0,
                               openDelimiters.last == delimiter {
@@ -446,7 +483,7 @@ enum NestingGuard {
                 }
 
                 if bracketDepth > limit
-                    || openDelimiters.count > nestingBudget
+                    || bracketDepth + openDelimiters.count > nestingBudget
                     || lineDelimiters
                         > MarkdownLimits.maxInlineDelimitersPerLine
                     || delimiterCount
@@ -457,6 +494,41 @@ enum NestingGuard {
             }
         }
         return false
+    }
+
+    /// The index just past the next run of exactly `length` backticks, or
+    /// nil when the line has none. Used only to decide whether a code span
+    /// certainly closes here; the content is still scanned either way.
+    private static func sameLineRun(
+        _ line: Substring,
+        from start: Substring.Index,
+        length: Int
+    ) -> Substring.Index? {
+        var index = start
+        while index < line.endIndex {
+            if line[index].unicodeScalars.first == "`" {
+                let run = line[index...].prefix(while: {
+                    $0.unicodeScalars.first == "`"
+                }).count
+                if run == length {
+                    return line.index(index, offsetBy: run)
+                }
+                index = line.index(index, offsetBy: run)
+            } else {
+                index = line.index(after: index)
+            }
+        }
+        return nil
+    }
+
+    /// Whether `character` can begin an inline HTML tag. A bare `<` in
+    /// prose is not a tag.
+    private static func startsHTMLTag(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else {
+            return false
+        }
+        return CharacterSet.letters.contains(scalar)
+            || scalar == "/" || scalar == "!" || scalar == "?"
     }
 
     /// Detects blockquote nesting above `limit` before parsing.
@@ -480,6 +552,16 @@ enum NestingGuard {
         for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
             // Raw HTML is literal text to cmark, so its markers cannot nest.
             if let end = htmlEnd {
+                // Types 6 and 7 end at a blank line and their recognizer is
+                // a heuristic; container markers on such a line stay
+                // structural, so a misidentified block cannot hide their
+                // nesting. A raw-text block (types 1-5) is genuinely literal
+                // until its terminator.
+                if end.isEmpty,
+                   splitContainers(line).prefix
+                    .filter({ $0 == ">" }).count > limit {
+                    return true
+                }
                 let (prefix, rest) = splitContainers(line)
                 let blank = rest.allSatisfy({
                     $0 == " " || $0 == "\t"

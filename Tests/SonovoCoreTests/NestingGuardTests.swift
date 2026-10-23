@@ -61,6 +61,49 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
     }
 
+    @Test("A cross-line code span makes closers uncertain")
+    func multilineCodeSpanUncertainty() {
+        // cmark hides the closer inside a cross-line code span; counting it
+        // as a closer would remove an opener the reference parser keeps.
+        let source = String(repeating: "*a `b*\n `\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("Inline HTML tag content is not markup")
+    func inlineHTMLTagContent() {
+        let source = String(
+            repeating: "*a <b title=\"x* \">\n",
+            count: 300
+        ) + "x" + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A combining mark after a delimiter still opens")
+    func combiningMarkStillOpens() {
+        let source = String(repeating: "*\u{0301}\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("Brackets and emphasis share one depth budget")
+    func combinedBracketAndEmphasisDepth() {
+        let source = String(repeating: "*a\n", count: 200)
+            + String(repeating: "![a\n", count: 100)
+            + "x"
+            + String(repeating: "\na](x)", count: 100)
+            + String(repeating: "\na*", count: 200)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A raw-HTML block cannot hide container nesting")
+    func htmlBlockCannotHideContainers() {
+        for opener in ["<a / garbage>\n", "a\n<a>\n"] {
+            let source = opener + String(repeating: ">", count: 300) + " x"
+            #expect(NestingGuard.exceedsLimit(source, limit: 100))
+        }
+    }
+
     @Test("A container-scoped HTML block ends when its container does")
     func containerScopedHTMLWithoutBlankLine() {
         // A list item's HTML block ends at the first unindented line, even
