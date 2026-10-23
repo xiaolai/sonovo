@@ -251,6 +251,37 @@ final class MediaTimecodeTests: XCTestCase {
         XCTAssertEqual(MediaTimecodeFormatter.elapsed(1e300), "—")
     }
 
+    func testUnsupportedDropFrameMetadataCannotOverflow() {
+        XCTAssertEqual(
+            MediaTimecodeFormatter.timecode(
+                frameNumber: 540_005_390_999,
+                fps: 900_008_985,
+                frameQuanta: 1_000_000,
+                dropFrame: true
+            ),
+            "00:00:00:00"
+        )
+        var timecode = MediaTimecode(
+            elapsed: 1,
+            nominalFrameRate: 900_008_985,
+            sourceSegments: [
+                .init(
+                    time: 0,
+                    startFrame: 540_005_390_999,
+                    frameRate: 900_008_985,
+                    frameQuanta: 1_000_000,
+                    isDropFrame: true,
+                    duration: nil
+                )
+            ],
+            isVariableFrameRate: false,
+            isTimingVerified: true
+        )
+        XCTAssertNil(timecode.sourceLabel)
+        timecode.elapsed = 1e12
+        XCTAssertNil(timecode.sourceLabel)
+    }
+
     func testSourceLabelRejectsFrameOverflow() {
         var timecode = MediaTimecode(
             elapsed: 1,

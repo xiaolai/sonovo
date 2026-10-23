@@ -1,3 +1,4 @@
+import SonovoCore
 import SwiftUI
 
 struct TransportBar: View {
@@ -331,16 +332,28 @@ struct TransportBar: View {
 private struct Scrubber: View {
     @Bindable var state: AppState
 
+    /// The playhead's fraction of the duration, or zero while the duration
+    /// is unknown. Dividing by zero yields NaN or infinity, which a raw
+    /// `Int(_:)` conversion would trap on.
+    private var fraction: Double {
+        guard state.duration.isFinite,
+              state.duration > 0,
+              state.playhead.isFinite else {
+            return 0
+        }
+        return min(
+            max(
+                state.playhead / state.duration,
+                AppTheme.Preferences.unitRange.lowerBound
+            ),
+            AppTheme.Preferences.unitRange.upperBound
+        )
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let width = max(geometry.size.width, AppTheme.Spacing.hairline)
-            let fraction = min(
-                max(
-                    state.playhead / state.duration,
-                    AppTheme.Preferences.unitRange.lowerBound
-                ),
-                AppTheme.Preferences.unitRange.upperBound
-            )
+            let fraction = self.fraction
 
             ZStack(alignment: .leading) {
                 Capsule()
@@ -381,6 +394,8 @@ private struct Scrubber: View {
         .frame(height: AppTheme.Size.scrubberHitHeight)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Playhead")
-        .accessibilityValue("\(Int((state.playhead / state.duration) * 100)) percent")
+        .accessibilityValue(
+            "\(NumericConversion.clamped(fraction * 100, to: 0...100)) percent"
+        )
     }
 }

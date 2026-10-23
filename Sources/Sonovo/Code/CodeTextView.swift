@@ -6,7 +6,16 @@ import SonovoCore
 /// Editor preferences the code surface reads. Stored in UserDefaults so a
 /// setting applies to every open code document immediately.
 struct CodeEditorSettings: Equatable, Sendable {
-    var tabWidth: Int = AppTheme.Code.tabWidthDefault
+    private var storedTabWidth: Int
+
+    /// Always inside `AppTheme.Code.tabWidthRange`. Clamping here rather than
+    /// at each read keeps a value from UserDefaults or a direct caller from
+    /// reaching the repeated-string allocation in indentation arithmetic.
+    var tabWidth: Int {
+        get { storedTabWidth }
+        set { storedTabWidth = AppTheme.Code.clampedTabWidth(newValue) }
+    }
+
     var usesTabs = false
     var wrapsLines = false
 
@@ -14,15 +23,25 @@ struct CodeEditorSettings: Equatable, Sendable {
     static let usesTabsKey = "sonovo.codeUsesTabs"
     static let wrapLinesKey = "sonovo.codeWrapLines"
 
+    init(
+        tabWidth: Int = AppTheme.Code.tabWidthDefault,
+        usesTabs: Bool = false,
+        wrapsLines: Bool = false
+    ) {
+        storedTabWidth = AppTheme.Code.clampedTabWidth(tabWidth)
+        self.usesTabs = usesTabs
+        self.wrapsLines = wrapsLines
+    }
+
     static func load(from defaults: UserDefaults = .standard) -> Self {
-        var settings = CodeEditorSettings()
         let storedWidth = defaults.integer(forKey: tabWidthKey)
-        if storedWidth > 0 {
-            settings.tabWidth = AppTheme.Code.clampedTabWidth(storedWidth)
-        }
-        settings.usesTabs = defaults.bool(forKey: usesTabsKey)
-        settings.wrapsLines = defaults.bool(forKey: wrapLinesKey)
-        return settings
+        return CodeEditorSettings(
+            tabWidth: storedWidth > 0
+                ? storedWidth
+                : AppTheme.Code.tabWidthDefault,
+            usesTabs: defaults.bool(forKey: usesTabsKey),
+            wrapsLines: defaults.bool(forKey: wrapLinesKey)
+        )
     }
 }
 
@@ -909,7 +928,13 @@ final class CodeTextView: NSTextView {
         weight: .regular
     )
     var editorUsesTabs = false
-    var editorTabWidth = AppTheme.Code.tabWidthDefault
+    /// Always inside `AppTheme.Code.tabWidthRange`; the indent-guide and
+    /// tab-insertion paths rely on a bounded width.
+    var editorTabWidth: Int {
+        get { storedTabWidth }
+        set { storedTabWidth = AppTheme.Code.clampedTabWidth(newValue) }
+    }
+    private var storedTabWidth = AppTheme.Code.tabWidthDefault
 
     func updateIndentGuideFont(_ font: NSFont) {
         indentGuideFont = font

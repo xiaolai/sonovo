@@ -154,9 +154,16 @@ enum MediaTimecodeFormatter {
         frameQuanta: Double?,
         dropFrame: Bool
     ) -> Bool {
-        guard fps.isFinite, fps > 0 else { return false }
+        // Real video rates and frame quanta fit far below this; anything
+        // larger is malformed metadata, not a labelable timecode track.
+        let maximumRate = 240.0
+        guard fps.isFinite, fps >= 1, fps <= maximumRate else {
+            return false
+        }
         let nominalSource = frameQuanta ?? fps
-        guard nominalSource.isFinite, nominalSource > 0,
+        guard nominalSource.isFinite,
+              nominalSource >= 1,
+              nominalSource <= maximumRate,
               let nominal = Int64(exactly: nominalSource.rounded()),
               nominal > 0 else {
             return false
@@ -217,12 +224,29 @@ enum MediaTimecodeFormatter {
             frame %= framesPer24Hours
             let tenMinuteBlocks = frame / framesPer10Minutes
             let remainder = frame % framesPer10Minutes
+            let (nineDrop, overflow1) = dropFrames
+                .multipliedReportingOverflow(by: 9)
+            let (blockAdjust, overflow2) = nineDrop
+                .multipliedReportingOverflow(by: tenMinuteBlocks)
+            let minuteAdjust: Int64
+            var overflow3 = false
             if remainder > dropFrames {
-                frame += dropFrames * 9 * tenMinuteBlocks
-                    + dropFrames * ((remainder - dropFrames) / framesPerMinute)
+                let (value, overflow) = dropFrames.multipliedReportingOverflow(
+                    by: (remainder - dropFrames) / framesPerMinute
+                )
+                minuteAdjust = value
+                overflow3 = overflow
             } else {
-                frame += dropFrames * 9 * tenMinuteBlocks
+                minuteAdjust = 0
             }
+            let (adjust, overflow4) = blockAdjust
+                .addingReportingOverflow(minuteAdjust)
+            let (adjusted, overflow5) = frame.addingReportingOverflow(adjust)
+            guard !overflow1, !overflow2, !overflow3,
+                  !overflow4, !overflow5 else {
+                return "00:00:00:00"
+            }
+            frame = adjusted
         }
 
         let frames = Int(frame % nominal)

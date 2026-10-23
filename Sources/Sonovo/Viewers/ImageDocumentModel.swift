@@ -3,6 +3,7 @@ import CoreImage
 import Foundation
 import ImageIO
 import Observation
+import SonovoCore
 
 struct ImageDocumentMetadata: Equatable, Sendable {
     let pixelWidth: Int
@@ -244,8 +245,12 @@ final class ImageDocumentModel {
         guard let filter = CIRAWFilter(imageURL: url) else { return nil }
         let native = filter.nativeSize
         guard native.width > 0, native.height > 0 else { return nil }
-        let width = Int(native.width)
-        let height = Int(native.height)
+        guard let width = NumericConversion.int(native.width),
+              let height = NumericConversion.int(native.height),
+              width > 0, height > 0 else {
+            // A RAW decoder can report a non-finite native size.
+            return nil
+        }
         let policy = displayPolicy(width: width, height: height)
         if policy.downsampled {
             filter.scaleFactor = Float(

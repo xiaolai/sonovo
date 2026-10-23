@@ -1,4 +1,5 @@
 import AppKit
+import SonovoCore
 import SwiftUI
 
 /// One real audio or video file. The asset view owns its player so switching
@@ -110,9 +111,9 @@ struct MediaAssetView: View {
         var parts: [String] = []
         if let codec = playback.videoCodec { parts.append(codec) }
         if playback.hasVideo, playback.videoSize.width > 0 {
-            parts.append(
-                "\(Int(playback.videoSize.width))×\(Int(playback.videoSize.height))"
-            )
+            let width = NumericConversion.int(playback.videoSize.width) ?? 0
+            let height = NumericConversion.int(playback.videoSize.height) ?? 0
+            parts.append("\(width)×\(height)")
         }
         if playback.nominalFrameRate > 0 {
             parts.append(

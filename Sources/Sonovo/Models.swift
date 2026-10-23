@@ -1,3 +1,4 @@
+import SonovoCore
 import SwiftUI
 
 enum AssetKind: String, Hashable, Sendable {
@@ -307,7 +308,11 @@ struct TranscriptSegment: Identifiable, Hashable, Sendable {
     static func timecode(for seconds: Double) -> String {
         // Round to the displayed precision first. Truncating the fractional
         // part separately turns 4.6 into 4 seconds + 59 hundredths.
-        let totalHundredths = Int((max(0, seconds) * 100).rounded())
+        // Transcript timestamps come from a file and may be NaN or infinite;
+        // a raw `Int(_:)` would trap.
+        let totalHundredths =
+            NumericConversion.int(seconds.isFinite ? max(0, seconds) * 100 : 0)
+            ?? 0
         let hundredths = totalHundredths % 100
         let totalSeconds = totalHundredths / 100
         let minutes = totalSeconds / 60

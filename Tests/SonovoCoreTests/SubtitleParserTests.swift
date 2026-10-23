@@ -203,6 +203,17 @@ struct SubtitleTimecodeTests {
         )
     }
 
+    @Test("A non-finite duration formats instead of trapping")
+    func nonFiniteDisplay() {
+        // AVFoundation reports NaN/indefinite durations for some assets; a
+        // raw `Int(_:)` conversion used to trap the whole app.
+        #expect(!SubtitleTimecode.display(seconds: .nan).isEmpty)
+        #expect(!SubtitleTimecode.display(seconds: .infinity).isEmpty)
+        #expect(
+            SubtitleTimecode.display(seconds: 1.5) == "00:01.500"
+        )
+    }
+
     @Test("User input accepts commas, dots, and plain seconds")
     func userInput() {
         #expect(SubtitleTimecode.parseUserInput("00:00:02,500") == 2500)

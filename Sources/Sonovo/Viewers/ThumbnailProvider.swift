@@ -1,5 +1,6 @@
 import AppKit
 import QuickLookThumbnailing
+import SonovoCore
 import SwiftUI
 
 private struct ThumbnailRequestBox: @unchecked Sendable {
@@ -151,7 +152,9 @@ final class ThumbnailProvider {
             } ?? "-"
             identity = "\(modified)|\(fileBytes)|\(identifier)"
         }
-        return "\(url.path)|\(identity)|\(Int(size.width))x\(Int(size.height))"
+        let width = NumericConversion.int(size.width) ?? 0
+        let height = NumericConversion.int(size.height) ?? 0
+        return "\(url.path)|\(identity)|\(width)x\(height)"
     }
 
     private func store(_ image: NSImage, key: String) {

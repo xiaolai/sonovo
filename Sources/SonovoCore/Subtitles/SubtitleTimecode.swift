@@ -219,6 +219,8 @@ public enum SubtitleTimecode {
     }
 
     public static func display(seconds: TimeInterval) -> String {
-        displayShort(Int((max(0, seconds) * 1000).rounded()))
+        // A media player can report NaN or an infinite duration; converting
+        // that to `Int` traps. `milliseconds` saturates instead.
+        displayShort(NumericConversion.milliseconds(seconds))
     }
 }

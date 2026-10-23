@@ -1,3 +1,4 @@
+import SonovoCore
 import SwiftUI
 
 struct WaveformView: View {
@@ -98,7 +99,10 @@ struct WaveformView: View {
     ) {
         let step: CGFloat = 3
         let barWidth: CGFloat = 1.6
-        let barCount = max(1, Int(size.width / step))
+        let barCount = max(
+            1,
+            NumericConversion.clamped(size.width / step, to: 0...100_000)
+        )
         var bars = Path()
 
         for index in 0..<barCount {

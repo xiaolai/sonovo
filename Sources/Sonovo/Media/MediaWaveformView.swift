@@ -1,3 +1,4 @@
+import SonovoCore
 import SwiftUI
 
 struct MediaWaveformView: View {
@@ -13,49 +14,68 @@ struct MediaWaveformView: View {
                 }
                 let middle = size.height / 2
                 let columnWidth: CGFloat = 2
-                let columns = max(Int(size.width / columnWidth), 1)
+                let columns = max(
+                    NumericConversion.clamped(
+                        size.width / columnWidth,
+                        to: 0...100_000
+                    ),
+                    1
+                )
                 let played = min(max(progress, 0), 1)
                 // Buckets are fixed frame counts, not equal fractions of
                 // the duration. Map each column through time so a short
                 // final bucket starts where its audio starts.
-                let secondsPerBucket = data.sampleRate > 0
+                // A file can report NaN or an infinite sample rate or
+                // duration; a raw `Int(_:)` on the result would trap.
+                let secondsPerBucket: Double =
+                    data.sampleRate.isFinite
+                        && data.sampleRate > 0
+                        && data.bucketFrames > 0
                     ? Double(data.bucketFrames) / data.sampleRate
                     : 0
-                let duration = max(data.duration, 0)
+                let duration = data.duration.isFinite
+                    ? max(data.duration, 0)
+                    : 0
 
                 for column in 0..<columns {
                     let lower: Int
                     let upper: Int
-                    if secondsPerBucket > 0, duration > 0 {
+                    if secondsPerBucket.isFinite,
+                       secondsPerBucket > 0,
+                       duration > 0 {
                         let startTime = Double(column) / Double(columns)
                             * duration
                         let endTime = Double(column + 1) / Double(columns)
                             * duration
                         lower = min(
-                            Int(startTime / secondsPerBucket),
+                            NumericConversion.floor(
+                                startTime / secondsPerBucket
+                            ) ?? 0,
                             data.peaks.count - 1
                         )
                         upper = min(
                             max(
-                                Int(ceil(endTime / secondsPerBucket)),
+                                NumericConversion.ceil(
+                                    endTime / secondsPerBucket
+                                ) ?? data.peaks.count,
                                 lower + 1
                             ),
                             data.peaks.count
                         )
                     } else {
                         lower = min(
-                            Int(
+                            NumericConversion.floor(
                                 Double(column) / Double(columns)
                                     * Double(data.peaks.count)
-                            ),
+                            ) ?? 0,
                             data.peaks.count - 1
                         )
                         upper = min(
                             max(
-                                Int(
+                                NumericConversion.floor(
                                     Double(column + 1) / Double(columns)
                                         * Double(data.peaks.count)
-                                ),
+                                ) ?? data.peaks.count,
                                 lower + 1
                             ),
                             data.peaks.count

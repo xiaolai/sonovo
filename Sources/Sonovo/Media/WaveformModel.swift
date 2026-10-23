@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import Foundation
 import Observation
+import SonovoCore
 
 /// Fixed-resolution peak analysis. The view width does not change the data;
 /// the waveform is downsampled for drawing. Peak, sample count, and sum of

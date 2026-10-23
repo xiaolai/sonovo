@@ -270,8 +270,13 @@ struct SubtitleCueMap: View {
     }
 
     private func time(at x: CGFloat, width: CGFloat) -> Int {
-        guard width > 0 else { return 0 }
+        guard width.isFinite, width > 0, x.isFinite else { return 0 }
         let fraction = min(max(x / width, 0), 1)
-        return Int(fraction * CGFloat(total))
+        // `Double(Int.max)` rounds up to 2^63, which `Int(_:)` cannot
+        // represent; clamping keeps a huge duration from trapping.
+        return NumericConversion.clamped(
+            Double(fraction) * Double(total),
+            to: 0...total
+        )
     }
 }

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SonovoCore
 
 enum ComparisonSide: String, CaseIterable, Identifiable, Sendable {
     case leading
@@ -252,7 +253,9 @@ final class ComparisonModel {
         // The displayed size is what the eye compares. A portrait photo whose
         // pixels are stored landscape is 480×640 here, not 640×480.
         let size = metadata.displaySize
-        return "\(Int(size.width))×\(Int(size.height))"
+        let width = NumericConversion.int(size.width) ?? 0
+        let height = NumericConversion.int(size.height) ?? 0
+        return "\(width)×\(height)"
     }
 
     nonisolated private static func profile(

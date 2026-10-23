@@ -278,6 +278,27 @@ struct SettingsView: View {
         Int(Preferences.clampedEditorFontSize(editorFontSize).rounded())
     }
 
+    /// Persisted values can be out of range (an older build, a hand-edited
+    /// defaults file). The control edits and displays only a clamped value,
+    /// so the same number reaches the editor that the label shows.
+    private var editorFontSizeBinding: Binding<Double> {
+        Binding(
+            get: { Double(Preferences.clampedEditorFontSize(editorFontSize)) },
+            set: {
+                editorFontSize = Double(
+                    Preferences.clampedEditorFontSize(CGFloat($0))
+                )
+            }
+        )
+    }
+
+    private var codeTabWidthBinding: Binding<Int> {
+        Binding(
+            get: { AppTheme.Code.clampedTabWidth(codeTabWidth) },
+            set: { codeTabWidth = AppTheme.Code.clampedTabWidth($0) }
+        )
+    }
+
     private var editorPane: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
             paneHeader(
@@ -291,7 +312,7 @@ struct SettingsView: View {
                         Text("Font size")
                         Spacer()
                         Stepper(
-                            value: $editorFontSize,
+                            value: editorFontSizeBinding,
                             in: AppTheme.Preferences.editorFontSizeRange,
                             step: AppTheme.Preferences.editorFontSizeStep
                         ) {
@@ -321,10 +342,10 @@ struct SettingsView: View {
                         Text("Code tab width")
                         Spacer()
                         Stepper(
-                            value: $codeTabWidth,
-                            in: 2...8
+                            value: codeTabWidthBinding,
+                            in: AppTheme.Code.tabWidthRange
                         ) {
-                            Text("\(codeTabWidth)")
+                            Text("\(codeTabWidthBinding.wrappedValue)")
                                 .monospacedDigit()
                         }
                         .fixedSize()

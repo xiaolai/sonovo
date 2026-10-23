@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Observation
+import SonovoCore
 
 /// Owns the AVPlayer used by the subtitle preview.
 ///
