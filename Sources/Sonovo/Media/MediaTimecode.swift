@@ -220,7 +220,12 @@ enum MediaTimecodeFormatter {
                 exactly: Double(nominal) * 60
                     - Double(dropFrames)
             ) ?? 1
-            let framesPer24Hours = Int64((fps * 3600).rounded()) * 24
+            let (framesPer24Hours, overflowDay) = Int64(
+                (fps * 3600).rounded()
+            ).multipliedReportingOverflow(by: 24)
+            guard !overflowDay, framesPer24Hours > 0 else {
+                return "00:00:00:00"
+            }
             frame %= framesPer24Hours
             let tenMinuteBlocks = frame / framesPer10Minutes
             let remainder = frame % framesPer10Minutes
