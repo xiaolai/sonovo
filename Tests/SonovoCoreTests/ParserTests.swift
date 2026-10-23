@@ -494,6 +494,26 @@ struct ParserTests {
         #expect(parsed.exceededNestingLimit)
     }
 
+    @Test("An over-budget fragment stays literal without a source map")
+    func overBudgetFragmentStaysLiteral() {
+        let text = String(
+            repeating: "a",
+            count: MarkdownLimits.maxReadBytes + 1
+        )
+        let inlines = InlineFragmentParser.parse(
+            text,
+            baseLine: 1,
+            baseOffset: 0
+        )
+        #expect(inlines.count == 1)
+        guard let first = inlines.first,
+              case let .text(value, _) = first else {
+            Issue.record("expected literal text")
+            return
+        }
+        #expect(value == text)
+    }
+
     @Test("A very long emphasis delimiter run is kept as one raw block")
     func emphasisRunBudget() {
         let source = String(

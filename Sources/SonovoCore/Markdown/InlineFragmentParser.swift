@@ -21,6 +21,23 @@ enum InlineFragmentParser {
         // content: ` - &amp;` is a slice of a paragraph, not a list. A
         // one-character sentinel keeps the first line out of block parsing;
         // its positions are shifted back out before returning.
+        // The source map below allocates one record per line. A fragment
+        // that is already over budget must not reach it, and concatenating
+        // the reference definitions would copy it first.
+        if NestingGuard.exceedsSourceBudget(text) {
+            return [
+                .text(
+                    text,
+                    range: literalRange(
+                        text,
+                        baseLine: baseLine,
+                        baseOffset: baseOffset,
+                        baseColumn: baseColumn
+                    )
+                )
+            ]
+        }
+
         let sentinel = startsWithBlockMarker(text)
         let parsedText = sentinel ? "x" + text : text
         let mapBaseOffset = sentinel ? 0 : baseOffset
@@ -48,6 +65,27 @@ enum InlineFragmentParser {
             ? protected
             : protected + "\n\n" + definitionText
 
+        // Same guard, after the definitions were appended: they can push a
+        // fragment that fit on its own over the budget. It must run before
+        // the map is built.
+        if NestingGuard.exceedsSourceBudget(combined)
+            || NestingGuard.exceedsInlineLimit(
+                combined,
+                limit: MarkdownLimits.maxParseDepth
+            ) {
+            return [
+                .text(
+                    text,
+                    range: literalRange(
+                        text,
+                        baseLine: baseLine,
+                        baseOffset: baseOffset,
+                        baseColumn: baseColumn
+                    )
+                )
+            ]
+        }
+
         let map = SourceMap(
             source: combined,
             baseLine: baseLine,
@@ -64,15 +102,10 @@ enum InlineFragmentParser {
         // the nesting limit must stay literal rather than reach it; the empty
         // result falls through to the existing literal-text fallback.
         var result: [Inline] = []
-        if !NestingGuard.exceedsSourceBudget(combined),
-           !NestingGuard.exceedsLimit(
-               combined,
-               limit: MarkdownLimits.maxParseDepth
-           ),
-           !NestingGuard.exceedsInlineLimit(
-               combined,
-               limit: MarkdownLimits.maxParseDepth
-           ) {
+        if !NestingGuard.exceedsLimit(
+            combined,
+            limit: MarkdownLimits.maxParseDepth
+        ) {
             result = flatten(
                 Document(
                     parsing: combined,
@@ -182,6 +215,40 @@ enum InlineFragmentParser {
 
         appendBlocks(document.children)
         return result
+    }
+
+    /// The fragment's range, computed without a source map. Used when the
+    /// fragment is over the budget that keeps map construction bounded.
+    private static func literalRange(
+        _ text: String,
+        baseLine: Int,
+        baseOffset: Int,
+        baseColumn: Int
+    ) -> SourceRange {
+        let start = SourcePosition(
+            line: baseLine,
+            column: baseColumn,
+            offset: baseOffset
+        )
+        let newlines = text.utf8.reduce(into: 0) { count, byte in
+            if byte == 0x0A { count += 1 }
+        }
+        let endOffset = baseOffset + text.utf16.count
+        let end: SourcePosition
+        if let last = text.lastIndex(of: "\n") {
+            end = SourcePosition(
+                line: baseLine + newlines,
+                column: text[text.index(after: last)...].utf16.count,
+                offset: endOffset
+            )
+        } else {
+            end = SourcePosition(
+                line: baseLine,
+                column: baseColumn + text.utf16.count,
+                offset: endOffset
+            )
+        }
+        return SourceRange(start: start, end: end)
     }
 
     // MARK: - Sentinel handling

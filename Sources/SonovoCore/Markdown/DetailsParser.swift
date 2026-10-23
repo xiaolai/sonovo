@@ -664,16 +664,10 @@ enum DetailsParser {
             mapRemovals = removals
         }
 
-        let map = SourceMap(
-            source: combined,
-            baseLine: mapBaseLine,
-            baseOffset: mapBaseOffset,
-            baseColumn: mapBaseColumn,
-            linePrefixRemovals: mapRemovals
-        )
         // The details body is parsed with the same recursive converter as a
-        // document. Guard it before the converter can overflow the stack;
-        // preserve the body literally instead of dropping it.
+        // document. Guard it before the converter can overflow the stack,
+        // and before the source map allocates one record per line; preserve
+        // the body literally instead of dropping it.
         if NestingGuard.exceedsSourceBudget(combined)
             || NestingGuard.exceedsLimit(
                 combined,
@@ -690,6 +684,13 @@ enum DetailsParser {
                 )
             ]
         }
+        let map = SourceMap(
+            source: combined,
+            baseLine: mapBaseLine,
+            baseOffset: mapBaseOffset,
+            baseColumn: mapBaseColumn,
+            linePrefixRemovals: mapRemovals
+        )
         let document = Document(parsing: combined, options: MarkdownParser.parseOptions)
         let mapper = ASTMapper(
             sourceMap: map,
