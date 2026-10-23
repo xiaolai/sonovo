@@ -20,6 +20,10 @@ final class PDFDocumentModel {
     private(set) var pageCount = 0
     private(set) var searchResults: [PDFSelection] = []
     private(set) var searchIndex = 0
+    private(set) var searchTruncated = false
+    /// A common term in a large PDF can produce millions of selections.
+    /// Production caps at this count; tests lower it.
+    var maximumSearchResults = 5_000
     let url: URL
     private var findObservers: [NSObjectProtocol] = []
     private var pendingResults: [PDFSelection] = []
@@ -110,6 +114,7 @@ final class PDFDocumentModel {
         searchResults = []
         searchIndex = 0
         pendingResults = []
+        searchTruncated = false
         if let continuation = searchContinuation {
             searchContinuation = nil
             continuation.resume(returning: 0)
@@ -167,6 +172,7 @@ final class PDFDocumentModel {
         searchResults = []
         searchIndex = 0
         pendingResults = []
+        searchTruncated = false
     }
 
     private func installFindObservers(for document: PDFDocument) {
@@ -186,7 +192,19 @@ final class PDFDocumentModel {
                 // the main actor, where every other use of it lives.
                 let box = PDFSelectionBox(selection: selection)
                 MainActor.assumeIsolated {
-                    self?.pendingResults.append(box.selection)
+                    guard let self else { return }
+                    guard self.pendingResults.count < self.maximumSearchResults
+                    else {
+                        // Stop retaining selections; PDFKit may finish the
+                        // scan, but memory stays at the budget and the UI
+                        // says the list is truncated.
+                        self.searchTruncated = true
+                        return
+                    }
+                    self.pendingResults.append(box.selection)
+                    if self.pendingResults.count == self.maximumSearchResults {
+                        self.searchTruncated = true
+                    }
                 }
             }
         )
@@ -300,7 +318,10 @@ struct PDFDocumentView: View {
                 .disabled(model.state != .ready)
 
             if !model.searchResults.isEmpty {
-                Text("\(model.searchIndex + 1)/\(model.searchResults.count)")
+                Text(
+                    "\(model.searchIndex + 1)/\(model.searchResults.count)"
+                        + (model.searchTruncated ? "+" : "")
+                )
                     .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Button("Next") {

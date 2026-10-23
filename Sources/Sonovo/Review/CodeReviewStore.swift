@@ -253,7 +253,7 @@ actor CodeReviewStore {
         try mutate {
             var keepsContent = false
             if snapshot.byteCount <= CodeLimits.editableBytes,
-               objectBytes + snapshot.byteCount <= Self.objectBudget {
+               canRetain(snapshot.byteCount) {
                 do {
                     try storeBlob(snapshot)
                     keepsContent = true
@@ -281,7 +281,7 @@ actor CodeReviewStore {
             for baseline in baselines {
                 var keepsContent = false
                 if let bytes = baseline.bytes,
-                   objectBytes + bytes.count <= Self.objectBudget {
+                   canRetain(bytes.count) {
                     do {
                         try storeBlob(DiskSnapshot(bytes: bytes))
                         keepsContent = true
@@ -465,7 +465,12 @@ actor CodeReviewStore {
             )
             loaded.decisions = manifest.decisions
             loaded.baselineEstablishedAt = manifest.baselineEstablishedAt
-            loaded.objectBytes = manifest.objectBytes ?? 0
+            // The manifest is external state. A corrupt counter must not turn
+            // the budget comparison itself into an overflow.
+            loaded.objectBytes = min(
+                max(manifest.objectBytes ?? 0, 0),
+                Self.objectBudget
+            )
             return loaded
         } catch {
             let stamp = ISO8601DateFormatter().string(from: Date())
@@ -490,6 +495,15 @@ actor CodeReviewStore {
     }
 
     // MARK: - Objects
+
+    /// Overflow-safe budget check. `objectBytes` is clamped on load, and the
+    /// subtraction keeps a maliciously large counter from wrapping.
+    private func canRetain(_ byteCount: Int) -> Bool {
+        byteCount >= 0
+            && objectBytes >= 0
+            && objectBytes <= Self.objectBudget
+            && byteCount <= Self.objectBudget - objectBytes
+    }
 
     private func storeBlob(_ snapshot: DiskSnapshot) throws {
         let url = objectsDirectory.appendingPathComponent(snapshot.sha256)

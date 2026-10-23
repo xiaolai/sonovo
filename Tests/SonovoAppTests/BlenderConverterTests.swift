@@ -448,4 +448,23 @@ final class BlenderConverterTests: XCTestCase {
             ).map(\.lastPathComponent)
         )
     }
+
+    func testTimeoutRejectsUnrepresentableValues() {
+        XCTAssertEqual(
+            BlenderConverter.resolvedTimeout(nil),
+            BlenderConverter.defaultTimeoutSeconds
+        )
+        for raw in [
+            "inf", "-inf", "nan", "0", "-5", "3601", "1e300", "abc"
+        ] {
+            XCTAssertEqual(
+                BlenderConverter.resolvedTimeout(raw),
+                BlenderConverter.defaultTimeoutSeconds,
+                "\(raw) must fall back to the default"
+            )
+        }
+        XCTAssertEqual(BlenderConverter.resolvedTimeout("1"), 1)
+        XCTAssertEqual(BlenderConverter.resolvedTimeout("12.5"), 12.5)
+        XCTAssertEqual(BlenderConverter.resolvedTimeout("3600"), 3600)
+    }
 }

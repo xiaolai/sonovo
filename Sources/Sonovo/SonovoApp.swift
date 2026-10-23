@@ -29,6 +29,10 @@ struct SonovoApp: App {
             width: AppTheme.Layout.windowDefaultWidth,
             height: AppTheme.Layout.windowDefaultHeight
         )
+        // The automatic launch behavior only presents a scene that was
+        // restored; a cold install therefore opened no window until a second
+        // reopen event. The main window is the app's only working surface.
+        .defaultLaunchBehavior(.presented)
         .windowToolbarStyle(.unified)
         .commands {
             DocumentCommands(state: state)
@@ -58,12 +62,11 @@ struct SonovoApp: App {
         default:
             base = Color.accentColor
         }
-        let accent = base.mix(
-            with: .white,
-            by: foregroundIntensity * 0.18
-        )
         return WorkspaceTheme(
-            accent: accent,
+            accent: AppTheme.blendedAccent(
+                base,
+                fraction: foregroundIntensity * 0.18
+            ),
             wash: base,
             backgroundIntensity: backgroundIntensity
         )

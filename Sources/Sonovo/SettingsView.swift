@@ -272,6 +272,12 @@ struct SettingsView: View {
         }
     }
 
+    /// A persisted size is untrusted. Clamp before converting it for display;
+    /// an out-of-range double would trap in `Int(_:)`.
+    private var editorFontSizePoints: Int {
+        Int(Preferences.clampedEditorFontSize(editorFontSize).rounded())
+    }
+
     private var editorPane: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
             paneHeader(
@@ -289,7 +295,7 @@ struct SettingsView: View {
                             in: AppTheme.Preferences.editorFontSizeRange,
                             step: AppTheme.Preferences.editorFontSizeStep
                         ) {
-                            Text("\(Int(editorFontSize)) pt")
+                            Text("\(editorFontSizePoints) pt")
                                 .monospacedDigit()
                         }
                         .fixedSize()

@@ -67,11 +67,23 @@ enum Preferences {
         bool(PreferenceKey.loginShell, default: true)
     }
 
+    /// Clamps a persisted reading size before any arithmetic or `Int`
+    /// conversion. Non-finite and non-positive values fall back to the theme
+    /// size.
+    static func clampedEditorFontSize(_ value: Double) -> CGFloat {
+        guard value.isFinite, value > 0 else {
+            return AppTheme.Reading.sourceSize
+        }
+        let range = AppTheme.Preferences.editorFontSizeRange
+        return CGFloat(min(max(value, range.lowerBound), range.upperBound))
+    }
+
     /// The reading-editor size. Zero or a missing value means the theme size.
     static var editorFontSize: CGFloat {
         guard !isTesting else { return AppTheme.Reading.sourceSize }
-        let value = defaults.double(forKey: PreferenceKey.editorFontSize)
-        return value > 0 ? CGFloat(value) : AppTheme.Reading.sourceSize
+        return clampedEditorFontSize(
+            defaults.double(forKey: PreferenceKey.editorFontSize)
+        )
     }
 
     static var shell: String {

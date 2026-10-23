@@ -37,17 +37,24 @@ struct MediaTimecode: Equatable, Sendable {
 
     var frameIndex: Int64 {
         let position = max(elapsed, 0)
+        guard position.isFinite else { return 0 }
         // A frame boundary computed from a nominal rate lands a few ulps
         // below the integer. Without a tiny tolerance, frame 3 reports 2.
-        if let frameDurationSeconds, frameDurationSeconds > 0 {
-            return Int64(
-                (position / frameDurationSeconds + 0.000_001).rounded(.down)
-            )
+        let raw: Double
+        if let frameDurationSeconds,
+           frameDurationSeconds.isFinite,
+           frameDurationSeconds > 0 {
+            raw = (position / frameDurationSeconds + 0.000_001)
+                .rounded(.down)
+        } else {
+            guard nominalFrameRate.isFinite, nominalFrameRate > 0 else {
+                return 0
+            }
+            raw = (position * nominalFrameRate + 0.000_001)
+                .rounded(.down)
         }
-        guard nominalFrameRate > 0 else { return 0 }
-        return Int64(
-            (position * nominalFrameRate + 0.000_001).rounded(.down)
-        )
+        guard raw.isFinite, raw >= 0 else { return 0 }
+        return Int64(exactly: raw) ?? Int64.max
     }
 
     var sourceLabel: String? {
@@ -59,14 +66,29 @@ struct MediaTimecode: Equatable, Sendable {
         // The timecode track can run at a different rate than the picture
         // (for example 30 fps timecode on 24 fps film). Use its own rate.
         let rate = segment.frameRate ?? nominalFrameRate
-        guard rate > 0 else { return nil }
-        let elapsedFrames = Int64(
-            ((elapsed - segment.time) * rate + 0.000_001).rounded(.down)
-        )
-        return MediaTimecodeFormatter.timecode(
-            frameNumber: segment.startFrame + elapsedFrames,
+        guard rate.isFinite, rate > 0 else { return nil }
+        let rawFrames = (elapsed - segment.time) * rate + 0.000_001
+        guard rawFrames.isFinite, rawFrames >= 0,
+              let elapsedFrames = Int64(exactly: rawFrames.rounded(.down))
+        else {
+            return nil
+        }
+        let (frameNumber, overflow) = segment.startFrame
+            .addingReportingOverflow(elapsedFrames)
+        guard !overflow else { return nil }
+        let quanta = segment.frameQuanta.map(Double.init)
+        guard MediaTimecodeFormatter.isValidTimecodeInput(
+            frameNumber: frameNumber,
             fps: rate,
-            frameQuanta: segment.frameQuanta.map(Double.init),
+            frameQuanta: quanta,
+            dropFrame: segment.isDropFrame
+        ) else {
+            return nil
+        }
+        return MediaTimecodeFormatter.timecode(
+            frameNumber: frameNumber,
+            fps: rate,
+            frameQuanta: quanta,
             dropFrame: segment.isDropFrame
         )
     }
@@ -101,7 +123,14 @@ struct MediaTimecode: Equatable, Sendable {
 enum MediaTimecodeFormatter {
     static func elapsed(_ seconds: Double) -> String {
         let clamped = max(seconds, 0)
-        let totalMilliseconds = Int64((clamped * 1000).rounded())
+        guard clamped.isFinite else { return "—" }
+        let rawMilliseconds = clamped * 1000
+        guard rawMilliseconds.isFinite,
+              let totalMilliseconds = Int64(
+                exactly: rawMilliseconds.rounded()
+              ) else {
+            return "—"
+        }
         let milliseconds = totalMilliseconds % 1000
         let totalSeconds = totalMilliseconds / 1000
         let secondsPart = totalSeconds % 60
@@ -116,6 +145,42 @@ enum MediaTimecodeFormatter {
         )
     }
 
+    /// Rejects rates, quanta, and drop-frame metadata that cannot produce a
+    /// valid label. The formatter must never divide by a zero divisor or
+    /// convert an unrepresentable rate, even when a file supplies one.
+    static func isValidTimecodeInput(
+        frameNumber: Int64,
+        fps: Double,
+        frameQuanta: Double?,
+        dropFrame: Bool
+    ) -> Bool {
+        guard fps.isFinite, fps > 0 else { return false }
+        let nominalSource = frameQuanta ?? fps
+        guard nominalSource.isFinite, nominalSource > 0,
+              let nominal = Int64(exactly: nominalSource.rounded()),
+              nominal > 0 else {
+            return false
+        }
+        guard dropFrame else { return true }
+        let drop = (fps * 0.066_666).rounded()
+        let perTenMinutes = (fps * 600).rounded()
+        let perMinute = Double(nominal) * 60 - drop
+        let perDay = (fps * 3600).rounded() * 24
+        guard drop.isFinite, perTenMinutes.isFinite,
+              perMinute.isFinite, perDay.isFinite,
+              drop >= 0,
+              let dropFrames = Int64(exactly: drop),
+              let framesPer10Minutes = Int64(exactly: perTenMinutes),
+              framesPer10Minutes > 0,
+              let framesPerMinute = Int64(exactly: perMinute),
+              framesPerMinute > 0,
+              let framesPer24Hours = Int64(exactly: perDay),
+              framesPer24Hours > 0 else {
+            return false
+        }
+        return true
+    }
+
     /// `dropFrame` is only meaningful for 29.97/59.94-style rates. The
     /// algorithm adjusts the frame number so minute boundaries skip the two
     /// (or four) labels that do not exist.
@@ -125,8 +190,17 @@ enum MediaTimecodeFormatter {
         frameQuanta: Double? = nil,
         dropFrame: Bool
     ) -> String {
-        let nominal = Int64((frameQuanta ?? fps).rounded())
-        guard nominal > 0 else { return "00:00:00:00" }
+        guard isValidTimecodeInput(
+            frameNumber: frameNumber,
+            fps: fps,
+            frameQuanta: frameQuanta,
+            dropFrame: dropFrame
+        ),
+        let nominal = Int64(
+            exactly: (frameQuanta ?? fps).rounded()
+        ), nominal > 0 else {
+            return "00:00:00:00"
+        }
         // A negative start timecode is a real pre-roll value; clamping it
         // to zero shows a label the file does not contain.
         let negative = frameNumber < 0
@@ -135,7 +209,10 @@ enum MediaTimecodeFormatter {
         if dropFrame {
             let dropFrames = Int64((fps * 0.066_666).rounded())
             let framesPer10Minutes = Int64((fps * 600).rounded())
-            let framesPerMinute = nominal * 60 - dropFrames
+            let framesPerMinute = Int64(
+                exactly: Double(nominal) * 60
+                    - Double(dropFrames)
+            ) ?? 1
             let framesPer24Hours = Int64((fps * 3600).rounded()) * 24
             frame %= framesPer24Hours
             let tenMinuteBlocks = frame / framesPer10Minutes

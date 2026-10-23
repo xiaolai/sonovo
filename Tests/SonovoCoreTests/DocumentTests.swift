@@ -827,6 +827,53 @@ struct MarkdownDocumentTests {
         )
         #expect(abs((ceiling ?? 0) - 0.1) < 0.0001)
     }
+
+    @Test("An oversized Markdown file is refused before reading")
+    func oversizedFileIsRefused() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("large.md")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(
+            atOffset: UInt64(MarkdownLimits.maxReadBytes + 1)
+        )
+        try handle.close()
+
+        #expect(throws: MarkdownFileStoreError.self) {
+            _ = try MarkdownDocument(loading: url)
+        }
+    }
+
+    @Test("Undo history is bounded by the shared level limit")
+    func undoHistoryIsBounded() throws {
+        let document = MarkdownDocument(
+            untitledWith: MarkdownFileStore()
+        )
+        for index in 0..<(DocumentHistoryLimits.undoLevels + 5) {
+            try document.replaceSource("v\(index)")
+        }
+        var undoCount = 0
+        while document.undoManager.canUndo {
+            document.undoManager.undo()
+            undoCount += 1
+        }
+        #expect(undoCount <= DocumentHistoryLimits.undoLevels)
+    }
+
+    @Test("An oversized replacement is rejected")
+    func oversizedReplacementIsRejected() throws {
+        let document = MarkdownDocument(
+            untitledWith: MarkdownFileStore()
+        )
+        let oversized = String(
+            repeating: "x",
+            count: DocumentHistoryLimits.maxReplacementBytes + 1
+        )
+        #expect(throws: DocumentError.editTooLarge) {
+            try document.replaceSource(oversized)
+        }
+    }
 }
 
 @Suite("File watcher")

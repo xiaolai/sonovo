@@ -40,16 +40,19 @@ struct TrailingToolbarView: View {
                 Divider()
 
                 Button("New Terminal Tab") {
+                    revealTerminalIfNeeded()
                     state.terminalSessions.addSession()
                 }
 
                 Button("Reattach Sessions") {
+                    revealTerminalIfNeeded()
                     state.terminalSessions.restoreTmuxSessions()
                 }
 
                 Button("Restart Shell") {
                     NotificationCenter.default.post(name: .sonovoRestartTerminal, object: nil)
                 }
+                .disabled(state.terminalSessions.selectedSession == nil)
             } label: {
                 Image(systemName: "terminal")
                     .frame(width: AppTheme.Size.menuIcon, height: AppTheme.Size.menuIcon)
@@ -85,6 +88,14 @@ struct TrailingToolbarView: View {
             .help("View mode")
             .accessibilityLabel("View mode")
 
+        }
+    }
+
+    /// A tab added to a hidden terminal is invisible; every terminal action
+    /// from this menu first brings the pane on screen.
+    private func revealTerminalIfNeeded() {
+        if state.terminalPresentation == .hidden {
+            state.terminalPresentation = .split
         }
     }
 }

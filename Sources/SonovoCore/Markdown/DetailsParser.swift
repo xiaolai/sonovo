@@ -677,7 +677,11 @@ enum DetailsParser {
         if NestingGuard.exceedsLimit(
             combined,
             limit: MarkdownLimits.maxParseDepth
-        ) {
+        )
+            || NestingGuard.exceedsInlineLimit(
+                combined,
+                limit: MarkdownLimits.maxParseDepth
+            ) {
             return [
                 .paragraph(
                     inlines: [.text(text, range: baseRange)],

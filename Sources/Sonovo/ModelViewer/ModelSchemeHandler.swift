@@ -1,6 +1,17 @@
 import Foundation
 import WebKit
 
+enum ModelResourceError: Error {
+    case tooLarge
+}
+
+enum ModelResourceLimits {
+    /// Viewer documents are small; model assets can be large but not
+    /// unbounded. The cap is a memory bound, not a product size limit.
+    static let maxViewerBytes = 16 * 1024 * 1024
+    static let maxAssetBytes = 256 * 1024 * 1024
+}
+
 /// Serves the viewer bundle and the selected model over one custom-scheme
 /// origin. The resolver decides what exists; this class only turns its answer
 /// into an HTTP response and honors WebKit's stop contract.
@@ -72,11 +83,23 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
     ) {
         let url = resource.url
         Task { @MainActor [weak self] in
+            let cap = resource.route == .asset
+                ? ModelResourceLimits.maxAssetBytes
+                : ModelResourceLimits.maxViewerBytes
             let data: Data
             do {
                 data = try await Task.detached(priority: .userInitiated) {
-                    try Data(contentsOf: url, options: .mappedIfSafe)
+                    try Self.readBounded(url, cap: cap)
                 }.value
+            } catch ModelResourceError.tooLarge {
+                guard let self, self.isActive(identifier) else { return }
+                self.respond(
+                    task,
+                    identifier: identifier,
+                    status: 413,
+                    body: Data()
+                )
+                return
             } catch {
                 guard let self, self.isActive(identifier) else { return }
                 self.respond(
@@ -134,6 +157,35 @@ final class ModelSchemeHandler: NSObject, WKURLSchemeHandler {
                 body: data
             )
         }
+    }
+
+    /// Owned, bounded read. A mapped file can fault with SIGBUS if it is
+    /// truncated while WebKit is consuming it; copying into owned bytes also
+    /// makes the response independent of later disk changes.
+    nonisolated static func readBounded(
+        _ url: URL,
+        cap: Int
+    ) throws -> Data {
+        if let size = try? url.resourceValues(
+            forKeys: [.fileSizeKey]
+        ).fileSize, size > cap {
+            throw ModelResourceError.tooLarge
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let limit = cap + 1
+        var data = Data()
+        while data.count < limit {
+            let chunk = try handle.read(
+                upToCount: min(1 << 20, limit - data.count)
+            )
+            guard let chunk, !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= cap else {
+            throw ModelResourceError.tooLarge
+        }
+        return data
     }
 
     private func isActive(_ identifier: ObjectIdentifier) -> Bool {

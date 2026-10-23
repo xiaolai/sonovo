@@ -140,6 +140,13 @@ enum AppTheme {
         static let reviewQueueHeight: CGFloat = 440
         static let goToLineFieldWidth: CGFloat = 120
         static let tabWidthDefault: Int = 4
+        static let tabWidthRange: ClosedRange<Int> = 2...8
+
+        /// Persisted tab widths are untrusted. Clamp before they reach
+        /// indentation arithmetic or a repeated-string allocation.
+        static func clampedTabWidth(_ value: Int) -> Int {
+            min(max(value, tabWidthRange.lowerBound), tabWidthRange.upperBound)
+        }
         static let indentGuideWidth: CGFloat = 1
         static let currentLineOpacity: Double = 0.055
         static let bracketOpacity: Double = 0.22
@@ -571,6 +578,22 @@ enum AppTheme {
         static let settingsForegroundRange: Double = 0.55
         static let settingsBackgroundBase: Double = 0.15
         static let settingsBackgroundRange: Double = 0.5
+    }
+
+    /// Resolves a SwiftUI color to concrete sRGB and blends it toward white.
+    ///
+    /// SwiftUI's `Color.mix` keeps a provider that AppKit resolves through
+    /// `appearanceByApplyingTintColor` on every layout pass; on macOS 27 that
+    /// recursion overflows the stack when the detail view changes. Resolving
+    /// the tint once keeps the provider out of the view graph.
+    static func blendedAccent(_ color: Color, fraction: CGFloat) -> Color {
+        guard fraction > 0,
+              let base = NSColor(color).usingColorSpace(.sRGB),
+              let mixed = base.blended(withFraction: fraction, of: .white)
+        else {
+            return color
+        }
+        return Color(nsColor: mixed)
     }
 
     // MARK: - Color

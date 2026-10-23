@@ -55,6 +55,17 @@ final class PDFDocumentModelTests: XCTestCase {
         }
     }
 
+    func testSearchStopsAtTheResultBudget() async throws {
+        let url = try makePDF(text: "a a a a a a a a a")
+        let model = PDFDocumentModel(url: url)
+        await model.load()
+        model.maximumSearchResults = 3
+
+        let count = await model.search("a")
+        XCTAssertEqual(count, 3)
+        XCTAssertTrue(model.searchTruncated)
+    }
+
     // MARK: - Helpers
 
     private func makePDF(text: String) throws -> URL {

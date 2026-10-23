@@ -280,12 +280,18 @@ enum WaveformExtractor {
             let rate = stream.mSampleRate > 0
                 ? stream.mSampleRate
                 : sampleRate
+            guard rate.isFinite, rate > 0 else {
+                bufferFailures += 1
+                return
+            }
             let channels = max(Int(stream.mChannelsPerFrame), 1)
-            let framesPerBucket = max(
-                Int((rate / Double(WaveformExtractor.bucketsPerSecond))
-                    .rounded()),
-                1
-            )
+            guard let rawFramesPerBucket = NumericConversion.int(
+                rate / Double(WaveformExtractor.bucketsPerSecond)
+            ) else {
+                bufferFailures += 1
+                return
+            }
+            let framesPerBucket = max(rawFramesPerBucket, 1)
             allocateIfNeeded(
                 rate: rate,
                 channels: channels,
@@ -322,11 +328,17 @@ enum WaveformExtractor {
             // frame cannot index past the end. They are not part of the
             // timeline: MediaWaveformView stretches every bucket across the
             // asset duration, so leaving them shifts every visible event.
-            let timelineBuckets = max(
-                1,
-                Int(
-                    ceil(duration * sampleRate / Double(bucketFrames))
-                )
+            let rawBuckets = ceil(
+                duration * sampleRate / Double(bucketFrames)
+            )
+            guard rawBuckets.isFinite,
+                  let bucketCount = NumericConversion.int(rawBuckets)
+            else {
+                throw WaveformError.cannotRead
+            }
+            let timelineBuckets = min(
+                max(1, bucketCount),
+                peaks.count
             )
             return WaveformData(
                 peaks: Array(peaks.prefix(timelineBuckets)),
@@ -354,9 +366,15 @@ enum WaveformExtractor {
             // indexing, not from a nominal 200 buckets per second. The two
             // disagree at rates such as 22.05 kHz, and the smaller allocation
             // silently dropped the trailing audio.
-            let count = Int(
-                ceil(duration * rate / Double(framesPerBucket))
+            let rawCount = ceil(
+                duration * rate / Double(framesPerBucket)
             ) + 2
+            guard rawCount.isFinite,
+                  let count = NumericConversion.int(rawCount),
+                  count > 0 else {
+                bufferFailures += 1
+                return
+            }
             peaks = Array(repeating: 0, count: count)
             sums = Array(repeating: 0, count: count)
             counts = Array(repeating: 0, count: count)
@@ -405,15 +423,23 @@ enum WaveformExtractor {
             // initial offset or a gap must not have its waveform shifted
             // by the cumulative decoded sample count.
             let presentation = CMSampleBufferGetPresentationTimeStamp(sample)
-            let timelineOffset = presentation.isNumeric
-                && presentation.seconds.isFinite
-                ? Int((presentation.seconds * sampleRate).rounded())
-                : totalFrames
+            let timelineOffset: Int
+            if presentation.isNumeric,
+               presentation.seconds.isFinite,
+               let offset = NumericConversion.int(
+                   presentation.seconds * sampleRate
+               ) {
+                timelineOffset = offset
+            } else {
+                timelineOffset = totalFrames
+            }
             for frame in 0..<frameCount {
-                let absolute = timelineOffset + frame
+                let (absolute, overflow) = timelineOffset
+                    .addingReportingOverflow(frame)
                 // A negative timestamp places samples before the asset
-                // timeline; indexing with it would crash.
-                guard absolute >= 0 else { continue }
+                // timeline; indexing with it would crash. An overflowing
+                // sample is equally outside the timeline.
+                guard !overflow, absolute >= 0 else { continue }
                 let bucket = absolute / framesPerBucket
                 guard bucket < peaks.count else { break }
                 var framePeak: Float = 0

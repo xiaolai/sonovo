@@ -17,6 +17,22 @@ public struct LoadedMarkdown: Sendable {
     }
 }
 
+public enum MarkdownFileStoreError: Error, Equatable, CustomStringConvertible {
+    case fileTooLarge(byteCount: Int)
+
+    public var description: String {
+        switch self {
+        case let .fileTooLarge(byteCount):
+            "The Markdown file is \(byteCount) bytes; the reading limit is "
+                + "\(MarkdownLimits.maxReadBytes) bytes."
+        }
+    }
+}
+
+extension MarkdownFileStoreError: LocalizedError {
+    public var errorDescription: String? { description }
+}
+
 /// The result of comparing the disk with a snapshot.
 public enum DiskComparison: Sendable, Equatable {
     case unchanged
@@ -150,7 +166,7 @@ public struct MarkdownFileStore: Sendable {
     }
 
     public func read(_ url: URL) throws -> LoadedMarkdown {
-        let data = try Data(contentsOf: url)
+        let data = try Self.readBoundedData(at: url)
         let contents = try MarkdownEncoding.decode(data)
         return LoadedMarkdown(
             url: url,
@@ -164,15 +180,45 @@ public struct MarkdownFileStore: Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
         }
-        return DiskSnapshot(bytes: try Data(contentsOf: url))
+        return DiskSnapshot(bytes: try Self.readBoundedData(at: url))
     }
 
     public func compareDisk(at url: URL, to snapshot: DiskSnapshot) throws -> DiskComparison {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return .missing
         }
-        let current = try Data(contentsOf: url)
+        // A destination that grew past the read cap is changed by definition;
+        // never allocate it just to discover that.
+        let current: Data
+        do {
+            current = try Self.readBoundedData(at: url)
+        } catch {
+            return .changed
+        }
         return current == snapshot.bytes ? .unchanged : .changed
+    }
+
+    static func readBoundedData(at url: URL) throws -> Data {
+        if let size = try? url.resourceValues(
+            forKeys: [.fileSizeKey]
+        ).fileSize, size > MarkdownLimits.maxReadBytes {
+            throw MarkdownFileStoreError.fileTooLarge(byteCount: size)
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let cap = MarkdownLimits.maxReadBytes + 1
+        var data = Data()
+        while data.count < cap {
+            let chunk = try handle.read(
+                upToCount: min(1 << 18, cap - data.count)
+            )
+            guard let chunk, !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= MarkdownLimits.maxReadBytes else {
+            throw MarkdownFileStoreError.fileTooLarge(byteCount: data.count)
+        }
+        return data
     }
 
     // MARK: - Save

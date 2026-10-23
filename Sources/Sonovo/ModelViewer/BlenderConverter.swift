@@ -165,6 +165,23 @@ final class BlenderConverter: BlendConverting {
     private let timeoutSeconds: Double
     private var processes: [ObjectIdentifier: Process] = [:]
 
+    nonisolated static let defaultTimeoutSeconds: Double = 300
+    /// `Task.sleep` needs a representable duration, and the reporting path
+    /// converts the value to `Int`. Reject infinity, NaN, and absurd finite
+    /// values from the environment.
+    nonisolated static let maximumTimeoutSeconds: Double = 3600
+
+    nonisolated static func resolvedTimeout(_ raw: String?) -> Double {
+        guard let raw,
+              let value = Double(raw),
+              value.isFinite,
+              value >= 1,
+              value <= maximumTimeoutSeconds else {
+            return defaultTimeoutSeconds
+        }
+        return value
+    }
+
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default,
@@ -177,13 +194,9 @@ final class BlenderConverter: BlendConverting {
             environment: environment,
             fileManager: fileManager
         )
-        if let raw = environment["SONOVO_BLENDER_TIMEOUT_SECONDS"],
-           let value = Double(raw),
-           value > 0 {
-            timeoutSeconds = value
-        } else {
-            timeoutSeconds = 300
-        }
+        timeoutSeconds = Self.resolvedTimeout(
+            environment["SONOVO_BLENDER_TIMEOUT_SECONDS"]
+        )
     }
 
     func locateBlender() -> BlenderInstallation? {

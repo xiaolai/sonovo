@@ -94,6 +94,7 @@ enum CodeDocumentError: Error, Equatable {
     case destinationChanged
     case diskChangedDuringRevert
     case readFailed(String)
+    case editTooLarge
 }
 
 /// One open code document.
@@ -170,6 +171,7 @@ final class CodeDocument: Identifiable {
         self.store = store
         self.reader = reader
         undoManager.groupsByEvent = false
+        undoManager.levelsOfUndo = DocumentHistoryLimits.undoLevels
     }
 
     // MARK: - Loading
@@ -443,6 +445,10 @@ final class CodeDocument: Identifiable {
                 throw CodeDocumentError.readOnly
             }
             throw CodeDocumentError.notReady
+        }
+        guard newSource.utf8.count <= DocumentHistoryLimits.maxReplacementBytes
+        else {
+            throw CodeDocumentError.editTooLarge
         }
         guard newSource.utf8.elementsEqual(source.utf8) == false else {
             return

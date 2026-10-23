@@ -780,13 +780,13 @@ private struct MarkdownImageView: View {
             return
         }
 
-        let data: Data? = await Task.detached(
+        let decoded: NSImage? = await Task.detached(
             priority: .userInitiated
         ) {
-            try? Data(contentsOf: url)
+            BoundedImageLoader.image(at: url)
         }.value
         guard !Task.isCancelled else { return }
-        guard let data, let decoded = NSImage(data: data) else {
+        guard let decoded else {
             image = nil
             return
         }

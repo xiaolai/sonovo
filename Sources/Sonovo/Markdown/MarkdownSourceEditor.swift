@@ -879,11 +879,11 @@ final class MarkdownTextView: NSTextView {
         guard let handler = onPasteImage else { return false }
 
         if let png = pasteboard.data(forType: .png) {
+            guard png.count <= MediaLimits.maxImageBytes else { return false }
             return handler(png, "png")
         }
         if let tiff = pasteboard.data(forType: .tiff),
-           let representation = NSBitmapImageRep(data: tiff),
-           let png = representation.representation(using: .png, properties: [:]) {
+           let png = BoundedImageLoader.pngData(from: tiff) {
             return handler(png, "png")
         }
         if let url = fileURLs(from: pasteboard).first(where: { url in
@@ -892,10 +892,7 @@ final class MarkdownTextView: NSTextView {
             }
             return type.conforms(to: .image)
         }),
-           let image = NSImage(contentsOf: url),
-           let tiff = image.tiffRepresentation,
-           let representation = NSBitmapImageRep(data: tiff),
-           let png = representation.representation(using: .png, properties: [:]) {
+           let png = BoundedImageLoader.pngData(at: url) {
             // The bytes are PNG regardless of the source file's extension.
             return handler(png, "png")
         }

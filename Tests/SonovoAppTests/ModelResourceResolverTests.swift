@@ -341,4 +341,32 @@ final class ModelResourceResolverTests: XCTestCase {
         )
         try Data(contents.utf8).write(to: url)
     }
+
+    func testBoundedReadRefusesAFileOverTheCap() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("asset.bin")
+        let data = Data([0, 1, 2, 3, 4])
+        try data.write(to: url)
+
+        XCTAssertEqual(
+            try ModelSchemeHandler.readBounded(url, cap: data.count),
+            data
+        )
+        XCTAssertThrowsError(
+            try ModelSchemeHandler.readBounded(url, cap: data.count - 1)
+        ) { error in
+            XCTAssertTrue(error is ModelResourceError)
+        }
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SonovoModel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true
+        )
+        return url
+    }
 }

@@ -774,23 +774,6 @@ final class MediaPlaybackModel {
             else {
                 continue
             }
-            var length = 0
-            var pointer: UnsafeMutablePointer<Int8>?
-            let status = CMBlockBufferGetDataPointer(
-                block,
-                atOffset: 0,
-                lengthAtOffsetOut: nil,
-                totalLengthOut: &length,
-                dataPointerOut: &pointer
-            )
-            guard status == kCMBlockBufferNoErr,
-                  let pointer else {
-                continue
-            }
-            let bytes = UnsafeRawBufferPointer(
-                start: pointer,
-                count: length
-            )
             // The format subtype decides the sample width. The buffer length
             // is not authoritative: a 32-bit sample may be padded, and a
             // counter sample is not a frame number at all.
@@ -806,21 +789,11 @@ final class MediaPlaybackModel {
                 // frame-number label would be wrong.
                 continue
             }
-            guard length >= width else { continue }
-            // Time-code samples are signed two's-complement frame numbers.
-            let frame: Int64
-            if width == 8 {
-                var value: UInt64 = 0
-                for index in 0..<8 {
-                    value = (value << 8) | UInt64(bytes[index])
-                }
-                frame = Int64(bitPattern: value)
-            } else {
-                var value: UInt32 = 0
-                for index in 0..<4 {
-                    value = (value << 8) | UInt32(bytes[index])
-                }
-                frame = Int64(Int32(bitPattern: value))
+            guard let frame = Self.timecodeFrameNumber(
+                in: block,
+                width: width
+            ) else {
+                continue
             }
             let dropFrame = (
                 CMTimeCodeFormatDescriptionGetTimeCodeFlags(format)
@@ -885,9 +858,49 @@ final class MediaPlaybackModel {
         return segments
     }
 
+    /// Copies exactly the sample's frame-number bytes out of the block
+    /// buffer. `CMBlockBufferGetDataPointer` returns a pointer whose declared
+    /// length is only the first contiguous block; a sample split across
+    /// blocks would be read out of bounds if its total length were used.
+    nonisolated static func timecodeFrameNumber(
+        in block: CMBlockBuffer,
+        width: Int
+    ) -> Int64? {
+        guard width == 4 || width == 8,
+              CMBlockBufferGetDataLength(block) >= width else {
+            return nil
+        }
+        var bytes = [UInt8](repeating: 0, count: width)
+        let status = bytes.withUnsafeMutableBytes { buffer in
+            guard let base = buffer.baseAddress else {
+                return kCMBlockBufferBadPointerParameterErr
+            }
+            return CMBlockBufferCopyDataBytes(
+                block,
+                atOffset: 0,
+                dataLength: width,
+                destination: base
+            )
+        }
+        guard status == kCMBlockBufferNoErr else { return nil }
+        // Time-code samples are signed two's-complement frame numbers.
+        if width == 8 {
+            var value: UInt64 = 0
+            for byte in bytes {
+                value = (value << 8) | UInt64(byte)
+            }
+            return Int64(bitPattern: value)
+        }
+        var value: UInt32 = 0
+        for byte in bytes {
+            value = (value << 8) | UInt32(byte)
+        }
+        return Int64(Int32(bitPattern: value))
+    }
+
     /// True when `next` is the expected continuation of `previous`, so no
     /// new segment is needed.
-    nonisolated private static func isContiguous(
+    nonisolated static func isContiguous(
         _ previous: MediaTimecode.SourceSegment,
         followedBy next: MediaTimecode.SourceSegment
     ) -> Bool {
@@ -895,16 +908,25 @@ final class MediaPlaybackModel {
               previous.frameQuanta == next.frameQuanta,
               previous.isDropFrame == next.isDropFrame,
               let rate = previous.frameRate ?? next.frameRate,
-              rate > 0 else {
+              rate.isFinite, rate > 0 else {
             return false
         }
-        if let duration = previous.duration, duration > 0,
+        if let duration = previous.duration,
+           duration.isFinite,
+           duration > 0,
            next.time > previous.time + duration + 0.000_001 {
             return false
         }
-        let expected = previous.startFrame + Int64(
-            ((next.time - previous.time) * rate).rounded()
-        )
+        let deltaTime = next.time - previous.time
+        guard deltaTime.isFinite, deltaTime >= 0 else { return false }
+        let rawDelta = (deltaTime * rate).rounded()
+        guard rawDelta.isFinite,
+              let deltaFrames = Int64(exactly: rawDelta) else {
+            return false
+        }
+        let (expected, overflow) = previous.startFrame
+            .addingReportingOverflow(deltaFrames)
+        guard !overflow else { return false }
         return expected == next.startFrame
     }
 

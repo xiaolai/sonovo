@@ -65,33 +65,55 @@ public struct MarkdownParser: Sendable {
         return parseCanonical(canonical, enableAutolinks: enableAutolinks)
     }
 
+    /// The safe representation for a source that exceeds a parser guard:
+    /// one raw block, so the UI can fall back to source-only presentation.
+    private static func rawParsed(
+        source: String,
+        map: SourceMap
+    ) -> ParsedMarkdown {
+        let end = map.position(atUTF16Offset: source.utf16.count)
+            ?? SourcePosition(line: 1, column: 0, offset: 0)
+        let wholeRange = SourceRange(
+            start: SourcePosition(line: 1, column: 0, offset: 0),
+            end: end
+        )
+        let ast = SonovoAST(
+            blocks: [.htmlBlock(raw: source, range: wholeRange)]
+        )
+        return ParsedMarkdown(
+            source: source,
+            ast: ast,
+            bodySourceMap: map,
+            fullSourceMap: map,
+            bodyStartOffset: 0,
+            exceededNestingLimit: true
+        )
+    }
+
     /// Parses text that is already canonical (BOM-free, LF-only).
     public static func parseCanonical(
         _ source: String,
         enableAutolinks: Bool = true
     ) -> ParsedMarkdown {
         let fullMap = SourceMap(source: source)
+        let lineCount = source.utf8.reduce(into: 0) { count, byte in
+            if byte == 0x0A { count += 1 }
+        }
 
         // Guard before swift-markdown's recursive converter can overflow the
-        // stack. Content is preserved as one raw block.
-        if NestingGuard.exceedsLimit(source, limit: MarkdownLimits.maxParseDepth) {
-            let end = fullMap.position(atUTF16Offset: source.utf16.count)
-                ?? SourcePosition(line: 1, column: 0, offset: 0)
-            let wholeRange = SourceRange(
-                start: SourcePosition(line: 1, column: 0, offset: 0),
-                end: end
+        // stack, and before a flat document can exhaust memory. Content is
+        // preserved as one raw block.
+        if NestingGuard.exceedsLimit(
+            source,
+            limit: MarkdownLimits.maxParseDepth
+        )
+            || NestingGuard.exceedsInlineLimit(
+                source,
+                limit: MarkdownLimits.maxParseDepth
             )
-            let ast = SonovoAST(
-                blocks: [.htmlBlock(raw: source, range: wholeRange)]
-            )
-            return ParsedMarkdown(
-                source: source,
-                ast: ast,
-                bodySourceMap: fullMap,
-                fullSourceMap: fullMap,
-                bodyStartOffset: 0,
-                exceededNestingLimit: true
-            )
+            || source.utf8.count > MarkdownLimits.maxReadBytes
+            || lineCount > MarkdownLimits.maxSourceLines {
+            return Self.rawParsed(source: source, map: fullMap)
         }
 
         let split = FrontmatterSplitter.split(source)
@@ -178,6 +200,60 @@ public struct MarkdownParser: Sendable {
 // MARK: - Nesting guard
 
 enum NestingGuard {
+    /// Detects inline nesting that the block-container guard cannot see.
+    /// Deeply nested images/links or a huge emphasis delimiter run makes the
+    /// recursive inline converter a stack-overflow candidate.
+    static func exceedsInlineLimit(_ source: String, limit: Int) -> Bool {
+        var bracketDepth = 0
+        var delimiterRun = 0
+        var delimiterCount = 0
+        var previous: UInt8?
+        for byte in source.utf8 {
+            switch byte {
+            case UInt8(ascii: "["):
+                bracketDepth += 1
+                delimiterCount += 1
+                if bracketDepth > limit
+                    || delimiterCount > MarkdownLimits.maxInlineDelimiters {
+                    return true
+                }
+                delimiterRun = 0
+                previous = nil
+            case UInt8(ascii: "]"):
+                if bracketDepth > 0 { bracketDepth -= 1 }
+                delimiterCount += 1
+                delimiterRun = 0
+                previous = nil
+            case UInt8(ascii: "*"), UInt8(ascii: "_"),
+                 UInt8(ascii: "`"):
+                delimiterCount += 1
+                if delimiterCount > MarkdownLimits.maxInlineDelimiters {
+                    return true
+                }
+                if byte == UInt8(ascii: "`") {
+                    delimiterRun = 0
+                    previous = nil
+                } else {
+                    if previous == byte {
+                        delimiterRun += 1
+                    } else {
+                        delimiterRun = 1
+                        previous = byte
+                    }
+                    if delimiterRun > limit { return true }
+                }
+            case UInt8(ascii: "!"):
+                delimiterCount += 1
+                delimiterRun = 0
+                previous = nil
+            default:
+                delimiterRun = 0
+                previous = nil
+            }
+        }
+        return false
+    }
+
     /// Detects blockquote nesting above `limit` before parsing.
     ///
     /// `swift-markdown` converts the cmark tree recursively; a pathological

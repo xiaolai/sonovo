@@ -64,6 +64,7 @@ public enum DocumentError: Error, Equatable {
     case closed
     case readFailed(String)
     case staleCompletion
+    case editTooLarge
 }
 
 /// One open Markdown document.
@@ -137,6 +138,7 @@ public final class MarkdownDocument: Identifiable {
         self.isReadOnly = false
         self.isLarge = false
         undoManager.groupsByEvent = false
+        undoManager.levelsOfUndo = DocumentHistoryLimits.undoLevels
     }
 
     public init(
@@ -153,6 +155,7 @@ public final class MarkdownDocument: Identifiable {
         self.isReadOnly = loaded.isLarge
         self.isLarge = loaded.isLarge
         undoManager.groupsByEvent = false
+        undoManager.levelsOfUndo = DocumentHistoryLimits.undoLevels
     }
 
     // MARK: - Editing
@@ -160,6 +163,10 @@ public final class MarkdownDocument: Identifiable {
     /// Replaces the whole source. Commands and the editor both use this path.
     public func replaceSource(_ newSource: String, actionName: String = "Edit") throws {
         guard !isReadOnly else { throw DocumentError.readOnly }
+        guard newSource.utf8.count <= DocumentHistoryLimits.maxReplacementBytes
+        else {
+            throw DocumentError.editTooLarge
+        }
         guard newSource != source else { return }
 
         let oldSource = source
@@ -409,7 +416,7 @@ public final class MarkdownDocument: Identifiable {
             () -> DiskReadResult in
             let data: Data
             do {
-                data = try Data(contentsOf: url)
+                data = try MarkdownFileStore.readBoundedData(at: url)
             } catch let error as NSError
                 where error.domain == NSCocoaErrorDomain
                 && (error.code == NSFileReadNoSuchFileError
@@ -561,7 +568,7 @@ public final class MarkdownDocument: Identifiable {
         guard let url = url ?? fileURL else {
             throw DocumentError.untitled
         }
-        let data = try Data(contentsOf: url)
+        let data = try MarkdownFileStore.readBoundedData(at: url)
         let contents = try MarkdownEncoding.decode(data)
         return ExternalConflict(
             diskSnapshot: DiskSnapshot(bytes: data),

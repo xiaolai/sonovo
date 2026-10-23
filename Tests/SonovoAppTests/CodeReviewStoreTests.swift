@@ -354,4 +354,27 @@ final class CodeReviewStoreTests: XCTestCase {
         let established = await store.baselineEstablishedAt
         XCTAssertNil(established)
     }
+
+    func testCorruptObjectByteCounterCannotOverflowTheBudget() async throws {
+        try FileManager.default.createDirectory(
+            at: ledger,
+            withIntermediateDirectories: true
+        )
+        let manifest = """
+        {"version":1,"baselineEstablishedAt":null,\
+        "objectBytes":9223372036854775807,"cursors":[],"decisions":[]}
+        """
+        try Data(manifest.utf8).write(
+            to: ledger.appendingPathComponent("manifest.json")
+        )
+
+        let store = makeStore()
+        try await store.recordBaseline(
+            path: "a.swift",
+            snapshot: DiskSnapshot(bytes: Data("a\n".utf8)),
+            at: date
+        )
+        let cursor = await store.cursor(for: "a.swift")
+        XCTAssertEqual(cursor?.hasContent, false)
+    }
 }

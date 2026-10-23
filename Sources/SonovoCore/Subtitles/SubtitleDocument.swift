@@ -5,6 +5,7 @@ public enum SubtitleDocumentError: Error, Equatable {
     case readOnly
     case closed
     case readFailed(String)
+    case editTooLarge
 }
 
 /// How the subtitle document is presented.
@@ -118,6 +119,7 @@ public final class SubtitleDocument: Identifiable {
             format: loaded.format
         )
         undoManager.groupsByEvent = false
+        undoManager.levelsOfUndo = DocumentHistoryLimits.undoLevels
     }
 
     // MARK: - Editing
@@ -130,6 +132,10 @@ public final class SubtitleDocument: Identifiable {
     ) throws {
         guard !isReadOnly else { throw SubtitleDocumentError.readOnly }
         guard !isClosed else { throw SubtitleDocumentError.closed }
+        guard newSource.utf8.count <= DocumentHistoryLimits.maxReplacementBytes
+        else {
+            throw SubtitleDocumentError.editTooLarge
+        }
         guard newSource != source else { return }
 
         let oldSource = source
@@ -557,7 +563,10 @@ public final class SubtitleDocument: Identifiable {
             () -> DiskReadResult in
             let data: Data
             do {
-                data = try Data(contentsOf: url)
+                data = try SubtitleFileStore.readBoundedData(url)
+                guard data.count <= SubtitleLimits.maxReadBytes else {
+                    return .failure
+                }
             } catch let error as NSError
                 where error.domain == NSCocoaErrorDomain
                 && (error.code == NSFileReadNoSuchFileError
@@ -687,7 +696,10 @@ public final class SubtitleDocument: Identifiable {
 
     private func readConflict(at url: URL? = nil) throws -> ExternalConflict {
         let url = url ?? fileURL
-        let data = try Data(contentsOf: url)
+        let data = try SubtitleFileStore.readBoundedData(url)
+        guard data.count <= SubtitleLimits.maxReadBytes else {
+            throw SubtitleFileStoreError.fileTooLarge(byteCount: data.count)
+        }
         let contents = try SubtitleEncoding.decode(data)
         return ExternalConflict(
             diskSnapshot: DiskSnapshot(bytes: data),

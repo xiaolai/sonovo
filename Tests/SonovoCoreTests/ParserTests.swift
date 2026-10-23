@@ -435,4 +435,52 @@ struct ParserTests {
         #expect(parsed.ast.blocks.count == 1_001)
         #expect(parsed.ast.blocks.first?.range != nil)
     }
+
+    @Test("A source over the line budget is kept as one raw block")
+    func sourceLineBudget() {
+        let source = String(
+            repeating: "a\n",
+            count: MarkdownLimits.maxSourceLines + 1
+        )
+        let parsed = MarkdownParser.parseCanonical(source)
+        #expect(parsed.exceededNestingLimit)
+        #expect(parsed.ast.blocks.count == 1)
+    }
+
+    @Test("Deep inline nesting is kept as one raw block")
+    func inlineDepthBudget() {
+        let source = String(
+            repeating: "[",
+            count: MarkdownLimits.maxParseDepth + 1
+        ) + "x" + String(
+            repeating: "]",
+            count: MarkdownLimits.maxParseDepth + 1
+        )
+        let parsed = MarkdownParser.parseCanonical(source)
+        #expect(parsed.exceededNestingLimit)
+        #expect(parsed.ast.blocks.count == 1)
+    }
+
+    @Test("A document with too many inline delimiters is kept raw")
+    func inlineDelimiterBudget() {
+        let source = String(
+            repeating: "*a*",
+            count: (MarkdownLimits.maxInlineDelimiters / 2) + 1
+        )
+        let parsed = MarkdownParser.parseCanonical(source)
+        #expect(parsed.exceededNestingLimit)
+    }
+
+    @Test("A very long emphasis delimiter run is kept as one raw block")
+    func emphasisRunBudget() {
+        let source = String(
+            repeating: "*",
+            count: MarkdownLimits.maxParseDepth + 1
+        ) + "x" + String(
+            repeating: "*",
+            count: MarkdownLimits.maxParseDepth + 1
+        )
+        let parsed = MarkdownParser.parseCanonical(source)
+        #expect(parsed.exceededNestingLimit)
+    }
 }

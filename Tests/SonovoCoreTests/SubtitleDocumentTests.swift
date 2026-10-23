@@ -426,4 +426,46 @@ struct SubtitleDocumentTests {
         )
         #expect(fresh?.cues.first?.rawText == "New")
     }
+
+    @Test("An oversized external replacement is refused")
+    func oversizedExternalReplacement() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srtSource.utf8).write(to: url)
+
+        let document = try SubtitleDocument(loading: url)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(
+            atOffset: UInt64(SubtitleLimits.maxReadBytes + 1)
+        )
+        try handle.close()
+
+        do {
+            _ = try await document.checkExternalChange()
+            Issue.record("Expected the oversized replacement to be refused")
+        } catch {
+            #expect(error is SubtitleDocumentError)
+        }
+        #expect(document.source == srtSource)
+    }
+
+    @Test("Undo history is bounded by the shared level limit")
+    func undoHistoryIsBounded() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srtSource.utf8).write(to: url)
+
+        let document = try SubtitleDocument(loading: url)
+        for index in 0..<(DocumentHistoryLimits.undoLevels + 5) {
+            try document.replaceSource("v\(index)")
+        }
+        var undoCount = 0
+        while document.undoManager.canUndo {
+            document.undoManager.undo()
+            undoCount += 1
+        }
+        #expect(undoCount <= DocumentHistoryLimits.undoLevels)
+    }
 }

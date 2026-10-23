@@ -25,6 +25,11 @@ struct DetailWorkspace: View {
                     dock: layout.terminalDock,
                     availableHeight: layout.terminalResizeHeight
                 )
+                // The terminal sessions are per project. Rebuild the pane on a
+                // project switch so the host and tab bar cannot keep showing
+                // the previous project's sessions while the menu acts on the
+                // new project's store.
+                .id(state.liveProject.id)
                 .frame(width: layout.terminalFrame.width, height: layout.terminalFrame.height)
                 .clipped()
                 .offset(x: layout.terminalFrame.minX, y: layout.terminalFrame.minY)

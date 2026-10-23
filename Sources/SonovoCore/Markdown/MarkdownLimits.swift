@@ -14,6 +14,19 @@ public enum MarkdownLimits {
     /// Maximum container nesting depth the parser will walk.
     public static let maxParseDepth = 128
 
+    /// Hard read cap. The editable threshold decides read-only state; this is
+    /// the memory bound for the whole read/decode/parse pipeline.
+    public static let maxReadBytes = 16 * 1024 * 1024
+
+    /// Maximum source lines. A flat AST of one block per line would otherwise
+    /// allocate without bound even inside the byte cap.
+    public static let maxSourceLines = 100_000
+
+    /// Maximum inline delimiter characters across the whole source. This
+    /// bounds the inline node count when a document repeats many small
+    /// emphasis/link constructs instead of nesting them.
+    public static let maxInlineDelimiters = 500_000
+
     /// Documents larger than this are routed to source-only/read-only mode.
     ///
     /// Provisional until the M0 measurement; adjust only with a measurement.

@@ -58,7 +58,7 @@ public struct SubtitleFileStore: Sendable {
         }
         // The metadata check above does not bound a file that grows between
         // the check and the read. Read at most cap + 1 bytes.
-        let data = try Self.readBounded(url)
+        let data = try Self.readBoundedData(url)
         guard data.count <= SubtitleLimits.maxReadBytes else {
             throw SubtitleFileStoreError.fileTooLarge(byteCount: data.count)
         }
@@ -78,7 +78,10 @@ public struct SubtitleFileStore: Sendable {
         )
     }
 
-    private static func readBounded(_ url: URL) throws -> Data {
+    /// Reads at most `maxReadBytes + 1` bytes. Every reread path, including
+    /// external-change and conflict recovery, must use this instead of
+    /// `Data(contentsOf:)`.
+    static func readBoundedData(_ url: URL) throws -> Data {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         let cap = SubtitleLimits.maxReadBytes + 1

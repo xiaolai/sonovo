@@ -67,6 +67,10 @@ enum InlineFragmentParser {
         if !NestingGuard.exceedsLimit(
             combined,
             limit: MarkdownLimits.maxParseDepth
+        ),
+        !NestingGuard.exceedsInlineLimit(
+            combined,
+            limit: MarkdownLimits.maxParseDepth
         ) {
             result = flatten(
                 Document(

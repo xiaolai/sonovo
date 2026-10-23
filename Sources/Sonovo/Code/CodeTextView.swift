@@ -18,7 +18,7 @@ struct CodeEditorSettings: Equatable, Sendable {
         var settings = CodeEditorSettings()
         let storedWidth = defaults.integer(forKey: tabWidthKey)
         if storedWidth > 0 {
-            settings.tabWidth = storedWidth
+            settings.tabWidth = AppTheme.Code.clampedTabWidth(storedWidth)
         }
         settings.usesTabs = defaults.bool(forKey: usesTabsKey)
         settings.wrapsLines = defaults.bool(forKey: wrapLinesKey)
@@ -974,7 +974,7 @@ final class CodeTextView: NSTextView {
             withAttributes: [.font: indentGuideFont]
         ).width
         guard spaceWidth > 0 else { return }
-        let tabWidth = max(1, editorTabWidth)
+        let tabWidth = AppTheme.Code.clampedTabWidth(editorTabWidth)
         let guideColor = NSColor.tertiaryLabelColor.withAlphaComponent(
             AppTheme.Opacity.border
         )
@@ -1014,7 +1014,10 @@ final class CodeTextView: NSTextView {
             return
         }
         insertText(
-            String(repeating: " ", count: max(1, editorTabWidth)),
+            String(
+                repeating: " ",
+                count: AppTheme.Code.clampedTabWidth(editorTabWidth)
+            ),
             replacementRange: selectedRange()
         )
     }
@@ -1026,7 +1029,7 @@ final class CodeTextView: NSTextView {
         let lineRange = ns.lineRange(
             for: NSRange(location: selection.location, length: 0)
         )
-        let width = max(1, editorTabWidth)
+        let width = AppTheme.Code.clampedTabWidth(editorTabWidth)
         var removable = 0
         var removedWidth = 0
         while lineRange.location + removable < ns.length,

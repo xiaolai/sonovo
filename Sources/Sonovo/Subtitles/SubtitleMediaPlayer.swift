@@ -62,11 +62,11 @@ final class SubtitleMediaPlayer {
     }
 
     var currentMilliseconds: Int {
-        max(0, Int((currentTime * 1000).rounded()))
+        NumericConversion.milliseconds(currentTime)
     }
 
     var durationMilliseconds: Int {
-        max(0, Int((duration * 1000).rounded()))
+        NumericConversion.milliseconds(duration)
     }
 
     // MARK: - Opening
