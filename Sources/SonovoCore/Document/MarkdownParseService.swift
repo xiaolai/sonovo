@@ -186,6 +186,42 @@ public actor MarkdownParseService {
         Task { await runLoop() }
     }
 
+    /// Runs the parse and augmentation on a thread with a large fixed stack.
+    ///
+    /// swift-markdown converts the cmark tree recursively before the AST
+    /// mapper's own depth limit can run, and the source guards are a
+    /// heuristic bound rather than a proof. The cooperative pool's stacks
+    /// are small, so one crafted document that slips past a guard would
+    /// overflow there; a dedicated stack makes the residual risk much harder
+    /// to reach. The sound fix is an iterative converter in the dependency.
+    private static func parseOnLargeStack(
+        parser: @escaping Parser,
+        input: MarkdownParseInput
+    ) async -> MarkdownParseOutput {
+        await withCheckedContinuation { continuation in
+            let thread = Thread {
+                let parsed = parser(input.source, input.enableAutolinks)
+                let ast = MarkdownSyntaxAugmenter().augment(parsed)
+                let headings = HeadingIndex(ast: ast)
+                continuation.resume(
+                    returning: MarkdownParseOutput(
+                        documentID: input.documentID,
+                        revision: input.revision,
+                        enableAutolinks: input.enableAutolinks,
+                        parsed: parsed,
+                        ast: ast,
+                        headings: headings
+                    )
+                )
+            }
+            // Virtual memory, touched only as the recursion uses it.
+            thread.stackSize = 64 * 1024 * 1024
+            thread.name = "Sonovo.MarkdownParse"
+            thread.qualityOfService = .userInitiated
+            thread.start()
+        }
+    }
+
     private func runLoop() async {
         while !order.isEmpty {
             let key = order.removeFirst()
@@ -194,20 +230,10 @@ public actor MarkdownParseService {
             }
 
             inFlight = input
-            let parser = self.parser
-            let output = await Task.detached(priority: .userInitiated) {
-                let parsed = parser(input.source, input.enableAutolinks)
-                let ast = MarkdownSyntaxAugmenter().augment(parsed)
-                let headings = HeadingIndex(ast: ast)
-                return MarkdownParseOutput(
-                    documentID: input.documentID,
-                    revision: input.revision,
-                    enableAutolinks: input.enableAutolinks,
-                    parsed: parsed,
-                    ast: ast,
-                    headings: headings
-                )
-            }.value
+            let output = await Self.parseOnLargeStack(
+                parser: self.parser,
+                input: input
+            )
             inFlight = nil
 
             if discardedDocuments.remove(input.documentID) == nil {

@@ -286,6 +286,28 @@ struct ParseServiceTests {
         #expect(counter.snapshot.starts <= 2)
     }
 
+    @Test("Parses a near-miss nested document without overflowing a pool stack")
+    func parsesResidualNesting() async throws {
+        // This shape passes the source guards but still makes the reference
+        // parser build a few hundred nested nodes, because a code span
+        // hides one of the closers from the scanner. The parse service runs
+        // the converter on a dedicated large stack, so the residual case
+        // parses instead of depending on the cooperative pool's stack.
+        let source = String(repeating: "*a `b*\n `\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        let service = MarkdownParseService()
+        let output = try #require(
+            await service.parse(
+                MarkdownParseInput(
+                    documentID: UUID(),
+                    revision: 1,
+                    source: source
+                )
+            )
+        )
+        #expect(output.parsed.source == source)
+    }
+
     @Test("Produces an augmented AST and heading index")
     func augmentsResult() async throws {
         let service = MarkdownParseService()
