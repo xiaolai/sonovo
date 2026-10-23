@@ -855,11 +855,12 @@ final class MarkdownTextView: NSTextView {
     }
 
     private func isImagePasteboard(_ pasteboard: NSPasteboard) -> Bool {
-        if pasteboard.data(forType: .png) != nil
-            || pasteboard.data(forType: .tiff) != nil {
+        // Type metadata only: `data(forType:)` copies the whole payload, and
+        // drag tracking runs on every movement update.
+        let types = pasteboard.types ?? []
+        if types.contains(.png) || types.contains(.tiff) {
             return true
         }
-        // Drag tracking must not decode image data; type metadata is enough.
         return fileURLs(from: pasteboard).contains { url in
             guard let type = UTType(filenameExtension: url.pathExtension) else {
                 return false
@@ -878,6 +879,10 @@ final class MarkdownTextView: NSTextView {
     private func handleImage(from pasteboard: NSPasteboard) -> Bool {
         guard let handler = onPasteImage else { return false }
 
+        // AppKit materializes a pasteboard payload before this code sees it;
+        // there is no incremental pasteboard reader. The cap therefore
+        // applies to what is processed and written, not to the copy the
+        // pasteboard already owns.
         if let png = pasteboard.data(forType: .png) {
             guard png.count <= MediaLimits.maxImageBytes else { return false }
             return handler(png, "png")
