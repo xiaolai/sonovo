@@ -282,6 +282,36 @@ final class MediaTimecodeTests: XCTestCase {
         XCTAssertNil(timecode.sourceLabel)
     }
 
+    func testInconsistentFrameQuantaIsRejected() {
+        // A 1 fps label base on a 29.97 fps track counts the wrong unit.
+        XCTAssertFalse(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 1,
+                fps: 29.97,
+                frameQuanta: 1,
+                dropFrame: true
+            )
+        )
+        XCTAssertEqual(
+            MediaTimecodeFormatter.timecode(
+                frameNumber: 1,
+                fps: 29.97,
+                frameQuanta: 1,
+                dropFrame: true
+            ),
+            "00:00:00:00"
+        )
+        // The standard pairing still labels.
+        XCTAssertTrue(
+            MediaTimecodeFormatter.isValidTimecodeInput(
+                frameNumber: 1,
+                fps: 29.97,
+                frameQuanta: 30,
+                dropFrame: true
+            )
+        )
+    }
+
     func testSourceLabelRejectsFrameOverflow() {
         var timecode = MediaTimecode(
             elapsed: 1,

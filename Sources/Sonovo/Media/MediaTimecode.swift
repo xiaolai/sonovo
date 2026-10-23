@@ -168,6 +168,14 @@ enum MediaTimecodeFormatter {
               nominal > 0 else {
             return false
         }
+        // The quanta is the integer base the labels count in. A base far
+        // from the track's own rate (1 on a 29.97 fps track) counts the
+        // wrong unit and produces a label that does not describe the frame
+        // number, so treat the metadata as unusable rather than label with
+        // it. Cross-rate timecode stays valid: 30-label timecode on 24 fps
+        // picture is a ratio of 1.25.
+        let ratio = Double(nominal) / fps
+        guard ratio >= 0.25, ratio <= 4 else { return false }
         guard dropFrame else { return true }
         let drop = (fps * 0.066_666).rounded()
         let perTenMinutes = (fps * 600).rounded()
