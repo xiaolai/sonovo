@@ -88,6 +88,18 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("A span after a cross-line opener is not skipped")
+    func spanAfterCrossLineOpener() {
+        // The first line's backtick can pair with this line's, making the
+        // following text inline. Once the paragraph is uncertain, skipping
+        // same-line spans would hide openers cmark uses.
+        let source = "`x\n"
+            + String(repeating: "` *a `x\n", count: 300)
+            + "` x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
     @Test("A delimiter inside a same-line code span is literal")
     func codeSpanContentIsLiteral() {
         // The span closes on the line, so cmark pairs exactly these two

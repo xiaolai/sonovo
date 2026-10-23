@@ -395,11 +395,12 @@ enum NestingGuard {
                     let after = line.index(index, offsetBy: run)
                     lineDelimiters += run
                     delimiterCount += run
-                    if let close = sameLineRun(
-                        line,
-                        from: after,
-                        length: run
-                    ) {
+                    if paragraphCertain,
+                       let close = sameLineRun(
+                           line,
+                           from: after,
+                           length: run
+                       ) {
                         // Closed on this line: cmark pairs the same two
                         // runs, so the content is certainly literal and
                         // contributes no delimiters.
