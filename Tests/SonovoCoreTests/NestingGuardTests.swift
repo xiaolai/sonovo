@@ -88,6 +88,42 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("A blank line after a list fence does not trap")
+    func blankLineAfterListFence() {
+        // The sibling check used to subscript the end index of a blank
+        // line.
+        #expect(!NestingGuard.exceedsLimit("- ```\n\n", limit: 100))
+    }
+
+    @Test("A fence hides HTML recognition inside it")
+    func fenceHidesHTMLRecognition() {
+        let source = "```\n<!--\n```\n-->\n"
+            + String(repeating: "*a\n", count: 300) + "x"
+            + String(repeating: "\na*", count: 300)
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A sibling item behind a quote ends the fence")
+    func quotedSiblingItemEndsFence() {
+        let source = "> - ```\n> - "
+            + String(repeating: ">", count: 129) + " x"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("A tabled HTML indentation is measured in columns")
+    func tabIndentedHTML() {
+        let source = ">\t\t<script>\n"
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("A quoted sibling item ends the HTML block")
+    func quotedSiblingItemEndsHTML() {
+        let source = "> - <!--\n> - "
+            + String(repeating: ">", count: 129) + " x"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("An HTML opening line's delimiters are counted")
     func htmlOpeningLineDelimiters() {
         // The whole markup can sit inside one tag-shaped line. Skipping it

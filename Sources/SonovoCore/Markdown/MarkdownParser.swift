@@ -362,17 +362,6 @@ enum NestingGuard {
                 }
                 continue
             }
-            if let end = htmlBlockEnd(line) {
-                // The opening line can carry the whole markup; count it
-                // before the block starts hiding lines.
-                if countHTMLOpeners(line, heuristic: end.isEmpty) {
-                    return true
-                }
-                htmlEnd = end
-                openDelimiters.removeAll()
-                paragraphCertain = true
-                continue
-            }
             if let active = fence {
                 // A closing fence may be indented at most three spaces and
                 // carries no info string. Anything else is literal content
@@ -439,6 +428,20 @@ enum NestingGuard {
                     paragraphCertain = true
                     continue
                 }
+            }
+
+            if let end = htmlBlockEnd(line) {
+                // The opening line can carry the whole markup; count it
+                // before the block starts hiding lines. A fence in progress
+                // was handled above, so a comment inside literal code cannot
+                // start a block.
+                if countHTMLOpeners(line, heuristic: end.isEmpty) {
+                    return true
+                }
+                htmlEnd = end
+                openDelimiters.removeAll()
+                paragraphCertain = true
+                continue
             }
 
             var lineDelimiters = 0
@@ -735,9 +738,14 @@ enum NestingGuard {
                     let blockInList = container.contains {
                         $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
                     }
-                    return blockInList && beginsListItem(line)
-                        && leadingColumns(line)
-                            <= leadingColumns(container)
+                    guard blockInList,
+                          let marker = Self.firstListMarkerColumn(line),
+                          let opening = Self.firstListMarkerColumn(
+                              Substring(container)
+                          ) else {
+                        return false
+                    }
+                    return marker <= opening
                 } ?? false
                 let reachedTerminator = end.isEmpty
                     ? blank
@@ -773,10 +781,19 @@ enum NestingGuard {
                 let fenceInList = active.prefix.contains {
                     $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
                 }
-                let siblingItem = fenceInList
-                    && beginsListItem(line)
-                    && leadingColumns(line)
-                        <= leadingColumns(active.prefix)
+                // A list marker at or left of the fence's own item starts
+                // a sibling item, which ends the item and with it the
+                // fence. A marker further right is content of this item.
+                let siblingItem: Bool
+                if fenceInList,
+                   let markerColumn = Self.firstListMarkerColumn(line),
+                   let fenceColumn = Self.firstListMarkerColumn(
+                       Substring(active.prefix)
+                   ) {
+                    siblingItem = markerColumn <= fenceColumn
+                } else {
+                    siblingItem = false
+                }
                 let scopeOpen = active.prefix.isEmpty
                     || (normalizedContainerPrefix(currentPrefix)
                         .hasPrefix(active.prefix) && !siblingItem)
@@ -836,34 +853,36 @@ enum NestingGuard {
         return false
     }
 
-    /// The column reached by leading spaces and tabs, with a tab advancing
-    /// to the next multiple of four.
-    private static func leadingColumns(_ line: Substring) -> Int {
+    /// The column of the first list marker on a line, after any quote
+    /// markers, or nil when the line starts with something else.
+    private static func firstListMarkerColumn(
+        _ line: Substring
+    ) -> Int? {
         var columns = 0
-        for character in line {
+        var index = line.startIndex
+        while index < line.endIndex {
+            let character = line[index]
             if character == " " {
                 columns += 1
+                index = line.index(after: index)
             } else if character == "\t" {
                 columns = (columns / 4 + 1) * 4
+                index = line.index(after: index)
+            } else if character == ">" {
+                columns += 1
+                index = line.index(after: index)
+                if index < line.endIndex,
+                   line[index] == " " || line[index] == "\t" {
+                    columns += 1
+                    index = line.index(after: index)
+                }
+            } else if listMarkerLength(at: index, in: line) != nil {
+                return columns
             } else {
-                break
+                return nil
             }
         }
-        return columns
-    }
-
-    private static func leadingColumns(_ text: String) -> Int {
-        leadingColumns(Substring(text))
-    }
-
-    /// Whether the line's first non-space token is a list marker.
-    private static func beginsListItem(_ line: Substring) -> Bool {
-        var index = line.startIndex
-        while index < line.endIndex,
-              line[index] == " " || line[index] == "\t" {
-            index = line.index(after: index)
-        }
-        return listMarkerLength(at: index, in: line) != nil
+        return nil
     }
 
     /// Counts the container markers on a line, updates the accumulated
@@ -1031,9 +1050,17 @@ enum NestingGuard {
         // A fence may be indented at most three columns past its
         // container. That applies inside a container too: `>     ``` ` is
         // indented code, not a fence.
-        let trailingSpaces = prefix.reversed()
-            .prefix(while: { $0 == " " }).count
-        if trailingSpaces > 3 || prefix.contains("\t") { return nil }
+        var trailingSpaces = 0
+        for character in prefix.reversed() {
+            if character == " " {
+                trailingSpaces += 1
+            } else if character == "\t" {
+                trailingSpaces += 4
+            } else {
+                break
+            }
+        }
+        if trailingSpaces > 3 { return nil }
         return (
             first,
             length,
@@ -1076,8 +1103,18 @@ enum NestingGuard {
         // container. More is indented code, and treating it as HTML would
         // hide the lines after it.
         let (prefix, trimmed) = splitContainers(line)
-        let trailing = prefix.reversed()
-            .prefix(while: { $0 == " " || $0 == "\t" }).count
+        var trailing = 0
+        for character in prefix.reversed() {
+            if character == " " {
+                trailing += 1
+            } else if character == "\t" {
+                // A tab reaches the next multiple of four; four is the
+                // conservative count for this bound.
+                trailing += 4
+            } else {
+                break
+            }
+        }
         guard trailing <= 3 else { return nil }
         guard trimmed.first == "<" else { return nil }
         let lower = trimmed.lowercased()
