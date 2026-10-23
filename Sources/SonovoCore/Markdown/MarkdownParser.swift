@@ -321,7 +321,7 @@ enum NestingGuard {
             _ line: Substring,
             heuristic: Bool
         ) -> Bool {
-            var scan = line.unicodeScalars
+            let scan = line.unicodeScalars
             var cursor = scan.startIndex
             while cursor < scan.endIndex {
                 let inner = scan[cursor]
