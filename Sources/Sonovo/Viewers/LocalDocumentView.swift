@@ -7,6 +7,9 @@ struct LocalDocumentView: View {
     let asset: ProjectAsset
 
     @State private var failure: String?
+    /// Off by default and never persisted: an arbitrary HTML file is
+    /// untrusted until the reader says otherwise for this document.
+    @State private var allowsScripting = false
 
     var body: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
@@ -17,8 +20,12 @@ struct LocalDocumentView: View {
             } else {
                 LocalDocumentWebView(
                     documentURL: asset.url,
+                    allowsScripting: allowsScripting,
                     onFailure: { failure = $0 }
                 )
+                // A new web view, not a reconfigured one: WKWebView cannot
+                // change its script policy after it is created.
+                .id(allowsScripting)
             }
         }
         .viewerCard()
@@ -27,8 +34,22 @@ struct LocalDocumentView: View {
     private var header: some View {
         AssetViewerHeader(
             asset: asset,
-            subtitle: "\(asset.fileExtension.uppercased()) · Local · No network"
+            subtitle: "\(asset.fileExtension.uppercased()) · Local · "
+                + (allowsScripting ? "JavaScript on" : "JavaScript off")
+                + " · No remote loads"
         ) {
+            Toggle("JavaScript", isOn: $allowsScripting)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .font(.system(size: AppTheme.TypeScale.sm))
+                .help(
+                    "Run this document's own JavaScript. Remote loads, "
+                        + "frames, and navigation stay blocked."
+                )
+                .onChange(of: allowsScripting) {
+                    failure = nil
+                }
+
             Button("Open in Default App") {
                 NSWorkspace.shared.open(asset.url)
             }
@@ -62,6 +83,7 @@ struct LocalDocumentView: View {
 
 private struct LocalDocumentWebView: NSViewRepresentable {
     let documentURL: URL
+    let allowsScripting: Bool
     let onFailure: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -77,11 +99,15 @@ private struct LocalDocumentWebView: NSViewRepresentable {
             return NSView()
         }
 
-        let resolver = LocalDocumentResolver(root: root)
+        let resolver = LocalDocumentResolver(
+            root: root,
+            allowsScripting: allowsScripting
+        )
         let handler = LocalDocumentSchemeHandler(resolver: resolver)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        configuration.defaultWebpagePreferences.allowsContentJavaScript =
+            allowsScripting
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         configuration.setURLSchemeHandler(
             handler,
@@ -121,6 +147,9 @@ private struct LocalDocumentWebView: NSViewRepresentable {
         private let onFailure: (String) -> Void
         private weak var webView: WKWebView?
         private var directoryWatcher: WorkspaceDirectoryWatcher?
+        /// The only document navigation this view permits. Consent to run
+        /// scripting belongs to this file, not to its directory.
+        private var documentURL: URL?
 
         init(onFailure: @escaping (String) -> Void) {
             self.onFailure = onFailure
@@ -146,6 +175,7 @@ private struct LocalDocumentWebView: NSViewRepresentable {
         }
 
         func load(pageURL: URL) {
+            documentURL = pageURL
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard let rules = await ModelContentRules.ruleList() else {
@@ -166,7 +196,11 @@ private struct LocalDocumentWebView: NSViewRepresentable {
             decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
         ) {
             guard let url = navigationAction.request.url,
-                  LocalDocumentResolver.isDocumentNavigation(url) else {
+                  let documentURL,
+                  LocalDocumentResolver.isSameDocumentNavigation(
+                      url,
+                      as: documentURL
+                  ) else {
                 decisionHandler(.cancel)
                 return
             }

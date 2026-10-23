@@ -2,7 +2,9 @@ import Foundation
 
 /// Serves one local document and its sibling resources through a custom
 /// scheme. The document directory is the root; canonical containment and an
-/// extension allowlist decide what exists. JavaScript is never allowed.
+/// extension allowlist decide what exists. JavaScript is opt-in per document;
+/// CSP and content rules keep remote loads and network requests blocked (CSP
+/// does not govern WebRTC or DNS prefetch).
 struct LocalDocumentResolver: Sendable {
     struct Resource: Equatable, Sendable {
         let url: URL
@@ -26,13 +28,29 @@ struct LocalDocumentResolver: Sendable {
     static let host = "local"
     static let routePath = "/doc/"
 
-    static let servedExtensions: Set<String> = [
+    private static let documentExtensions: Set<String> = [
         "svg", "html", "htm", "css", "png", "jpg", "jpeg", "gif",
         "webp", "avif", "heic", "tif", "tiff", "ttf", "otf", "woff",
         "woff2", "xml", "json"
     ]
 
+    /// Served only when the reader has explicitly enabled scripting for this
+    /// document. `.map` is a source map requested by a debug inspector.
+    private static let scriptExtensions: Set<String> = ["js", "mjs", "map"]
+
     let root: URL
+    let allowsScripting: Bool
+
+    init(root: URL, allowsScripting: Bool = false) {
+        self.root = root
+        self.allowsScripting = allowsScripting
+    }
+
+    private var servedExtensions: Set<String> {
+        allowsScripting
+            ? Self.documentExtensions.union(Self.scriptExtensions)
+            : Self.documentExtensions
+    }
 
     /// Canonical root with a trailing slash. The scheme handler derives the
     /// relative path it opens through directory-relative descriptors.
@@ -99,7 +117,7 @@ struct LocalDocumentResolver: Sendable {
         guard isContained(target) else { return .forbidden }
         let targetExtension = target.pathExtension.lowercased()
         guard !targetExtension.isEmpty,
-              Self.servedExtensions.contains(targetExtension) else {
+              servedExtensions.contains(targetExtension) else {
             return .unsupportedType
         }
         let ext = targetExtension
@@ -157,7 +175,7 @@ struct LocalDocumentResolver: Sendable {
         guard isContained(canonical) else { return false }
         let ext = canonical.pathExtension.lowercased()
         guard !ext.isEmpty,
-              Self.servedExtensions.contains(ext) else {
+              servedExtensions.contains(ext) else {
             return false
         }
         var info = stat()
@@ -186,6 +204,31 @@ struct LocalDocumentResolver: Sendable {
             && url.path.hasPrefix(routePath)
     }
 
+    /// A click or script may navigate within this one document, but not to a
+    /// sibling: consent to run JavaScript was granted for the open file, and a
+    /// sibling has not been approved. A fragment or cache-busting query still
+    /// addresses the same file.
+    static func isSameDocumentNavigation(
+        _ url: URL,
+        as documentURL: URL
+    ) -> Bool {
+        guard isDocumentNavigation(url),
+              let target = URLComponents(
+                  url: url,
+                  resolvingAgainstBaseURL: false
+              ),
+              let document = URLComponents(
+                  url: documentURL,
+                  resolvingAgainstBaseURL: false
+              ) else {
+            return false
+        }
+        return target.user == nil
+            && target.password == nil
+            && target.port == nil
+            && target.percentEncodedPath == document.percentEncodedPath
+    }
+
     static func mimeType(for fileExtension: String) -> String {
         switch fileExtension {
         case "svg": "image/svg+xml"
@@ -205,23 +248,33 @@ struct LocalDocumentResolver: Sendable {
         case "woff": "font/woff"
         case "woff2": "font/woff2"
         case "xml": "application/xml"
-        case "json": "application/json; charset=utf-8"
+        case "json", "map": "application/json; charset=utf-8"
+        case "js", "mjs": "text/javascript; charset=utf-8"
         default: "application/octet-stream"
         }
     }
 
-    static let contentSecurityPolicy = [
-        "default-src 'none'",
-        "script-src 'none'",
-        "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data: blob:",
-        "font-src 'self' data:",
-        "connect-src 'none'",
-        "frame-src 'none'",
-        "object-src 'none'",
-        "base-uri 'none'",
-        "form-action 'none'"
-    ].joined(separator: "; ")
+    /// Scripting, when the reader opts in, stays same-origin and inline-only:
+    /// no remote loads, no eval, no frames. `connect-src 'none'` is what keeps
+    /// a document's data from leaving through fetch, XHR, WebSocket, or
+    /// beacon. CSP does not govern WebRTC or DNS prefetch, so an opted-in page
+    /// is trusted content, not sandboxed content.
+    var contentSecurityPolicy: String {
+        [
+            "default-src 'none'",
+            allowsScripting
+                ? "script-src 'self' 'unsafe-inline'"
+                : "script-src 'none'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: blob:",
+            "font-src 'self' data:",
+            "connect-src 'none'",
+            "frame-src 'none'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "form-action 'none'"
+        ].joined(separator: "; ")
+    }
 
     private static func decodeComponent(_ encoded: Substring) -> String? {
         let lowered = encoded.lowercased()

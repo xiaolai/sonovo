@@ -27,6 +27,7 @@ final class LocalDocumentResolverTests: XCTestCase {
         try write("style.css", "body {}")
         try write("image.png", "png")
         try write("script.js", "alert(1)")
+        try write("module.mjs", "export {}")
         try write(".hidden.html", "<html></html>")
         try write("sub/nested.png", "png")
         try write(".hidden.png", "png")
@@ -193,6 +194,43 @@ final class LocalDocumentResolverTests: XCTestCase {
         }
     }
 
+    func testSameDocumentNavigationRefusesSiblings() {
+        guard let document = LocalDocumentResolver.documentURL(
+            fileName: "page.html"
+        ) else {
+            return XCTFail("Expected a document URL")
+        }
+        for allowed in [
+            "sonovo-doc://local/doc/page.html",
+            "sonovo-doc://local/doc/page.html#section",
+            "sonovo-doc://local/doc/page.html?v=2"
+        ] {
+            XCTAssertTrue(
+                LocalDocumentResolver.isSameDocumentNavigation(
+                    URL(string: allowed)!,
+                    as: document
+                ),
+                allowed
+            )
+        }
+        for rejected in [
+            "sonovo-doc://local/doc/other.html",
+            "sonovo-doc://local/doc/sub/page.html",
+            "sonovo-doc://other/doc/page.html",
+            "https://local/doc/page.html",
+            "sonovo-doc://user@local/doc/page.html",
+            "sonovo-doc://local:8080/doc/page.html"
+        ] {
+            XCTAssertFalse(
+                LocalDocumentResolver.isSameDocumentNavigation(
+                    URL(string: rejected)!,
+                    as: document
+                ),
+                rejected
+            )
+        }
+    }
+
     func testDocumentURLPreservesAFileName() {
         XCTAssertEqual(
             LocalDocumentResolver.documentURL(
@@ -202,12 +240,71 @@ final class LocalDocumentResolverTests: XCTestCase {
         )
     }
 
-    func testContentSecurityPolicyBlocksScriptsAndNetwork() {
-        let csp = LocalDocumentResolver.contentSecurityPolicy
+    func testContentSecurityPolicyBlocksScriptsAndNetworkByDefault() {
+        let csp = resolver.contentSecurityPolicy
         XCTAssertTrue(csp.contains("script-src 'none'"))
         XCTAssertTrue(csp.contains("default-src 'none'"))
         XCTAssertTrue(csp.contains("connect-src 'none'"))
         XCTAssertTrue(csp.contains("object-src 'none'"))
+    }
+
+    func testScriptingIsOffByDefault() {
+        XCTAssertFalse(resolver.allowsScripting)
+        XCTAssertEqual(
+            resolver.resolve(url("/doc/script.js")),
+            .unsupportedType
+        )
+        XCTAssertEqual(
+            resolver.resolve(url("/doc/module.mjs")),
+            .unsupportedType
+        )
+    }
+
+    func testScriptingServesScriptsAndStillOwnsNoNetwork() throws {
+        let scripting = LocalDocumentResolver(
+            root: root,
+            allowsScripting: true
+        )
+        XCTAssertTrue(scripting.allowsScripting)
+
+        let script = try file("/doc/script.js", using: scripting)
+        XCTAssertEqual(script.mimeType, "text/javascript; charset=utf-8")
+        let module = try file("/doc/module.mjs", using: scripting)
+        XCTAssertEqual(module.mimeType, "text/javascript; charset=utf-8")
+        // An inert source map is served as data, not as executable code.
+        XCTAssertEqual(
+            LocalDocumentResolver.mimeType(for: "map"),
+            "application/json; charset=utf-8"
+        )
+
+        let csp = scripting.contentSecurityPolicy
+        XCTAssertTrue(csp.contains("script-src 'self' 'unsafe-inline'"))
+        XCTAssertFalse(csp.contains("script-src 'none'"))
+        // Opting into scripts must not opt into the network or eval.
+        XCTAssertTrue(csp.contains("connect-src 'none'"))
+        XCTAssertFalse(csp.contains("unsafe-eval"))
+        XCTAssertTrue(csp.contains("object-src 'none'"))
+        XCTAssertTrue(csp.contains("frame-src 'none'"))
+        XCTAssertTrue(csp.contains("form-action 'none'"))
+    }
+
+    func testScriptingStillRefusesTraversalAndHiddenFiles() {
+        let scripting = LocalDocumentResolver(
+            root: root,
+            allowsScripting: true
+        )
+        let traversal = scripting.resolve(url("/doc/../outside.png"))
+        XCTAssertTrue(
+            traversal == .forbidden || traversal == .badRequest
+        )
+        XCTAssertEqual(
+            scripting.resolve(url("/doc/.hidden.html")),
+            .forbidden
+        )
+        XCTAssertEqual(
+            scripting.resolve(url("/doc/escape.png")),
+            .forbidden
+        )
     }
 
     // MARK: - Helpers
@@ -217,6 +314,13 @@ final class LocalDocumentResolverTests: XCTestCase {
     }
 
     private func file(_ path: String) throws -> LocalDocumentResolver.Resource {
+        try file(path, using: resolver)
+    }
+
+    private func file(
+        _ path: String,
+        using resolver: LocalDocumentResolver
+    ) throws -> LocalDocumentResolver.Resource {
         let outcome = resolver.resolve(url(path))
         guard case .file(let resource) = outcome else {
             XCTFail("Expected a file for \(path), got \(outcome)")

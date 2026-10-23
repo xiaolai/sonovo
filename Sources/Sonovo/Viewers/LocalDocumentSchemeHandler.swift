@@ -189,7 +189,7 @@ final class LocalDocumentSchemeHandler: NSObject, WKURLSchemeHandler {
                 headers: [
                     "Content-Type": resource.mimeType,
                     "Content-Security-Policy":
-                        LocalDocumentResolver.contentSecurityPolicy
+                        self.resolver.contentSecurityPolicy
                 ],
                 body: data
             )

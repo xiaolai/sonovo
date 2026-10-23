@@ -318,7 +318,7 @@ struct TransportBar: View {
         case .video: "1920×1080 · H.264"
         case .subtitle: "SRT · WebVTT · ASS"
         case .model3d: "GLB · STL · 3MF · USDZ"
-        case .html: "No network"
+        case .html: "No remote loads"
         case .delivery: "1920×1080 · H.264"
         case .code: "UTF-8"
         case .document: "Preview"
