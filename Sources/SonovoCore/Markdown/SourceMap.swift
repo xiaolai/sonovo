@@ -145,6 +145,25 @@ public struct SourceMap: Sendable {
         lines = result
     }
 
+    /// Creates a map that retains the source without indexing its lines.
+    ///
+    /// Used only for a source over the hard byte or line budget, where
+    /// building the line table would allocate proportionally to the input —
+    /// the exact cost the budget exists to avoid. An unindexed map resolves
+    /// no positions; callers must present the source without a rendered AST.
+    public init(unindexed source: String) {
+        self.source = source
+        self.baseLine = 1
+        self.baseOffset = 0
+        self.baseColumn = 0
+        self.linePrefixRemovals = []
+        self.lines = []
+    }
+
+    /// Whether this map can resolve positions. False only for a map built
+    /// with `init(unindexed:)`.
+    public var isIndexed: Bool { !lines.isEmpty }
+
     /// The number of lines in the mapped source.
     public var lineCount: Int { lines.count }
 
@@ -204,7 +223,7 @@ public struct SourceMap: Sendable {
 
     /// Resolves a position from a global UTF-16 offset.
     public func position(atUTF16Offset offset: Int) -> SourcePosition? {
-        guard offset >= baseOffset else { return nil }
+        guard offset >= baseOffset, !lines.isEmpty else { return nil }
 
         // Binary search the last line whose start is not greater than offset.
         var low = 0

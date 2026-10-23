@@ -64,14 +64,15 @@ enum InlineFragmentParser {
         // the nesting limit must stay literal rather than reach it; the empty
         // result falls through to the existing literal-text fallback.
         var result: [Inline] = []
-        if !NestingGuard.exceedsLimit(
-            combined,
-            limit: MarkdownLimits.maxParseDepth
-        ),
-        !NestingGuard.exceedsInlineLimit(
-            combined,
-            limit: MarkdownLimits.maxParseDepth
-        ) {
+        if !NestingGuard.exceedsSourceBudget(combined),
+           !NestingGuard.exceedsLimit(
+               combined,
+               limit: MarkdownLimits.maxParseDepth
+           ),
+           !NestingGuard.exceedsInlineLimit(
+               combined,
+               limit: MarkdownLimits.maxParseDepth
+           ) {
             result = flatten(
                 Document(
                     parsing: combined,

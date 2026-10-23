@@ -445,6 +445,10 @@ struct ParserTests {
         let parsed = MarkdownParser.parseCanonical(source)
         #expect(parsed.exceededNestingLimit)
         #expect(parsed.ast.blocks.count == 1)
+        // The line table is the allocation the budget exists to avoid; an
+        // over-budget source must not build one.
+        #expect(!parsed.fullSourceMap.isIndexed)
+        #expect(parsed.fullSourceMap.position(atUTF16Offset: 0) == nil)
     }
 
     @Test("Deep inline nesting is kept as one raw block")
@@ -459,6 +463,25 @@ struct ParserTests {
         let parsed = MarkdownParser.parseCanonical(source)
         #expect(parsed.exceededNestingLimit)
         #expect(parsed.ast.blocks.count == 1)
+    }
+
+    @Test("Fenced code does not count as inline nesting")
+    func fencedCodeDoesNotTripTheInlineGuard() {
+        let source = "# Title\n\n```\n"
+            + String(repeating: "*", count: MarkdownLimits.maxParseDepth + 1)
+            + "\n```\n"
+        let parsed = MarkdownParser.parseCanonical(source)
+        #expect(!parsed.exceededNestingLimit)
+        #expect(parsed.ast.blocks.count == 2)
+    }
+
+    @Test("Short delimiter runs cannot nest past the guard")
+    func shortDelimiterNestingBudget() {
+        let source = String(repeating: "*a _a ", count: 200)
+            + "x"
+            + String(repeating: " a_ a*", count: 200)
+        let parsed = MarkdownParser.parseCanonical(source)
+        #expect(parsed.exceededNestingLimit)
     }
 
     @Test("A document with too many inline delimiters is kept raw")

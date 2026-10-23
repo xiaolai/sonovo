@@ -674,10 +674,11 @@ enum DetailsParser {
         // The details body is parsed with the same recursive converter as a
         // document. Guard it before the converter can overflow the stack;
         // preserve the body literally instead of dropping it.
-        if NestingGuard.exceedsLimit(
-            combined,
-            limit: MarkdownLimits.maxParseDepth
-        )
+        if NestingGuard.exceedsSourceBudget(combined)
+            || NestingGuard.exceedsLimit(
+                combined,
+                limit: MarkdownLimits.maxParseDepth
+            )
             || NestingGuard.exceedsInlineLimit(
                 combined,
                 limit: MarkdownLimits.maxParseDepth

@@ -163,26 +163,37 @@ struct MarkdownWorkspaceView: View {
         .accessibilityLabel("Documents")
     }
 
+    @ViewBuilder
     private func modePicker(_ document: MarkdownDocument) -> some View {
-        Picker(
-            "Mode",
-            selection: Binding(
-                get: { document.mode },
-                set: { document.mode = $0 }
-            )
-        ) {
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .tag(MarkdownDocumentMode.source)
-                .help("Source")
-            Image(systemName: "eye")
-                .tag(MarkdownDocumentMode.rendered)
-                .help("Rendered")
+        if document.isLarge {
+            // A large document is read-only and too expensive to parse into
+            // a rendered AST; offer no mode that would do so.
+            Label("Source only", systemImage: "doc.plaintext")
+                .font(.system(size: AppTheme.TypeScale.xxs))
+                .foregroundStyle(.secondary)
+                .help("Rendered view is disabled for large documents.")
+                .accessibilityLabel("Source only, rendered view disabled")
+        } else {
+            Picker(
+                "Mode",
+                selection: Binding(
+                    get: { document.mode },
+                    set: { document.mode = $0 }
+                )
+            ) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .tag(MarkdownDocumentMode.source)
+                    .help("Source")
+                Image(systemName: "eye")
+                    .tag(MarkdownDocumentMode.rendered)
+                    .help("Rendered")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("Source or Rendered")
+            .accessibilityLabel("Source or Rendered")
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
-        .help("Source or Rendered")
-        .accessibilityLabel("Source or Rendered")
     }
 
     private func banner(
@@ -219,7 +230,9 @@ struct MarkdownWorkspaceView: View {
 
     @ViewBuilder
     private func documentContent(_ document: MarkdownDocument) -> some View {
-        switch document.mode {
+        // A persisted `.rendered` mode from before the document was known to
+        // be large must not reach the parser.
+        switch document.isLarge ? .source : document.mode {
         case .source:
             MarkdownSourceEditor(
                 document: document,

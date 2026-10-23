@@ -27,6 +27,11 @@ public enum MarkdownLimits {
     /// emphasis/link constructs instead of nesting them.
     public static let maxInlineDelimiters = 500_000
 
+    /// Maximum inline delimiters on one line. Short runs can nest emphasis
+    /// without ever looking like a long run; a single line with hundreds of
+    /// markers is the pathological case.
+    public static let maxInlineDelimitersPerLine = 4 * maxParseDepth
+
     /// Documents larger than this are routed to source-only/read-only mode.
     ///
     /// Provisional until the M0 measurement; adjust only with a measurement.

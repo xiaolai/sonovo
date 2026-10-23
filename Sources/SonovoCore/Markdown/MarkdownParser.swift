@@ -71,14 +71,21 @@ public struct MarkdownParser: Sendable {
         source: String,
         map: SourceMap
     ) -> ParsedMarkdown {
-        let end = map.position(atUTF16Offset: source.utf16.count)
-            ?? SourcePosition(line: 1, column: 0, offset: 0)
+        let end = endPosition(of: source)
         let wholeRange = SourceRange(
             start: SourcePosition(line: 1, column: 0, offset: 0),
             end: end
         )
+        // A paragraph of literal text, not an HTML block: the viewer drops
+        // unknown HTML, which would blank a guarded document. The raw text
+        // stays visible if the UI does not route it to source-only mode.
         let ast = SonovoAST(
-            blocks: [.htmlBlock(raw: source, range: wholeRange)]
+            blocks: [
+                .paragraph(
+                    inlines: [.text(source, range: wholeRange)],
+                    range: wholeRange
+                )
+            ]
         )
         return ParsedMarkdown(
             source: source,
@@ -90,15 +97,52 @@ public struct MarkdownParser: Sendable {
         )
     }
 
+    /// The position after the source's last UTF-16 code unit. Computed
+    /// without the line table so an over-budget source can be wrapped
+    /// without indexing it.
+    private static func endPosition(of source: String) -> SourcePosition {
+        let utf16Count = source.utf16.count
+        let newlineCount = source.utf8.reduce(into: 0) { count, byte in
+            if byte == 0x0A { count += 1 }
+        }
+        guard let last = source.lastIndex(of: "\n") else {
+            return SourcePosition(
+                line: 1,
+                column: utf16Count,
+                offset: utf16Count
+            )
+        }
+        let tail = source[source.index(after: last)...]
+        return SourcePosition(
+            line: newlineCount + 1,
+            column: tail.utf16.count,
+            offset: utf16Count
+        )
+    }
+
     /// Parses text that is already canonical (BOM-free, LF-only).
     public static func parseCanonical(
         _ source: String,
         enableAutolinks: Bool = true
     ) -> ParsedMarkdown {
-        let fullMap = SourceMap(source: source)
+        let byteCount = source.utf8.count
         let lineCount = source.utf8.reduce(into: 0) { count, byte in
             if byte == 0x0A { count += 1 }
         }
+
+        // The byte and line budgets come first: building the source map
+        // allocates one entry per line, so it must not run on a source that
+        // is itself over budget. An unindexed map keeps the text for
+        // source-only presentation without that allocation.
+        if byteCount > MarkdownLimits.maxReadBytes
+            || lineCount > MarkdownLimits.maxSourceLines {
+            return Self.rawParsed(
+                source: source,
+                map: SourceMap(unindexed: source)
+            )
+        }
+
+        let fullMap = SourceMap(source: source)
 
         // Guard before swift-markdown's recursive converter can overflow the
         // stack, and before a flat document can exhaust memory. Content is
@@ -110,9 +154,7 @@ public struct MarkdownParser: Sendable {
             || NestingGuard.exceedsInlineLimit(
                 source,
                 limit: MarkdownLimits.maxParseDepth
-            )
-            || source.utf8.count > MarkdownLimits.maxReadBytes
-            || lineCount > MarkdownLimits.maxSourceLines {
+            ) {
             return Self.rawParsed(source: source, map: fullMap)
         }
 
@@ -200,58 +242,152 @@ public struct MarkdownParser: Sendable {
 // MARK: - Nesting guard
 
 enum NestingGuard {
+    /// A cheap bound shared by the full parser and the two reparse paths
+    /// (`InlineFragmentParser` and `DetailsParser`), neither of which may
+    /// build an unbounded source map.
+    static func exceedsSourceBudget(_ source: String) -> Bool {
+        if source.utf8.count > MarkdownLimits.maxReadBytes { return true }
+        var lineCount = 0
+        for byte in source.utf8 where byte == 0x0A {
+            lineCount += 1
+            if lineCount > MarkdownLimits.maxSourceLines { return true }
+        }
+        return false
+    }
+
     /// Detects inline nesting that the block-container guard cannot see.
     /// Deeply nested images/links or a huge emphasis delimiter run makes the
     /// recursive inline converter a stack-overflow candidate.
     static func exceedsInlineLimit(_ source: String, limit: Int) -> Bool {
+        // The budget checks run before splitting so a newline-only file does
+        // not allocate one substring per line.
+        guard source.utf8.count <= MarkdownLimits.maxReadBytes else {
+            return true
+        }
+        var lineCount = 0
+        for byte in source.utf8 where byte == 0x0A {
+            lineCount += 1
+            if lineCount > MarkdownLimits.maxSourceLines { return true }
+        }
+
         var bracketDepth = 0
-        var delimiterRun = 0
         var delimiterCount = 0
-        var previous: UInt8?
-        for byte in source.utf8 {
-            switch byte {
-            case UInt8(ascii: "["):
-                bracketDepth += 1
-                delimiterCount += 1
-                if bracketDepth > limit
-                    || delimiterCount > MarkdownLimits.maxInlineDelimiters {
-                    return true
+        var fence: (Character, Int)?
+        for line in source.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        ) {
+            if let active = fence {
+                let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+                if trimmed.first == active.0,
+                   trimmed.prefix(while: { $0 == active.0 }).count
+                    >= active.1 {
+                    fence = nil
                 }
-                delimiterRun = 0
-                previous = nil
-            case UInt8(ascii: "]"):
-                if bracketDepth > 0 { bracketDepth -= 1 }
-                delimiterCount += 1
-                delimiterRun = 0
-                previous = nil
-            case UInt8(ascii: "*"), UInt8(ascii: "_"),
-                 UInt8(ascii: "`"):
-                delimiterCount += 1
-                if delimiterCount > MarkdownLimits.maxInlineDelimiters {
-                    return true
+                continue
+            }
+            let trimmed = line.drop(while: { $0 == " " })
+            if let first = trimmed.first,
+               first == "`" || first == "~" {
+                let run = trimmed.prefix(while: { $0 == first }).count
+                if run >= 3 {
+                    fence = (first, run)
+                    continue
                 }
-                if byte == UInt8(ascii: "`") {
+            }
+
+            var lineDelimiters = 0
+            var delimiterRun = 0
+            var previous: Character?
+            var index = line.startIndex
+            while index < line.endIndex {
+                let character = line[index]
+                if character == "\\" {
+                    index = line.index(after: index)
+                    if index < line.endIndex {
+                        index = line.index(after: index)
+                    }
                     delimiterRun = 0
                     previous = nil
-                } else {
-                    if previous == byte {
+                    continue
+                }
+                if character == "`" {
+                    let run = line[index...]
+                        .prefix(while: { $0 == "`" }).count
+                    let after = line.index(index, offsetBy: run)
+                    index = closingCodeSpan(
+                        in: line,
+                        from: after,
+                        run: run
+                    ) ?? after
+                    delimiterRun = 0
+                    previous = nil
+                    continue
+                }
+
+                switch character {
+                case "[":
+                    bracketDepth += 1
+                    lineDelimiters += 1
+                    delimiterCount += 1
+                case "]":
+                    if bracketDepth > 0 { bracketDepth -= 1 }
+                    lineDelimiters += 1
+                    delimiterCount += 1
+                    delimiterRun = 0
+                    previous = nil
+                case "*", "_":
+                    lineDelimiters += 1
+                    delimiterCount += 1
+                    if previous == character {
                         delimiterRun += 1
                     } else {
                         delimiterRun = 1
-                        previous = byte
+                        previous = character
                     }
-                    if delimiterRun > limit { return true }
+                case "!":
+                    lineDelimiters += 1
+                    delimiterCount += 1
+                    delimiterRun = 0
+                    previous = nil
+                default:
+                    delimiterRun = 0
+                    previous = nil
                 }
-            case UInt8(ascii: "!"):
-                delimiterCount += 1
-                delimiterRun = 0
-                previous = nil
-            default:
-                delimiterRun = 0
-                previous = nil
+
+                if bracketDepth > limit
+                    || delimiterRun > limit
+                    || lineDelimiters
+                        > MarkdownLimits.maxInlineDelimitersPerLine
+                    || delimiterCount
+                        > MarkdownLimits.maxInlineDelimiters {
+                    return true
+                }
+                index = line.index(after: index)
             }
         }
         return false
+    }
+
+    private static func closingCodeSpan(
+        in line: Substring,
+        from start: Substring.Index,
+        run: Int
+    ) -> Substring.Index? {
+        var index = start
+        while index < line.endIndex {
+            if line[index] == "`" {
+                let count = line[index...]
+                    .prefix(while: { $0 == "`" }).count
+                if count == run {
+                    return line.index(index, offsetBy: count)
+                }
+                index = line.index(index, offsetBy: count)
+            } else {
+                index = line.index(after: index)
+            }
+        }
+        return nil
     }
 
     /// Detects blockquote nesting above `limit` before parsing.

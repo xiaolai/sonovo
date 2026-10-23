@@ -19,12 +19,16 @@ public struct LoadedMarkdown: Sendable {
 
 public enum MarkdownFileStoreError: Error, Equatable, CustomStringConvertible {
     case fileTooLarge(byteCount: Int)
+    case tooManyLines(Int)
 
     public var description: String {
         switch self {
         case let .fileTooLarge(byteCount):
             "The Markdown file is \(byteCount) bytes; the reading limit is "
                 + "\(MarkdownLimits.maxReadBytes) bytes."
+        case let .tooManyLines(lineCount):
+            "The Markdown file has more than \(lineCount) lines; the reading "
+                + "limit is \(MarkdownLimits.maxSourceLines) lines."
         }
     }
 }
@@ -208,11 +212,18 @@ public struct MarkdownFileStore: Sendable {
         defer { try? handle.close() }
         let cap = MarkdownLimits.maxReadBytes + 1
         var data = Data()
+        var lineCount = 0
         while data.count < cap {
             let chunk = try handle.read(
                 upToCount: min(1 << 18, cap - data.count)
             )
             guard let chunk, !chunk.isEmpty else { break }
+            for byte in chunk where byte == 0x0A {
+                lineCount += 1
+                if lineCount > MarkdownLimits.maxSourceLines {
+                    throw MarkdownFileStoreError.tooManyLines(lineCount)
+                }
+            }
             data.append(chunk)
         }
         guard data.count <= MarkdownLimits.maxReadBytes else {

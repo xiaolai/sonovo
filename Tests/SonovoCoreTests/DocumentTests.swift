@@ -845,6 +845,28 @@ struct MarkdownDocumentTests {
         }
     }
 
+    @Test("A file over the line budget is refused before parsing")
+    func tooManyLinesIsRefused() throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("lines.md")
+        let source = String(
+            repeating: "a\n",
+            count: MarkdownLimits.maxSourceLines + 1
+        )
+        try source.write(to: url, atomically: true, encoding: .utf8)
+
+        #expect {
+            _ = try MarkdownDocument(loading: url)
+        } throws: { error in
+            guard let storeError = error as? MarkdownFileStoreError,
+                  case .tooManyLines = storeError else {
+                return false
+            }
+            return true
+        }
+    }
+
     @Test("Undo history is bounded by the shared level limit")
     func undoHistoryIsBounded() throws {
         let document = MarkdownDocument(
