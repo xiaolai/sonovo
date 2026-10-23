@@ -88,6 +88,36 @@ struct NestingGuardTests {
         #expect(NestingGuard.exceedsLimit(source, limit: 100))
     }
 
+    @Test("An HTML opening line's delimiters are counted")
+    func htmlOpeningLineDelimiters() {
+        // The whole markup can sit inside one tag-shaped line. Skipping it
+        // without counting its delimiters hides the nesting.
+        let source = "<b " + String(repeating: "*a ", count: 5_000)
+            + "x" + String(repeating: " a*", count: 5_000) + ">\n"
+        #expect(NestingGuard.exceedsInlineLimit(source, limit: 100))
+    }
+
+    @Test("A sibling list item ends a fence opened inside the list")
+    func siblingItemEndsFence() {
+        let source = "- ```\n- "
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("A sibling list item ends an HTML block opened inside the list")
+    func siblingItemEndsHTMLBlock() {
+        let source = "- <!--\n- "
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
+    @Test("An over-indented HTML block is not a block")
+    func overIndentedHTMLBlock() {
+        let source = ">     <script>\n"
+            + String(repeating: ">", count: 129) + " x\n"
+        #expect(NestingGuard.exceedsLimit(source, limit: 100))
+    }
+
     @Test("Backticks inside an HTML comment do not open a fence")
     func backticksInsideHTMLComment() {
         let source = "<!--\n```\n-->\n"

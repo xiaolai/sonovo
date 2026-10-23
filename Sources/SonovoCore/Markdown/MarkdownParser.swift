@@ -312,34 +312,43 @@ enum NestingGuard {
         // turn on fence skipping. Openers in the block still count, because
         // a misidentified block may really be markup.
         var htmlEnd: String?
+
+        // Delimiters inside a skipped HTML block count as openers: a
+        // misidentified block is markup to cmark. Types 6/7 are the
+        // heuristic ones and also enter the stack, so the tight bound
+        // still applies.
+        func countHTMLOpeners(
+            _ line: Substring,
+            heuristic: Bool
+        ) -> Bool {
+            var scan = line.unicodeScalars
+            var cursor = scan.startIndex
+            while cursor < scan.endIndex {
+                let inner = scan[cursor]
+                if inner == "*" || inner == "_" || inner == "~" {
+                    openerCount += 1
+                    if heuristic { openDelimiters.append(inner) }
+                } else if inner == "[" {
+                    openerCount += 1
+                    if heuristic { bracketDepth += 1 }
+                }
+                if openerCount > MarkdownLimits.maxInlineOpenerBudget
+                    || bracketDepth > limit
+                    || openDelimiters.count > nestingBudget {
+                    return true
+                }
+                cursor = scan.index(after: cursor)
+            }
+            return false
+        }
+
         for line in source.split(
             separator: "\n",
             omittingEmptySubsequences: false
         ) {
             if let end = htmlEnd {
-                var scan = line.unicodeScalars
-                var cursor = scan.startIndex
-                while cursor < scan.endIndex {
-                    let inner = scan[cursor]
-                    if inner == "*" || inner == "_" || inner == "~" {
-                        openerCount += 1
-                        // Types 6/7 are the heuristic ones; treat their
-                        // delimiters as open once so the tight stack bound
-                        // still applies. A raw-text block (types 1-5) is
-                        // reliably literal, so only the sound count sees it.
-                        if end.isEmpty {
-                            openDelimiters.append(inner)
-                        }
-                    } else if inner == "[" {
-                        openerCount += 1
-                        if end.isEmpty { bracketDepth += 1 }
-                    }
-                    if openerCount > MarkdownLimits.maxInlineOpenerBudget
-                        || bracketDepth > limit
-                        || openDelimiters.count > nestingBudget {
-                        return true
-                    }
-                    cursor = scan.index(after: cursor)
+                if countHTMLOpeners(line, heuristic: end.isEmpty) {
+                    return true
                 }
                 let terminated = end.isEmpty
                     ? stripContainers(line).allSatisfy({
@@ -354,6 +363,11 @@ enum NestingGuard {
                 continue
             }
             if let end = htmlBlockEnd(line) {
+                // The opening line can carry the whole markup; count it
+                // before the block starts hiding lines.
+                if countHTMLOpeners(line, heuristic: end.isEmpty) {
+                    return true
+                }
                 htmlEnd = end
                 openDelimiters.removeAll()
                 paragraphCertain = true
@@ -713,8 +727,17 @@ enum NestingGuard {
                 let blank = rest.allSatisfy({
                     $0 == " " || $0 == "\t"
                 })
-                let containerEnded = htmlContainer.map {
-                    !normalizedContainerPrefix(prefix).hasPrefix($0)
+                let containerEnded = htmlContainer.map { container in
+                    if !normalizedContainerPrefix(prefix)
+                        .hasPrefix(container) {
+                        return true
+                    }
+                    let blockInList = container.contains {
+                        $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
+                    }
+                    return blockInList && beginsListItem(line)
+                        && leadingColumns(line)
+                            <= leadingColumns(container)
                 } ?? false
                 let reachedTerminator = end.isEmpty
                     ? blank
@@ -746,10 +769,17 @@ enum NestingGuard {
                 // Every container level of the opening line must still be
                 // present. Checking quotes alone let a fence outlive the
                 // list it opened inside, hiding the lines after it.
+                let currentPrefix = splitContainers(line).prefix
+                let fenceInList = active.prefix.contains {
+                    $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber
+                }
+                let siblingItem = fenceInList
+                    && beginsListItem(line)
+                    && leadingColumns(line)
+                        <= leadingColumns(active.prefix)
                 let scopeOpen = active.prefix.isEmpty
-                    || normalizedContainerPrefix(
-                        splitContainers(line).prefix
-                    ).hasPrefix(active.prefix)
+                    || (normalizedContainerPrefix(currentPrefix)
+                        .hasPrefix(active.prefix) && !siblingItem)
                 if scopeOpen {
                     let rest: Substring
                     if active.prefix.isEmpty {
@@ -804,6 +834,36 @@ enum NestingGuard {
 
         }
         return false
+    }
+
+    /// The column reached by leading spaces and tabs, with a tab advancing
+    /// to the next multiple of four.
+    private static func leadingColumns(_ line: Substring) -> Int {
+        var columns = 0
+        for character in line {
+            if character == " " {
+                columns += 1
+            } else if character == "\t" {
+                columns = (columns / 4 + 1) * 4
+            } else {
+                break
+            }
+        }
+        return columns
+    }
+
+    private static func leadingColumns(_ text: String) -> Int {
+        leadingColumns(Substring(text))
+    }
+
+    /// Whether the line's first non-space token is a list marker.
+    private static func beginsListItem(_ line: Substring) -> Bool {
+        var index = line.startIndex
+        while index < line.endIndex,
+              line[index] == " " || line[index] == "\t" {
+            index = line.index(after: index)
+        }
+        return listMarkerLength(at: index, in: line) != nil
     }
 
     /// Counts the container markers on a line, updates the accumulated
@@ -1011,8 +1071,14 @@ enum NestingGuard {
     /// The terminator for a raw-HTML block starting on this line, or nil when
     /// the line does not open one.
     private static func htmlBlockEnd(_ line: Substring) -> String? {
-        // A raw HTML block can sit inside a blockquote or list item.
-        let trimmed = stripContainers(line)
+        // A raw HTML block can sit inside a blockquote or list item, but
+        // like a fence it may be indented at most three columns past its
+        // container. More is indented code, and treating it as HTML would
+        // hide the lines after it.
+        let (prefix, trimmed) = splitContainers(line)
+        let trailing = prefix.reversed()
+            .prefix(while: { $0 == " " || $0 == "\t" }).count
+        guard trailing <= 3 else { return nil }
         guard trimmed.first == "<" else { return nil }
         let lower = trimmed.lowercased()
 
