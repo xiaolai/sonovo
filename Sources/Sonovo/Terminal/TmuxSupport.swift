@@ -212,6 +212,20 @@ final class LiveTmux: TmuxControlling, @unchecked Sendable {
         isAvailable = executable != nil
     }
 
+    /// The resolved binary path, for diagnostics. nil when tmux is absent.
+    var executablePath: String? { executable }
+
+    /// The binary's version line (`tmux 3.8`), or nil when it cannot answer.
+    /// Bounded by the same deadline as every other call.
+    func version() -> String? {
+        guard let result = run(["-V"]), result.status == 0 else {
+            return nil
+        }
+        let value = result.output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
     func sessionNames(prefix: String) -> [String]? {
         guard isAvailable,
               let result = run([

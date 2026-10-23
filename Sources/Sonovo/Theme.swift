@@ -61,6 +61,7 @@ enum AppTheme {
         static let settingsRowLabelWidth: CGFloat = 150
         static let settingsPickerWidth: CGFloat = 190
         static let settingsPickerNarrowWidth: CGFloat = 170
+        static let settingsCustomShellWidth: CGFloat = 360
         static let settingsPickerTinyWidth: CGFloat = 130
         static let settingsPickerCompactWidth: CGFloat = 120
     }

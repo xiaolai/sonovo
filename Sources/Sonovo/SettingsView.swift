@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
@@ -58,6 +59,10 @@ struct SettingsView: View {
     @AppStorage("sonovo.loginShell") private var loginShell = true
     @AppStorage("sonovo.terminals.tmux") private var terminalTmux = true
     @State private var outputDevices: [AudioOutputDevice] = []
+    @State private var editingCustomShell = false
+    @State private var customShellDraft = ""
+    @State private var customShellError: String?
+    @State private var tmuxVersion: String?
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.zero) {
@@ -82,6 +87,12 @@ struct SettingsView: View {
         .preferredColorScheme(preferredColorScheme)
         .task {
             outputDevices = AudioOutputDevices.all()
+        }
+        .task {
+            guard tmuxVersion == nil else { return }
+            tmuxVersion = await Task.detached {
+                LiveTmux.shared.version()
+            }.value
         }
         .onChange(of: editorFontSize) { _, _ in
             postEditorPreferenceChange()
@@ -426,15 +437,54 @@ struct SettingsView: View {
                     HStack {
                         Text("Shell")
                         Spacer()
-                        Picker("", selection: $shell) {
+                        Picker("", selection: shellSelection) {
                             Text("System Default").tag("")
-                            Text("zsh").tag("/bin/zsh")
-                            Text("bash").tag("/bin/bash")
-                            Text("fish").tag("/opt/homebrew/bin/fish")
+                            ForEach(TerminalShell.available()) { option in
+                                Text(option.title).tag(option.path)
+                            }
+                            Text("Other…").tag(Self.customShellTag)
                         }
                         .labelsHidden()
                         .accessibilityLabel("Shell")
                         .frame(width: AppTheme.Layout.settingsPickerNarrowWidth)
+                    }
+                    Text("Starts \(Preferences.effectiveShell).")
+                }
+                if showsCustomShellRow {
+                    SettingsRow {
+                        VStack(alignment: .leading, spacing: AppTheme.Spacing.s6) {
+                            HStack {
+                                TextField(
+                                    "/opt/homebrew/bin/zsh",
+                                    text: $customShellDraft
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(
+                                    maxWidth: AppTheme.Layout
+                                        .settingsCustomShellWidth
+                                )
+                                Button("Use") { applyCustomShell() }
+                            }
+                            if let customShellError {
+                                Text(customShellError)
+                                    .font(.system(size: AppTheme.TypeScale.xs))
+                                    .foregroundStyle(AppTheme.Palette.warning)
+                            } else {
+                                Text("An absolute path to an executable shell.")
+                                    .font(.system(size: AppTheme.TypeScale.xs))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                }
+                if Preferences.shellIsMissing {
+                    SettingsRow {
+                        Text(
+                            "The selected shell is missing; the terminal "
+                                + "uses \(TerminalShell.accountShell)."
+                        )
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(AppTheme.Palette.warning)
                     }
                 }
                 SettingsRow {
@@ -452,7 +502,11 @@ struct SettingsView: View {
                 }
                 SettingsRow {
                     Toggle("Use login shell", isOn: $loginShell)
-                    Text("Start the terminal as a login shell so your profile is loaded.")
+                    Text(
+                        "On: reads zshenv, zprofile, zshrc, and zlogin. "
+                            + "Off: skips zprofile and zlogin, so PATH "
+                            + "setup there is not loaded."
+                    )
                 }
                 SettingsRow {
                     Toggle("Keep terminals in tmux", isOn: $terminalTmux)
@@ -469,8 +523,118 @@ struct SettingsView: View {
                         .foregroundStyle(AppTheme.Palette.warning)
                     }
                 }
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.s6) {
+                        HStack {
+                            Text("Diagnostics")
+                            Spacer()
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    diagnosticsText,
+                                    forType: .string
+                                )
+                            }
+                        }
+                        Text(diagnosticsText)
+                            .font(
+                                .system(
+                                    size: AppTheme.TypeScale.xs,
+                                    design: .monospaced
+                                )
+                            )
+                            .textSelection(.enabled)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
             }
         }
+    }
+
+    // MARK: - Terminal settings
+
+    private static let customShellTag = "__custom__"
+
+    private var shellIsKnown: Bool {
+        shell.isEmpty
+            || TerminalShell.available().contains { $0.path == shell }
+    }
+
+    private var showsCustomShellRow: Bool {
+        editingCustomShell || !shellIsKnown
+    }
+
+    private var shellSelection: Binding<String> {
+        Binding(
+            get: {
+                shellIsKnown && !editingCustomShell
+                    ? shell
+                    : Self.customShellTag
+            },
+            set: { value in
+                if value == Self.customShellTag {
+                    editingCustomShell = true
+                    if customShellDraft.isEmpty {
+                        customShellDraft = shell
+                    }
+                } else {
+                    editingCustomShell = false
+                    customShellError = nil
+                    shell = value
+                }
+            }
+        )
+    }
+
+    private func applyCustomShell() {
+        let path = customShellDraft.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard path.hasPrefix("/") else {
+            customShellError = "Enter an absolute path."
+            return
+        }
+        guard TerminalShell.isUsable(path) else {
+            customShellError = "No executable shell at that path."
+            return
+        }
+        customShellError = nil
+        shell = path
+    }
+
+    private var diagnosticsText: String {
+        var lines: [String] = []
+        let resolved = Preferences.effectiveShell
+        if shell.isEmpty {
+            lines.append("shell: \(resolved) (system default)")
+        } else if TerminalShell.isUsable(shell) {
+            lines.append("shell: \(resolved)")
+        } else {
+            lines.append(
+                "shell: \(resolved) (configured \(shell) missing)"
+            )
+        }
+        lines.append("login shell: \(loginShell ? "on" : "off")")
+        let tmux = LiveTmux.shared
+        if let path = tmux.executablePath {
+            let version = tmuxVersion.map { " (\($0))" } ?? ""
+            lines.append("tmux: \(path)\(version)")
+        } else {
+            lines.append("tmux: not found")
+        }
+        if let terminfo = Bundle.module.url(
+            forResource: "terminfo",
+            withExtension: nil
+        ) {
+            lines.append("terminfo: \(terminfo.path)")
+        } else {
+            lines.append("terminfo: missing")
+        }
+        lines.append(
+            "attach: "
+                + TmuxCommands.attachShellCommand(name: "<session>")
+        )
+        return lines.joined(separator: "\n")
     }
 
     private func paneHeader(title: String, detail: String) -> some View {

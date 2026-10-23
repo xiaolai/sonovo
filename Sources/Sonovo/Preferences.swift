@@ -104,23 +104,19 @@ enum Preferences {
     /// The account's login shell. "System Default" resolves here so the
     /// login-shell toggle has an effect without an explicit choice.
     static var systemShell: String {
-        if let entry = getpwuid(getuid()),
-           let shell = entry.pointee.pw_shell {
-            let value = String(cString: shell)
-            if value.hasPrefix("/") { return value }
-        }
-        if let value = ProcessInfo.processInfo.environment["SHELL"],
-           value.hasPrefix("/") {
-            return value
-        }
-        return "/bin/zsh"
+        TerminalShell.accountShell
     }
 
-    /// The shell handed to Ghostty and tmux. Never empty: the account shell
-    /// supplies the default.
+    /// The shell handed to Ghostty and tmux. Never empty, and never a path
+    /// that cannot run: a shell removed after it was chosen falls back to
+    /// the account shell instead of leaving the pane unable to start.
     static var effectiveShell: String {
-        let configured = shell
-        return configured.isEmpty ? systemShell : configured
+        TerminalShell.resolve(shell)
+    }
+
+    /// Whether the stored shell is set but unusable.
+    static var shellIsMissing: Bool {
+        TerminalShell.isMissing(shell)
     }
 
     /// The CoreAudio device UID, or nil for the system default. Older builds
