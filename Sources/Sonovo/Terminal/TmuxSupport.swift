@@ -118,6 +118,11 @@ enum TmuxCommands {
         let tool = commandToken(executable)
         let target = TmuxNaming.shellQuote("=" + name)
         let quotedName = TmuxNaming.shellQuote(name)
+        // `set-option` resolves `-t` itself and rejects the `=` exact-match
+        // prefix (tmux 3.8 answers "no such session"), so it targets the
+        // plain name; the exact name exists by then, and has-session/attach
+        // keep `=` for the missing-`-1` case.
+        let sessionTarget = quotedName
         let quotedDirectory = TmuxNaming.shellQuote(directory)
         // The configured shell runs inside the new session. An empty shell
         // leaves tmux's own default in place.
@@ -130,12 +135,12 @@ enum TmuxCommands {
         // `destroy-unattached` or `exit-unattached` could remove the
         // session between separate commands.
         let attach = "exec \(tool) set-option -s exit-unattached off "
-            + "\\; set-option -t \(target) destroy-unattached off "
+            + "\\; set-option -t \(sessionTarget) destroy-unattached off "
             + "\\; attach -t \(target)"
         let setup = "\(tool) set-option -s exit-unattached off "
             + "\\; new-session -d -s \(quotedName) "
             + "-c \(quotedDirectory)\(command) "
-            + "\\; set-option -t \(target) destroy-unattached off"
+            + "\\; set-option -t \(sessionTarget) destroy-unattached off"
         // A launcher that loses the has-session race still attaches: setup
         // is allowed to fail (duplicate session) and the second client
         // attaches to the exact name. The winner's own setup protected the

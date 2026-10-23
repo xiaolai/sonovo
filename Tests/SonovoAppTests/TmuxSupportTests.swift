@@ -63,13 +63,15 @@ final class TmuxSupportTests: XCTestCase {
         )
         let tool = "'/opt/homebrew/bin/tmux'"
         let target = "'=sonovo-x-ab12cd34-1'"
+        // `set-option` rejects the `=` prefix; it targets the plain name.
+        let session = "'sonovo-x-ab12cd34-1'"
         let attach = "exec \(tool) set-option -s exit-unattached off "
-            + "\\; set-option -t \(target) destroy-unattached off "
+            + "\\; set-option -t \(session) destroy-unattached off "
             + "\\; attach -t \(target)"
         let setup = "\(tool) set-option -s exit-unattached off "
             + "\\; new-session -d -s 'sonovo-x-ab12cd34-1' "
             + "-c '/tmp/a b' "
-            + "\\; set-option -t \(target) destroy-unattached off"
+            + "\\; set-option -t \(session) destroy-unattached off"
         let expected = "if \(tool) has-session -t \(target) 2>/dev/null; "
             + "then \(attach); else \(setup) 2>/dev/null; \(attach); fi\n"
         XCTAssertEqual(command, expected)
