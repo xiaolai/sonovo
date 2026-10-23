@@ -683,8 +683,19 @@ private struct MarkdownImageView: View {
     let workspaceRoot: URL?
 
     @State private var image: NSImage?
+    /// The file exists but could not be decoded — most often because it
+    /// exceeds the byte or pixel cap. Distinguished from a missing file so
+    /// the placeholder can say which one happened.
+    @State private var decodeFailed = false
 
-    private static let cache = NSCache<NSString, NSImage>()
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        // A decoded thumbnail at the 4096 px cap is about 67 MB. The cost
+        // limit bounds how many can be retained at once; without it NSCache
+        // counts objects and can hold dozens.
+        cache.totalCostLimit = 128 * 1024 * 1024
+        return cache
+    }()
 
     var body: some View {
         Group {
@@ -703,8 +714,12 @@ private struct MarkdownImageView: View {
             } else {
                 HStack(spacing: AppTheme.Spacing.s6) {
                     Image(systemName: "photo")
-                    Text(alt.isEmpty ? destination : alt)
-                        .lineLimit(1)
+                    Text(
+                        decodeFailed
+                            ? "Image could not be displayed (too large or unreadable)"
+                            : (alt.isEmpty ? destination : alt)
+                    )
+                    .lineLimit(1)
                 }
                 .font(.system(size: AppTheme.TypeScale.sm))
                 .foregroundStyle(Color.appSecondaryLabel)
@@ -717,7 +732,11 @@ private struct MarkdownImageView: View {
                         style: .continuous
                     )
                 )
-                .accessibilityLabel(alt.isEmpty ? "Missing image" : alt)
+                .accessibilityLabel(
+                    decodeFailed
+                        ? "Image could not be displayed"
+                        : (alt.isEmpty ? "Missing image" : alt)
+                )
             }
         }
         .task(id: taskKey) {
@@ -749,6 +768,7 @@ private struct MarkdownImageView: View {
     private func loadImage() async {
         guard let url = resolvedURL else {
             image = nil
+            decodeFailed = false
             return
         }
 
@@ -772,11 +792,13 @@ private struct MarkdownImageView: View {
         guard !Task.isCancelled else { return }
         guard let identity else {
             image = nil
+            decodeFailed = false
             return
         }
         let key = identity as NSString
         if let cached = Self.cache.object(forKey: key) {
             image = cached
+            decodeFailed = false
             return
         }
 
@@ -788,9 +810,16 @@ private struct MarkdownImageView: View {
         guard !Task.isCancelled else { return }
         guard let decoded else {
             image = nil
+            // The metadata read above succeeded, so the file is there; a nil
+            // decode means it exceeded the caps or is corrupt.
+            decodeFailed = true
             return
         }
-        Self.cache.setObject(decoded, forKey: key)
+        let cost = NumericConversion.int(
+            decoded.size.width * decoded.size.height * 4
+        ) ?? 0
+        Self.cache.setObject(decoded, forKey: key, cost: max(cost, 0))
         image = decoded
+        decodeFailed = false
     }
 }
