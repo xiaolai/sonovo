@@ -201,10 +201,9 @@ final class PDFDocumentModel {
                         self.searchTruncated = true
                         return
                     }
+                    // Exactly filling the budget is not truncation: the
+                    // guard above is what marks a discarded match.
                     self.pendingResults.append(box.selection)
-                    if self.pendingResults.count == self.maximumSearchResults {
-                        self.searchTruncated = true
-                    }
                 }
             }
         )

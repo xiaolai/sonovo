@@ -66,6 +66,17 @@ final class PDFDocumentModelTests: XCTestCase {
         XCTAssertTrue(model.searchTruncated)
     }
 
+    func testExactlyFillingTheBudgetIsNotTruncation() async throws {
+        let url = try makePDF(text: "a a a")
+        let model = PDFDocumentModel(url: url)
+        await model.load()
+        model.maximumSearchResults = 3
+
+        let count = await model.search("a")
+        XCTAssertEqual(count, 3)
+        XCTAssertFalse(model.searchTruncated)
+    }
+
     // MARK: - Helpers
 
     private func makePDF(text: String) throws -> URL {
