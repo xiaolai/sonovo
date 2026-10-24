@@ -627,7 +627,12 @@ final class MediaPlaybackModel {
         url: URL,
         trackID: CMPersistentTrackID,
         nominalRate: Double,
-        minFrameDuration: CMTime?
+        minFrameDuration: CMTime?,
+        // Test seams. Production call sites pass nil, which reads samples
+        // from the reader's own provider and runs no per-sample hook.
+        nextSample: (@Sendable () async throws
+            -> CMReadySampleBuffer<CMSampleBuffer.DynamicContent>?)? = nil,
+        onSample: (@Sendable () -> Void)? = nil
     ) async -> (variable: Bool, verified: Bool) {
         guard nominalRate > 0 else { return (true, false) }
         if minFrameDurationIndicatesVariable(
@@ -660,7 +665,14 @@ final class MediaPlaybackModel {
         var timestamps: [Double] = []
         var sampleCount = 0
         do {
-            while let sample = try await provider.next() {
+            while true {
+                let sample: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>?
+                if let nextSample {
+                    sample = try await nextSample()
+                } else {
+                    sample = try await provider.next()
+                }
+                guard let sample else { break }
                 // A marker-only buffer carries no picture and its timestamp
                 // is not a frame boundary; counting it distorts the interval
                 // test.
@@ -673,6 +685,7 @@ final class MediaPlaybackModel {
                     timestamps.append(timestamp.seconds)
                 }
                 sampleCount += 1
+                onSample?()
                 if Task.isCancelled { return (true, false) }
                 if sampleCount >= cap { break }
             }
@@ -756,7 +769,12 @@ final class MediaPlaybackModel {
     /// Internal so the provider migration can be exercised with fixtures.
     nonisolated static func scanTimecode(
         url: URL,
-        trackID: CMPersistentTrackID
+        trackID: CMPersistentTrackID,
+        // Test seams. Production call sites pass nil, which reads samples
+        // from the reader's own provider and runs no per-sample hook.
+        nextSample: (@Sendable () async throws
+            -> CMReadySampleBuffer<CMSampleBuffer.DynamicContent>?)? = nil,
+        onSample: (@Sendable () -> Void)? = nil
     ) async -> [MediaTimecode.SourceSegment] {
         let asset = AVURLAsset(url: url)
         guard let tracks = try? await asset.loadTracks(
@@ -783,7 +801,14 @@ final class MediaPlaybackModel {
             // The first tmcd sample can be an empty marker; the frame number
             // is in the next sample. Skip anything without a format and a
             // full sample.
-            while let sample = try await provider.next() {
+            while true {
+                let sample: CMReadySampleBuffer<CMSampleBuffer.DynamicContent>?
+                if let nextSample {
+                    sample = try await nextSample()
+                } else {
+                    sample = try await provider.next()
+                }
+                guard let sample else { break }
                 if Task.isCancelled { return [] }
                 let segment = sample.withUnsafeSampleBuffer { buffer in
                     Self.timecodeSegment(from: buffer)
@@ -812,6 +837,8 @@ final class MediaPlaybackModel {
                 } else {
                     segments.append(segment)
                 }
+                onSample?()
+                if Task.isCancelled { return [] }
                 // A pathological file with a discontinuity at every sample
                 // is too irregular to label honestly; suppress source
                 // timecode rather than publish a truncated track.

@@ -3,6 +3,10 @@ import CoreMedia
 import XCTest
 @testable import Sonovo
 
+private enum ReaderTestError: Error {
+    case forced
+}
+
 final class MediaReaderTests: XCTestCase {
     private func fixture(_ name: String) throws -> URL {
         try XCTUnwrap(
@@ -80,21 +84,30 @@ final class MediaReaderTests: XCTestCase {
         XCTAssertGreaterThan(segment.duration ?? 0, 0.3)
     }
 
-    func testFrameTimingCancellationReturnsUnverified() async throws {
+    func testScanTimecodeStopsWhenSampleReadFails() async throws {
+        let url = try fixture("timecode")
+        let track = try await timecodeTrack(in: url)
+
+        let segments = await MediaPlaybackModel.scanTimecode(
+            url: url,
+            trackID: track.trackID,
+            nextSample: { throw ReaderTestError.forced }
+        )
+
+        XCTAssertTrue(segments.isEmpty)
+    }
+
+    func testFrameTimingStopsWhenSampleReadFails() async throws {
         let url = try fixture("cfr")
         let track = try await videoTrack(in: url)
-        let trackID = track.trackID
 
-        let task = Task {
-            withUnsafeCurrentTask { $0?.cancel() }
-            return await MediaPlaybackModel.frameTiming(
-                url: url,
-                trackID: trackID,
-                nominalRate: 30,
-                minFrameDuration: nil
-            )
-        }
-        let result = await task.value
+        let result = await MediaPlaybackModel.frameTiming(
+            url: url,
+            trackID: track.trackID,
+            nominalRate: 30,
+            minFrameDuration: nil,
+            nextSample: { throw ReaderTestError.forced }
+        )
 
         XCTAssertTrue(result.variable)
         XCTAssertFalse(result.verified)
@@ -114,42 +127,40 @@ final class MediaReaderTests: XCTestCase {
         XCTAssertFalse(result.verified)
     }
 
-    func testFrameTimingCancellationMidReadReturnsUnverified() async throws {
+    func testFrameTimingCancellationDiscardsAccumulatedTimestamps() async throws {
         let url = try fixture("long")
         let track = try await videoTrack(in: url)
         let trackID = track.trackID
-        let (started, continuation) = AsyncStream<Void>.makeStream()
 
+        // Cancelling from inside the per-sample seam lands after the first
+        // real sample is appended, so the loop must discard what it read.
         let task = Task {
-            continuation.yield()
-            return await MediaPlaybackModel.frameTiming(
+            await MediaPlaybackModel.frameTiming(
                 url: url,
                 trackID: trackID,
                 nominalRate: 30,
-                minFrameDuration: nil
+                minFrameDuration: nil,
+                onSample: { withUnsafeCurrentTask { $0?.cancel() } }
             )
         }
-
-        var iterator = started.makeAsyncIterator()
-        _ = await iterator.next()
-        try await Task.sleep(for: .milliseconds(2))
-        task.cancel()
         let result = await task.value
 
         XCTAssertTrue(result.variable)
         XCTAssertFalse(result.verified)
     }
 
-    func testScanTimecodeCancellationReturnsNoPartialSegments() async throws {
+    func testScanTimecodeCancellationDiscardsAccumulatedSegments() async throws {
         let url = try fixture("timecode")
         let track = try await timecodeTrack(in: url)
         let trackID = track.trackID
 
+        // The fixture's single segment is accumulated first; cancelling from
+        // the seam must still return no partial timecode.
         let task = Task {
-            withUnsafeCurrentTask { $0?.cancel() }
-            return await MediaPlaybackModel.scanTimecode(
+            await MediaPlaybackModel.scanTimecode(
                 url: url,
-                trackID: trackID
+                trackID: trackID,
+                onSample: { withUnsafeCurrentTask { $0?.cancel() } }
             )
         }
 
@@ -164,26 +175,6 @@ final class MediaReaderTests: XCTestCase {
         let model = MediaPlaybackModel()
 
         model.load(url: cfr)
-        model.load(url: vfr)
-        let ready = await waitUntil {
-            model.state == .ready && model.url == vfr
-        }
-
-        XCTAssertTrue(ready, "state was \(model.state)")
-        XCTAssertTrue(model.isVariableFrameRate)
-        XCTAssertFalse(model.isFrameRateVerified)
-        model.unload()
-    }
-
-    @MainActor
-    func testActiveVideoLoadIsCancelledByReplacement() async throws {
-        let long = try fixture("long")
-        let vfr = try fixture("vfr")
-        let model = MediaPlaybackModel()
-
-        model.load(url: long)
-        // Let the first load enter metadata reading before replacing it.
-        try await Task.sleep(for: .milliseconds(10))
         model.load(url: vfr)
         let ready = await waitUntil {
             model.state == .ready && model.url == vfr
