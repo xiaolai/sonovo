@@ -186,9 +186,9 @@ struct MarkdownViewer: View {
         }
     }
 
-    /// Book-style first-line indent applies to a paragraph that follows
-    /// another paragraph. The first paragraph after a heading or a list is
-    /// flush, as it would be in print.
+    /// Book-style paragraph indent applies as a block indent to a paragraph
+    /// that follows another paragraph. The first paragraph after a heading or
+    /// a list is flush, as it would be in print.
     private func isIndentedParagraph(after previous: Block?) -> Bool {
         guard theme.paragraphIndent > 0, let previous else { return false }
         if case .paragraph = previous { return true }
