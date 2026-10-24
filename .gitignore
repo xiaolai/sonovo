@@ -1,50 +1,107 @@
-# macOS
+# Private workspace and agent files. main/ is only the code repository;
+# dev-docs/ and the workspace root's AGENTS.md live beside it.
+/AGENTS.md
+/CLAUDE.md
+/CLAUDE.local.md
+/.claude
+/.agents
+/.codex
+/.cc-suite
+/.cc-suite.md
+/.mcp.json
+/.gemini
+/.grok
+/.opencode
+/opencode.json
+/QWEN.md
+/.qwen
+/.kimi
+/.cursor
+/.cursorrules
+/.windsurf
+/.windsurfrules
+/.continue
+/.aider*
+/.github/copilot-instructions.md
+.claude/settings.local.json
+.claude/CLAUDE.local.md
+.claude/*.local.*
+
+# SwiftPM and Xcode build output. `/build` is anchored: a `build` directory
+# inside vendored resources is source (three.js ships one).
+/.build/
+/.swiftpm/*
+!/.swiftpm/xcode
+/.swiftpm/xcode/*
+!/.swiftpm/xcode/xcshareddata
+/build/
+/DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.xcarchive
+*.dSYM/
+*.app
+*.dmg
+*.pkg
+*.ipa
+*.xcresult/
+TestResults/
+coverage/
+
+# Local machine settings and release credentials, never source.
+.env
+.env.*
+!.env.example
+local.mk
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.certSigningRequest
+*.csr
+AuthKey_*.p8
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+.netrc
+.npmrc
+.pypirc
+
+# Finder and OS state, wherever a folder was opened.
 .DS_Store
 .AppleDouble
 .LSOverride
 ._*
-.Spotlight-V100
-.Trashes
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+.TemporaryItems/
 
-# Xcode and SwiftPM
-.build/
-.swiftpm/
-DerivedData/
-build/
-xcuserdata/
-*.xcuserstate
-*.dSYM/
-*.xcarchive/
-*.app
-*.dmg
-*.pkg
-
-# Local configuration and credentials
-.env
-.env.*
-!.env.example
-*.pem
-*.p12
-*.mobileprovision
-
-# Logs and temporary files
+# Logs, editor swaps, and test/coverage droppings.
 *.log
 *.tmp
 *.swp
+*.swo
 *~
+*.orig
+*.rej
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.lcov
 
-# Package managers and local tooling
-node_modules/
-.pnpm-store/
+# Python and package-manager state.
 __pycache__/
 *.py[cod]
 .venv/
-.cc-suite/
-.claude/settings.local.json
-
-# AI tooling: machine-local, written wherever the tools run, never project
-# source. Bare names, not rules anchored to this directory, so a copy written
-# in a subdirectory is covered too. (.cc-suite/ is listed above.)
-.cc-suite.md
-.codex/
-CLAUDE.md
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.pnpm-store/

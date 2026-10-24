@@ -5,8 +5,9 @@
 # Default destination: /Applications/Sonovo.app
 #
 # The version comes from Sources/Sonovo/Resources/version.txt, so a release
-# is one edit plus this script. The bundle is ad-hoc signed; it is not
-# notarized and is not distributed through Homebrew.
+# is one edit plus this script. The bundle is ad-hoc signed by default; set
+# SONOVO_PACKAGE_SIGN=none when a caller (Scripts/release.sh) signs it later.
+# It is not notarized and is not distributed through Homebrew here.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,7 +16,11 @@ destination="${1:-/Applications/Sonovo.app}"
 version="$(tr -d '[:space:]' < Sources/Sonovo/Resources/version.txt)"
 [[ -n "$version" ]] || { echo "version.txt is empty" >&2; exit 1; }
 
-Scripts/build.sh -c release
+build_flags=(-c release)
+if [ "${SONOVO_WARNINGS_AS_ERRORS:-0}" = 1 ]; then
+    build_flags+=(-Xswiftc -warnings-as-errors)
+fi
+Scripts/build.sh "${build_flags[@]}"
 
 products=".build/out/Products/Release"
 binary="$products/Sonovo"
@@ -78,8 +83,15 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 
-codesign --force --sign - --timestamp=none "$app" > /dev/null
-codesign --verify --strict "$app"
+sign_mode="${SONOVO_PACKAGE_SIGN:-adhoc}"
+case "$sign_mode" in
+    adhoc|none) ;;
+    *) echo "SONOVO_PACKAGE_SIGN must be adhoc or none" >&2; exit 2 ;;
+esac
+if [ "$sign_mode" = adhoc ]; then
+    codesign --force --sign - --timestamp=none "$app" > /dev/null
+    codesign --verify --strict "$app"
+fi
 
 plutil -lint "$app/Contents/Info.plist" > /dev/null
 installed_version="$(plutil -extract CFBundleShortVersionString raw \
@@ -92,5 +104,7 @@ installed_version="$(plutil -extract CFBundleShortVersionString raw \
 mkdir -p "$(dirname "$destination")"
 rm -rf "$destination"
 ditto "$app" "$destination"
-codesign --verify --strict "$destination"
+if [ "$sign_mode" = adhoc ]; then
+    codesign --verify --strict "$destination"
+fi
 echo "installed $destination ($version)"
