@@ -65,6 +65,7 @@ struct SettingsView: View {
     @AppStorage("sonovo.loginShell") private var loginShell = true
     @AppStorage("sonovo.terminals.tmux") private var terminalTmux = true
     @State private var outputDevices: [AudioOutputDevice] = []
+    @State private var terminalFontCatalog: [String] = []
     @State private var editingCustomShell = false
     @State private var customShellDraft = ""
     @State private var customShellError: String?
@@ -96,6 +97,9 @@ struct SettingsView: View {
         .preferredColorScheme(preferredColorScheme)
         .task {
             outputDevices = AudioOutputDevices.all()
+        }
+        .task {
+            terminalFontCatalog = TerminalFontCatalog.monospacedFamilies()
         }
         .task {
             guard tmuxVersion == nil else { return }
@@ -562,7 +566,7 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .accessibilityLabel("Terminal font")
-                        .frame(width: AppTheme.Layout.settingsPickerTinyWidth)
+                        .frame(width: AppTheme.Layout.settingsPickerWidth)
                     }
                 }
                 SettingsRow {
@@ -641,10 +645,15 @@ struct SettingsView: View {
     }
 
     private var terminalFontFamilies: [String] {
-        var families = ["SF Mono", "Menlo"]
+        let preferred = ["SF Mono", "Menlo", "Monaco"]
+        let installed = terminalFontCatalog.isEmpty
+            ? preferred
+            : terminalFontCatalog
+        var families = preferred.filter { installed.contains($0) }
+            + installed.filter { !preferred.contains($0) }
         let current = terminalFontParts.family
         if !families.contains(current) {
-            families.append(current)
+            families.insert(current, at: 0)
         }
         return families
     }
@@ -912,5 +921,29 @@ private struct MiniWindow: View {
             .padding(.leading, AppTheme.Spacing.xxl)
             .padding(.top, AppTheme.Spacing.s14)
         }
+    }
+}
+
+/// Installed font families with a monospaced member. Ghostty accepts a family
+/// name, not a file path, so the picker offers only families the system can
+/// resolve.
+private enum TerminalFontCatalog {
+    static func monospacedFamilies() -> [String] {
+        let manager = NSFontManager.shared
+        return manager.availableFontFamilies.filter { family in
+            guard let members = manager.availableMembers(
+                ofFontFamily: family
+            ) else {
+                return false
+            }
+            return members.contains { member in
+                guard let name = member.first as? String,
+                      let font = NSFont(name: name, size: AppTheme.TypeScale.body) else {
+                    return false
+                }
+                return font.fontDescriptor.symbolicTraits.contains(.monoSpace)
+            }
+        }
+        .sorted()
     }
 }
