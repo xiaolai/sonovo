@@ -18,11 +18,17 @@ enum PreferenceKey {
     static let theme = "sonovo.theme"
     static let foregroundIntensity = "sonovo.foregroundIntensity"
     static let backgroundIntensity = "sonovo.backgroundIntensity"
+    static let readingTheme = "sonovo.readingTheme"
+    static let readingBodySize = "sonovo.readingBodySize"
+    static let readingMeasure = "sonovo.readingMeasure"
+    /// Bumped by Settings after user theme files change, so open documents
+    /// rebuild their resolved theme instead of serving a cached one.
+    static let readingThemeRevision = "sonovo.readingThemeRevision"
 }
 
-/// Typed reads of every preference a feature consumes. Settings writes the
-/// same keys with `@AppStorage`, so a change reaches new editors, terminals,
-/// and windows without a separate preferences model.
+/// Typed reads for features that cannot use `@AppStorage`. Observable UI
+/// (Settings, the reading view) reads and writes the same `PreferenceKey`
+/// values through `@AppStorage`, so one key drives both paths.
 enum Preferences {
     static var defaults: UserDefaults { .standard }
 

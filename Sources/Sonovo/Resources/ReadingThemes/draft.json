@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "draft",
+  "name": "Draft",
+  "extends": "paper",
+  "typography": {
+    "bodyFont": {
+      "families": ["SF Pro Text", "Helvetica Neue"],
+      "design": "sans"
+    },
+    "bodySize": 15.5,
+    "bodyLineSpacing": 5,
+    "paragraphIndent": 0,
+    "measure": 700,
+    "headingFont": {
+      "families": ["SF Pro Display", "Helvetica Neue"],
+      "design": "sans"
+    },
+    "headingSizes": [28, 22, 18, 16, 15, 14],
+    "headingTopPadding": [28, 22, 16, 12, 10, 10],
+    "codeSize": 13,
+    "tableSize": 14,
+    "captionSize": 11
+  },
+  "rhythm": {
+    "blockSpacing": 12,
+    "pagePadding": 26,
+    "codePadding": 14,
+    "codeRadius": 8
+  },
+  "colors": {
+    "light": {
+      "paper": "#FBFBFB",
+      "ink": "#202124",
+      "secondaryInk": "#5F6368",
+      "link": "#1A73E8",
+      "codeGround": "#F1F3F4",
+      "codeInk": "#202124",
+      "quoteBar": "#C4C7C5",
+      "rule": "#E0E0E0",
+      "tableGround": "#F5F6F7"
+    },
+    "dark": {
+      "paper": "#1B1B1D",
+      "ink": "#E8EAED",
+      "secondaryInk": "#9AA0A6",
+      "link": "#8AB4F8",
+      "codeGround": "#26272A",
+      "codeInk": "#E8EAED",
+      "quoteBar": "#4A4D50",
+      "rule": "#333538",
+      "tableGround": "#212225"
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "book",
+  "name": "Book",
+  "extends": "paper",
+  "typography": {
+    "bodyFont": {
+      "families": ["Charter", "Georgia"],
+      "design": "serif"
+    },
+    "bodySize": 17,
+    "bodyLineSpacing": 9,
+    "paragraphIndent": 1.2,
+    "measure": 610,
+    "headingFont": {
+      "families": ["Charter", "Georgia"],
+      "design": "serif"
+    },
+    "headingSizes": [30, 24, 20, 18, 16.5, 16],
+    "headingTopPadding": [34, 26, 20, 16, 12, 12],
+    "codeSize": 13.5
+  },
+  "rhythm": {
+    "blockSpacing": 10,
+    "pagePadding": 34,
+    "codePadding": 14,
+    "codeRadius": 8
+  },
+  "colors": {
+    "light": {
+      "paper": "#FAF6EE",
+      "ink": "#2B2620",
+      "secondaryInk": "#6B6157",
+      "link": "#9A4B2A",
+      "codeGround": "#F1EADD",
+      "codeInk": "#2B2620",
+      "quoteBar": "#D8CBB8",
+      "rule": "#E4DACA",
+      "tableGround": "#F3EDE2"
+    },
+    "dark": {
+      "paper": "#171411",
+      "ink": "#E9E1D3",
+      "secondaryInk": "#A99C8B",
+      "link": "#E0A473",
+      "codeGround": "#211C17",
+      "codeInk": "#E9E1D3",
+      "quoteBar": "#3A322A",
+      "rule": "#2E2822",
+      "tableGround": "#1D1915"
+    }
+  }
+}

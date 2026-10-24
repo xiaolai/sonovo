@@ -41,6 +41,7 @@ enum AppTheme {
 
         static let tabBarHeight: CGFloat = 34
         static let subtitleHeaderHeight: CGFloat = 40
+        static let settingsReadingPreviewHeight: CGFloat = 320
         static let breadcrumbHeight: CGFloat = 28
         static let transportHeight: CGFloat = 46
         static let toolbarControlHeight: CGFloat = 24
@@ -325,21 +326,10 @@ enum AppTheme {
     /// uses a narrower measure, because a document is read rather than
     /// scanned like a settings pane.
     enum Reading {
-        // Rendered prose
+        /// Shared with subtitle cue rows. Rendered Markdown values live in
+        /// the selected `MarkdownTheme`, not here.
         static let bodySize: CGFloat = 16.5
         static let bodyLineSpacing: CGFloat = 7
-        static let blockSpacing: CGFloat = 14
-        static let measure: CGFloat = 660
-        static let codeSize: CGFloat = 14
-        static let codeLineSpacing: CGFloat = 4
-        static let tableSize: CGFloat = 15
-        static let captionSize: CGFloat = 12
-        static let h1: CGFloat = 32
-        static let h2: CGFloat = 26
-        static let h3: CGFloat = 22
-        static let h4: CGFloat = 19
-        static let h5: CGFloat = 17
-        static let h6: CGFloat = 16
 
         // Source editor
         static let sourceSize: CGFloat = 13.5
@@ -353,27 +343,6 @@ enum AppTheme {
         static let sourceH4: CGFloat = 15
         static let sourceH5: CGFloat = 14
         static let sourceH6: CGFloat = 13.5
-
-        static func headingSize(_ level: Int) -> CGFloat {
-            switch level {
-            case 1: h1
-            case 2: h2
-            case 3: h3
-            case 4: h4
-            case 5: h5
-            default: h6
-            }
-        }
-
-        static func headingTopPadding(_ level: Int) -> CGFloat {
-            switch level {
-            case 1: 30
-            case 2: 24
-            case 3: 18
-            case 4: 14
-            default: 10
-            }
-        }
 
         static func sourceHeadingSize(_ level: Int) -> CGFloat {
             switch level {

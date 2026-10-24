@@ -86,7 +86,11 @@ final class MarkdownViewerTests: XCTestCase {
         <div>raw html is hidden</div>
         """
         let (ast, headings) = makeAST(source)
-        let viewer = MarkdownViewer(ast: ast, headings: headings)
+        let viewer = MarkdownViewer(
+            ast: ast,
+            headings: headings,
+            theme: MarkdownThemeStore.shared.defaultTheme()
+        )
         let hosting = NSHostingView(rootView: viewer)
         hosting.frame = NSRect(x: 0, y: 0, width: 640, height: 800)
         hosting.layoutSubtreeIfNeeded()
@@ -99,6 +103,7 @@ final class MarkdownViewerTests: XCTestCase {
         let viewer = MarkdownViewer(
             ast: ast,
             headings: headings,
+            theme: MarkdownThemeStore.shared.defaultTheme(),
             wikiLinkState: { _ in .missing },
             onOpenWikiLink: { _ in }
         )

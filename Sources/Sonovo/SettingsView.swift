@@ -1,10 +1,12 @@
 import AppKit
+import SonovoCore
 import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general
     case appearance
     case editor
+    case reading
     case audio
     case terminal
 
@@ -15,6 +17,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "General"
         case .appearance: "Appearance"
         case .editor: "Editor"
+        case .reading: "Reading"
         case .audio: "Audio"
         case .terminal: "Terminal"
         }
@@ -25,6 +28,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .appearance: "circle.lefthalf.filled"
         case .editor: "textformat"
+        case .reading: "text.book.closed"
         case .audio: "waveform"
         case .terminal: "terminal"
         }
@@ -48,6 +52,12 @@ struct SettingsView: View {
     @AppStorage("sonovo.editorFontSize") private var editorFontSize =
         AppTheme.Preferences.editorFontSizeDefault
     @AppStorage("sonovo.markdownRendered") private var markdownRendered = true
+    @AppStorage(PreferenceKey.readingTheme) private var readingThemeID = "paper"
+    @AppStorage(PreferenceKey.readingBodySize) private var readingBodySize = 0.0
+    @AppStorage(PreferenceKey.readingMeasure) private var readingMeasure = 0.0
+    @AppStorage(PreferenceKey.readingThemeRevision) private var readingThemeRevision = 0
+    @State private var themeCatalog = MarkdownThemeCatalog.empty
+    @State private var themeMessage: String?
     @AppStorage("sonovo.wrapLines") private var wrapLines = true
     @AppStorage("sonovo.codeTabWidth") private var codeTabWidth =
         AppTheme.Code.tabWidthDefault
@@ -137,6 +147,8 @@ struct SettingsView: View {
             appearancePane
         case .editor:
             editorPane
+        case .reading:
+            readingPane
         case .audio:
             audioPane
         case .terminal:
@@ -379,6 +391,319 @@ struct SettingsView: View {
             }
         }
     }
+
+    private var readingPane: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
+            paneHeader(
+                title: "Reading",
+                detail: "Choose how rendered Markdown looks. Source editing "
+                    + "keeps its own text settings."
+            )
+
+            SettingsGroup {
+                SettingsRow {
+                    HStack {
+                        Text("Theme")
+                        Spacer()
+                        Menu {
+                            ForEach(themeCatalog.themes) { theme in
+                                Button(theme.name) {
+                                    readingThemeID = theme.id
+                                    themeMessage = nil
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: AppTheme.Spacing.xs) {
+                                Text(currentReadingTheme.name)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(
+                                        .system(
+                                            size: AppTheme.TypeScale.micro,
+                                            weight: .semibold
+                                        )
+                                    )
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                    }
+                }
+                SettingsRow {
+                    HStack(spacing: AppTheme.Spacing.md) {
+                        Text("Body size")
+                            .frame(
+                                width: AppTheme.Layout.settingsRowLabelWidth,
+                                alignment: .leading
+                            )
+                        Slider(
+                            value: bodySizeBinding,
+                            in: MarkdownThemeLimits.bodySize,
+                            step: 0.5
+                        )
+                        .accessibilityLabel("Reading body size")
+                        Text("\(readingBodySizePoints) pt")
+                            .monospacedDigit()
+                        Button("Theme Default") {
+                            readingBodySize = 0
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                SettingsRow {
+                    HStack(spacing: AppTheme.Spacing.md) {
+                        Text("Measure")
+                            .frame(
+                                width: AppTheme.Layout.settingsRowLabelWidth,
+                                alignment: .leading
+                            )
+                        Slider(
+                            value: measureBinding,
+                            in: MarkdownThemeLimits.measure,
+                            step: 10
+                        )
+                        .accessibilityLabel("Reading measure")
+                        Text("\(readingMeasurePoints) pt")
+                            .monospacedDigit()
+                        Button("Theme Default") {
+                            readingMeasure = 0
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                SettingsRow {
+                    HStack(spacing: AppTheme.Spacing.sm) {
+                        Button("Open Themes Folder") {
+                            MarkdownThemeStore.shared.openThemesFolder()
+                        }
+                        Button("Reload") {
+                            MarkdownThemeStore.shared.reload()
+                            refreshThemeCatalog()
+                            readingThemeRevision += 1
+                        }
+                        Button("Duplicate Theme") {
+                            duplicateSelectedTheme()
+                        }
+                        .disabled(selectedThemeMissing)
+                        Spacer()
+                    }
+                }
+            }
+
+            if let themeMessage {
+                Text(themeMessage)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
+            }
+            if selectedThemeMissing {
+                Text(
+                    "The selected theme \"\(readingThemeID)\" is missing; "
+                        + "Paper is shown. Choose another theme or restore "
+                        + "the file."
+                )
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(AppTheme.Palette.warning)
+            }
+            ForEach(
+                Array(themeCatalog.issues.enumerated()),
+                id: \.offset
+            ) { item in
+                Text(item.element)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(AppTheme.Palette.warning)
+            }
+            ForEach(
+                Array(currentThemeWarnings.enumerated()),
+                id: \.offset
+            ) { item in
+                Text(item.element)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(AppTheme.Palette.warning)
+            }
+
+            readingPreview
+
+            Text(
+                "Themes are JSON files. The built-ins are Paper, Book, "
+                    + "Editorial, and Draft. Copies you make live in "
+                    + "Application Support and can be edited there."
+            )
+            .font(.system(size: AppTheme.TypeScale.xs))
+            .foregroundStyle(.tertiary)
+        }
+        .task {
+            if themeCatalog.themes.isEmpty {
+                refreshThemeCatalog()
+            }
+        }
+    }
+
+    private var readingPreview: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
+            Text("Preview")
+                .font(
+                    .system(
+                        size: AppTheme.TypeScale.xs,
+                        weight: .semibold
+                    )
+                )
+                .foregroundStyle(.secondary)
+            MarkdownViewer(
+                ast: Self.previewDocument.ast,
+                headings: Self.previewDocument.headings,
+                theme: previewTheme,
+                onOpenExternalURL: { _ in }
+            )
+            .frame(height: AppTheme.Layout.settingsReadingPreviewHeight)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: AppTheme.Radius.surface,
+                    style: .continuous
+                )
+            )
+            .overlay(
+                RoundedRectangle(
+                    cornerRadius: AppTheme.Radius.surface,
+                    style: .continuous
+                )
+                .strokeBorder(
+                    Color.appSeparator,
+                    lineWidth: AppTheme.BorderWidth.hairline
+                )
+            )
+        }
+    }
+
+    private var currentReadingTheme: MarkdownTheme {
+        themeCatalog.themes.first { $0.id == readingThemeID }
+            ?? MarkdownThemeStore.shared.theme(id: readingThemeID)
+    }
+
+    private var previewTheme: MarkdownTheme {
+        currentReadingTheme.withOverrides(
+            bodySize: readingBodySize,
+            measure: readingMeasure
+        )
+    }
+
+    private var currentThemeWarnings: [String] {
+        currentReadingTheme.warnings
+    }
+
+    /// The stored id is neither built in nor present on disk. The viewer
+    /// falls back to Paper; say so instead of showing Paper silently.
+    private var selectedThemeMissing: Bool {
+        // The catalog is empty until the pane's task loads it; do not flash
+        // a false warning for a valid user theme on the first render.
+        guard !themeCatalog.themes.isEmpty else { return false }
+        return !MarkdownThemeStore.builtInOrder.contains(readingThemeID)
+            && !themeCatalog.themes.contains { $0.id == readingThemeID }
+    }
+
+    private var bodySizeBinding: Binding<Double> {
+        Binding(
+            get: {
+                resolvedReadingBodySize(
+                    readingBodySize,
+                    theme: currentReadingTheme
+                )
+            },
+            set: { readingBodySize = $0 }
+        )
+    }
+
+    private var measureBinding: Binding<Double> {
+        Binding(
+            get: {
+                resolvedReadingMeasure(
+                    readingMeasure,
+                    theme: currentReadingTheme
+                )
+            },
+            set: { readingMeasure = $0 }
+        )
+    }
+
+    private var readingBodySizePoints: Int {
+        Int(bodySizeBinding.wrappedValue.rounded())
+    }
+
+    private var readingMeasurePoints: Int {
+        Int(measureBinding.wrappedValue.rounded())
+    }
+
+    private func resolvedReadingBodySize(
+        _ value: Double,
+        theme: MarkdownTheme
+    ) -> Double {
+        let resolved = value > 0 ? value : Double(theme.bodySize)
+        return min(
+            max(resolved, MarkdownThemeLimits.bodySize.lowerBound),
+            MarkdownThemeLimits.bodySize.upperBound
+        )
+    }
+
+    private func resolvedReadingMeasure(
+        _ value: Double,
+        theme: MarkdownTheme
+    ) -> Double {
+        let resolved = value > 0 ? value : Double(theme.measure)
+        return min(
+            max(resolved, MarkdownThemeLimits.measure.lowerBound),
+            MarkdownThemeLimits.measure.upperBound
+        )
+    }
+
+    private func refreshThemeCatalog() {
+        themeCatalog = MarkdownThemeStore.shared.catalog()
+    }
+
+    private func duplicateSelectedTheme() {
+        do {
+            let newID = try MarkdownThemeStore.shared.duplicateTheme(
+                id: readingThemeID
+            )
+            readingThemeRevision += 1
+            refreshThemeCatalog()
+            readingThemeID = newID
+            themeMessage = "Created \(newID).json in the themes folder."
+        } catch {
+            themeMessage = "\(error)"
+        }
+    }
+
+    private static let previewDocument: (
+        ast: SonovoAST,
+        headings: HeadingIndex
+    ) = {
+        let source = """
+        # A quiet place to read
+
+        Typography is most of the work: **weight**, *emphasis*, `inline
+        code`, and a [link](https://example.com) in a measured line.
+
+        > A quote should feel like a pause, not a box.
+
+        ## A section
+
+        - One idea
+        - Another idea
+
+        ```swift
+        let measure = 660
+        ```
+
+        | Element | Role |
+        |---|---|
+        | Measure | About 66 characters |
+        | Rhythm | One vertical scale |
+
+        ---
+        """
+        let parsed = MarkdownParser.parse(source)
+        let ast = MarkdownSyntaxAugmenter().augment(parsed)
+        return (ast, HeadingIndex(ast: ast))
+    }()
 
     private var audioPane: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {

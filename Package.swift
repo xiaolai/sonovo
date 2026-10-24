@@ -65,6 +65,7 @@ let package = Package(
                 .copy("Resources/version.txt"),
                 .copy("Resources/AppIcon.png"),
                 .copy("Resources/ModelViewer"),
+                .copy("Resources/ReadingThemes"),
                 .copy("Resources/SampleProject")
             ],
             linkerSettings: [

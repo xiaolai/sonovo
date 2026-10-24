@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "editorial",
+  "name": "Editorial",
+  "extends": "paper",
+  "typography": {
+    "bodyFont": {
+      "families": ["Charter", "Georgia"],
+      "design": "serif"
+    },
+    "bodySize": 17,
+    "bodyLineSpacing": 8,
+    "paragraphIndent": 0,
+    "measure": 720,
+    "headingFont": {
+      "families": ["SF Pro Display", "Helvetica Neue"],
+      "design": "sans"
+    },
+    "headingSizes": [34, 25, 20, 17, 15, 14],
+    "headingTopPadding": [34, 26, 20, 16, 12, 12],
+    "codeSize": 13.5,
+    "tableSize": 14.5,
+    "captionSize": 11.5
+  },
+  "rhythm": {
+    "blockSpacing": 16,
+    "pagePadding": 30,
+    "codePadding": 16,
+    "codeRadius": 6
+  },
+  "colors": {
+    "light": {
+      "paper": "#FFFFFF",
+      "ink": "#111111",
+      "secondaryInk": "#5C5C5C",
+      "link": "#B3261E",
+      "codeGround": "#F4F4F2",
+      "codeInk": "#111111",
+      "quoteBar": "#C8C8C4",
+      "rule": "#DADAD6",
+      "tableGround": "#F7F7F5"
+    },
+    "dark": {
+      "paper": "#121212",
+      "ink": "#F5F5F5",
+      "secondaryInk": "#B0B0B0",
+      "link": "#FF8A80",
+      "codeGround": "#1E1E1E",
+      "codeInk": "#F5F5F5",
+      "quoteBar": "#4A4A4A",
+      "rule": "#2E2E2E",
+      "tableGround": "#181818"
+    }
+  }
+}

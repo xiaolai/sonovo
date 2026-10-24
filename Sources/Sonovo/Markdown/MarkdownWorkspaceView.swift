@@ -344,6 +344,21 @@ private struct MarkdownRenderedDocumentView: View {
     @State private var output: MarkdownParseOutput?
     @State private var parseTimedOut = false
 
+    @AppStorage(PreferenceKey.readingTheme) private var readingThemeID = "paper"
+    @AppStorage(PreferenceKey.readingBodySize) private var readingBodySize = 0.0
+    @AppStorage(PreferenceKey.readingMeasure) private var readingMeasure = 0.0
+    @AppStorage(PreferenceKey.readingThemeRevision) private var readingThemeRevision = 0
+
+    private var readingTheme: MarkdownTheme {
+        // Read the revision so a Settings reload invalidates this body.
+        _ = readingThemeRevision
+        return MarkdownThemeStore.shared.theme(id: readingThemeID)
+            .withOverrides(
+                bodySize: readingBodySize,
+                measure: readingMeasure
+            )
+    }
+
     /// Two documents can share a revision number. Keying the task only by
     /// revision leaves the new document displaying the old document's AST.
     private struct ParseTaskKey: Hashable {
@@ -359,6 +374,7 @@ private struct MarkdownRenderedDocumentView: View {
                 MarkdownViewer(
                     ast: output.ast,
                     headings: output.headings,
+                    theme: readingTheme,
                     documentURL: document.fileURL,
                     workspaceRoot: workspace.workspaceRoot
                         ?? document.fileURL?.deletingLastPathComponent(),
