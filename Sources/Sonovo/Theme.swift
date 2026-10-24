@@ -412,6 +412,8 @@ enum AppTheme {
         static let editorFontSizeRange: ClosedRange<Double> = 11...18
         static let editorFontSizeStep: Double = 1
         static let editorFontSizeDefault: Double = 13
+        static let terminalFontSizeRange: ClosedRange<Double> = 9...24
+        static let terminalFontSizeStep: Double = 1
         /// Settings-preview slider defaults, as fractions of their ranges.
         static let foregroundIntensityDefault: Double = 0.48
         static let backgroundIntensityDefault: Double = 0.34
@@ -494,6 +496,7 @@ enum AppTheme {
         static let compareHandle: CGFloat = 30
         static let compareSummaryWidth: CGFloat = 104
         static let settingsPreviewHeight: CGFloat = 92
+        static let settingsAboutIconSize: CGFloat = 72
         static let settingsSwatchWidth: CGFloat = 26
         static let settingsSwatchHeight: CGFloat = 16
         static let progressWidth: CGFloat = 180

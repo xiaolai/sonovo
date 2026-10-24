@@ -8,6 +8,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case reading
     case audio
     case terminal
+    case about
 
     var id: String { rawValue }
 
@@ -19,6 +20,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .reading: "Reading"
         case .audio: "Audio"
         case .terminal: "Terminal"
+        case .about: "About"
         }
     }
 
@@ -30,6 +32,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .reading: "text.book.closed"
         case .audio: "waveform"
         case .terminal: "terminal"
+        case .about: "info.circle"
         }
     }
 }
@@ -68,7 +71,7 @@ struct SettingsView: View {
     @State private var tmuxVersion: String?
 
     var body: some View {
-        HStack(spacing: AppTheme.Spacing.zero) {
+        NavigationSplitView {
             List(SettingsSection.allCases, selection: $selectedSection) { section in
                 Label(section.label, systemImage: section.icon)
                     .tag(section)
@@ -76,8 +79,11 @@ struct SettingsView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .background(SidebarMaterialBackground())
-            .frame(width: AppTheme.Layout.settingsSidebarWidth)
-
+            .navigationSplitViewColumnWidth(
+                AppTheme.Layout.settingsSidebarWidth
+            )
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
             ScrollView {
                 detailPane
                     .padding(AppTheme.Spacing.xl)
@@ -146,6 +152,58 @@ struct SettingsView: View {
             audioPane
         case .terminal:
             terminalPane
+        case .about:
+            aboutPane
+        }
+    }
+
+    private var aboutPane: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
+            paneHeader(
+                title: "About",
+                detail: "What this app is, and what it is not."
+            )
+
+            HStack(spacing: AppTheme.Spacing.md) {
+                Image(
+                    nsImage: NSApp.applicationIconImage
+                        ?? NSWorkspace.shared.icon(for: .application)
+                )
+                .resizable()
+                .interpolation(.high)
+                .frame(
+                    width: AppTheme.Size.settingsAboutIconSize,
+                    height: AppTheme.Size.settingsAboutIconSize
+                )
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                    Text("Sonovo")
+                        .font(
+                            .system(
+                                size: AppTheme.TypeScale.xxl,
+                                weight: .semibold
+                            )
+                        )
+                    Text("Version \(AppVersion.current)")
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            SettingsGroup {
+                SettingsRow {
+                    Text("A personal macOS tool for my own use.")
+                    Text(
+                        "Not intended for anyone else to build, install, "
+                            + "or depend on. There is no support, "
+                            + "compatibility guarantee, or contribution "
+                            + "process."
+                    )
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -496,12 +554,29 @@ struct SettingsView: View {
                     HStack {
                         Text("Font")
                         Spacer()
-                        Picker("", selection: $terminalFont) {
-                            Text("SF Mono 12").tag("SF Mono 12")
-                            Text("Menlo 12").tag("Menlo 12")
+                        Picker("", selection: terminalFontFamily) {
+                            ForEach(terminalFontFamilies, id: \.self) {
+                                family in
+                                Text(family).tag(family)
+                            }
                         }
                         .labelsHidden()
                         .accessibilityLabel("Terminal font")
+                        .frame(width: AppTheme.Layout.settingsPickerTinyWidth)
+                    }
+                }
+                SettingsRow {
+                    HStack {
+                        Text("Size")
+                        Spacer()
+                        Picker("", selection: terminalFontSize) {
+                            ForEach(terminalFontSizes, id: \.self) { size in
+                                Text("\(formatFontSize(size)) pt")
+                                    .tag(size)
+                            }
+                        }
+                        .labelsHidden()
+                        .accessibilityLabel("Terminal font size")
                         .frame(width: AppTheme.Layout.settingsPickerTinyWidth)
                     }
                 }
@@ -559,6 +634,68 @@ struct SettingsView: View {
     // MARK: - Terminal settings
 
     private static let customShellTag = "__custom__"
+
+    private var terminalFontParts: (family: String, size: Double) {
+        TerminalPreferences.parsedFont(from: terminalFont)
+            ?? ("SF Mono", 12)
+    }
+
+    private var terminalFontFamilies: [String] {
+        var families = ["SF Mono", "Menlo"]
+        let current = terminalFontParts.family
+        if !families.contains(current) {
+            families.append(current)
+        }
+        return families
+    }
+
+    private var terminalFontSizes: [Double] {
+        let range = AppTheme.Preferences.terminalFontSizeRange
+        var sizes = Array(
+            stride(
+                from: range.lowerBound,
+                through: range.upperBound,
+                by: AppTheme.Preferences.terminalFontSizeStep
+            )
+        )
+        let current = terminalFontParts.size
+        if !sizes.contains(current) {
+            sizes.append(current)
+            sizes.sort()
+        }
+        return sizes
+    }
+
+    private var terminalFontFamily: Binding<String> {
+        Binding(
+            get: { terminalFontParts.family },
+            set: { family in
+                terminalFont = "\(family) \(formatFontSize(terminalFontParts.size))"
+            }
+        )
+    }
+
+    private var terminalFontSize: Binding<Double> {
+        Binding(
+            get: {
+                let range = AppTheme.Preferences.terminalFontSizeRange
+                return min(
+                    max(terminalFontParts.size, range.lowerBound),
+                    range.upperBound
+                )
+            },
+            set: { size in
+                terminalFont =
+                    "\(terminalFontParts.family) \(formatFontSize(size))"
+            }
+        )
+    }
+
+    private func formatFontSize(_ size: Double) -> String {
+        size.rounded() == size
+            ? String(Int(size))
+            : String(format: "%.1f", size)
+    }
 
     private var shellIsKnown: Bool {
         shell.isEmpty
