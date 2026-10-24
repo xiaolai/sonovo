@@ -477,7 +477,7 @@ final class MediaPlaybackModel {
         }
 
         endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
             object: item,
             queue: .main
         ) { [weak self] _ in
@@ -502,7 +502,7 @@ final class MediaPlaybackModel {
         }
 
         failureObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemFailedToPlayToEndTime,
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification,
             object: item,
             queue: .main
         ) { [weak self] note in
@@ -520,7 +520,7 @@ final class MediaPlaybackModel {
         }
 
         errorLogObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemNewErrorLogEntry,
+            forName: AVPlayerItem.newErrorLogEntryNotification,
             object: item,
             queue: .main
         ) { [weak self] _ in
@@ -622,7 +622,8 @@ final class MediaPlaybackModel {
     /// when every sample was seen and the intervals were constant within 1%.
     /// A longer or unreadable track is not verified, so frame stepping is
     /// disabled rather than claiming exact frames we did not measure.
-    nonisolated private static func frameTiming(
+    /// Internal so the provider migration can be exercised with fixtures.
+    nonisolated static func frameTiming(
         url: URL,
         trackID: CMPersistentTrackID,
         nominalRate: Double,
@@ -646,28 +647,37 @@ final class MediaPlaybackModel {
             outputSettings: nil
         )
         guard reader.canAdd(output) else { return (true, false) }
-        reader.add(output)
-        guard reader.startReading() else { return (true, false) }
+        let provider = reader.outputProvider(for: output)
+        do {
+            try reader.start()
+        } catch {
+            return (true, false)
+        }
         defer { reader.cancelReading() }
 
         let nominalDelta = 1 / nominalRate
         let cap = 60_000
         var timestamps: [Double] = []
         var sampleCount = 0
-        while let sample = output.copyNextSampleBuffer() {
-            // A marker-only buffer carries no picture and its timestamp is
-            // not a frame boundary; counting it distorts the interval test.
-            guard CMSampleBufferGetNumSamples(sample) > 0 else {
-                continue
+        do {
+            while let sample = try await provider.next() {
+                // A marker-only buffer carries no picture and its timestamp
+                // is not a frame boundary; counting it distorts the interval
+                // test.
+                guard sample.sampleCount > 0 else {
+                    continue
+                }
+                let timestamp = sample.presentationTimeStamp
+                if timestamp.isNumeric,
+                   timestamp.seconds.isFinite {
+                    timestamps.append(timestamp.seconds)
+                }
+                sampleCount += 1
+                if Task.isCancelled { return (true, false) }
+                if sampleCount >= cap { break }
             }
-            let timestamp = CMSampleBufferGetPresentationTimeStamp(sample)
-            if timestamp.isNumeric,
-               timestamp.seconds.isFinite {
-                timestamps.append(timestamp.seconds)
-            }
-            sampleCount += 1
-            if Task.isCancelled { return (true, false) }
-            if sampleCount >= cap { break }
+        } catch {
+            return (true, false)
         }
         // Decode order is not presentation order: a B-frame stream yields
         // timestamps out of order. Sort before measuring intervals, and skip
@@ -743,7 +753,8 @@ final class MediaPlaybackModel {
         }
     }
 
-    nonisolated private static func scanTimecode(
+    /// Internal so the provider migration can be exercised with fixtures.
+    nonisolated static func scanTimecode(
         url: URL,
         trackID: CMPersistentTrackID
     ) async -> [MediaTimecode.SourceSegment] {
@@ -757,105 +768,121 @@ final class MediaPlaybackModel {
         guard let reader = try? AVAssetReader(asset: asset) else { return [] }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
         guard reader.canAdd(output) else { return [] }
-        reader.add(output)
-        guard reader.startReading() else { return [] }
+        let provider = reader.outputProvider(for: output)
+        do {
+            try reader.start()
+        } catch {
+            return []
+        }
         defer {
             reader.cancelReading()
         }
 
         var segments: [MediaTimecode.SourceSegment] = []
-        // The first tmcd sample can be an empty marker; the frame number is
-        // in the next sample. Skip anything without a format and a full
-        // sample.
-        while let sample = output.copyNextSampleBuffer() {
-            if Task.isCancelled { return [] }
-            guard let block = CMSampleBufferGetDataBuffer(sample),
-                  let format = CMSampleBufferGetFormatDescription(sample)
-            else {
-                continue
-            }
-            // The format subtype decides the sample width. The buffer length
-            // is not authoritative: a 32-bit sample may be padded, and a
-            // counter sample is not a frame number at all.
-            let subtype = CMFormatDescriptionGetMediaSubType(format)
-            let width: Int
-            switch subtype {
-            case kCMTimeCodeFormatType_TimeCode64:
-                width = 8
-            case kCMTimeCodeFormatType_TimeCode32:
-                width = 4
-            default:
-                // Counter32/Counter64 samples count ticks, not frames; a
-                // frame-number label would be wrong.
-                continue
-            }
-            guard let frame = Self.timecodeFrameNumber(
-                in: block,
-                width: width
-            ) else {
-                continue
-            }
-            let dropFrame = (
-                CMTimeCodeFormatDescriptionGetTimeCodeFlags(format)
-                    & kCMTimeCodeFlag_DropFrame
-            ) != 0
-            let frameDuration = CMTimeCodeFormatDescriptionGetFrameDuration(
-                format
-            )
-            let frameRate = frameDuration.isNumeric
-                && frameDuration.seconds > 0
-                ? 1 / frameDuration.seconds
-                : nil
-            let quanta = Int(
-                CMTimeCodeFormatDescriptionGetFrameQuanta(format)
-            )
-            let presentation = CMSampleBufferGetPresentationTimeStamp(
-                sample
-            )
-            guard presentation.isNumeric,
-                  presentation.seconds.isFinite else {
-                continue
-            }
-            let sampleDuration = CMSampleBufferGetDuration(sample)
-            let duration = sampleDuration.isNumeric
-                && sampleDuration.seconds.isFinite
-                && sampleDuration.seconds > 0
-                ? sampleDuration.seconds
-                : nil
-            let segment = MediaTimecode.SourceSegment(
-                time: presentation.seconds,
-                startFrame: frame,
-                frameRate: frameRate,
-                frameQuanta: quanta > 0 ? quanta : nil,
-                isDropFrame: dropFrame,
-                duration: duration
-            )
-            // Keep one segment per run of contiguous timecode. A track with
-            // a sample per frame would otherwise store a segment per frame
-            // while carrying no new information.
-            if let previous = segments.last,
-               Self.isContiguous(previous, followedBy: segment) {
-                if let duration {
-                    let end = segment.time + duration
-                    segments[segments.count - 1] = MediaTimecode.SourceSegment(
-                        time: previous.time,
-                        startFrame: previous.startFrame,
-                        frameRate: previous.frameRate,
-                        frameQuanta: previous.frameQuanta,
-                        isDropFrame: previous.isDropFrame,
-                        duration: max(previous.duration ?? 0, end - previous.time)
-                    )
+        do {
+            // The first tmcd sample can be an empty marker; the frame number
+            // is in the next sample. Skip anything without a format and a
+            // full sample.
+            while let sample = try await provider.next() {
+                if Task.isCancelled { return [] }
+                let segment = sample.withUnsafeSampleBuffer { buffer in
+                    Self.timecodeSegment(from: buffer)
                 }
-            } else {
-                segments.append(segment)
+                guard let segment else { continue }
+                // Keep one segment per run of contiguous timecode. A track
+                // with a sample per frame would otherwise store a segment per
+                // frame while carrying no new information.
+                if let previous = segments.last,
+                   Self.isContiguous(previous, followedBy: segment) {
+                    if let duration = segment.duration {
+                        let end = segment.time + duration
+                        segments[segments.count - 1] =
+                            MediaTimecode.SourceSegment(
+                                time: previous.time,
+                                startFrame: previous.startFrame,
+                                frameRate: previous.frameRate,
+                                frameQuanta: previous.frameQuanta,
+                                isDropFrame: previous.isDropFrame,
+                                duration: max(
+                                    previous.duration ?? 0,
+                                    end - previous.time
+                                )
+                            )
+                    }
+                } else {
+                    segments.append(segment)
+                }
+                // A pathological file with a discontinuity at every sample
+                // is too irregular to label honestly; suppress source
+                // timecode rather than publish a truncated track.
+                if segments.count > 100_000 { return [] }
             }
-            // A pathological file with a discontinuity at every sample is
-            // too irregular to label honestly; suppress source timecode
-            // rather than publish a truncated track.
-            if segments.count > 100_000 { return [] }
+        } catch {
+            return []
         }
         segments.sort { $0.time < $1.time }
         return segments
+    }
+
+    /// Parses one timecode sample. The format subtype decides the sample
+    /// width; the buffer length is not authoritative because a 32-bit sample
+    /// may be padded, and a counter sample is not a frame number at all.
+    nonisolated private static func timecodeSegment(
+        from sample: CMSampleBuffer
+    ) -> MediaTimecode.SourceSegment? {
+        guard let block = CMSampleBufferGetDataBuffer(sample),
+              let format = CMSampleBufferGetFormatDescription(sample)
+        else {
+            return nil
+        }
+        let subtype = CMFormatDescriptionGetMediaSubType(format)
+        let width: Int
+        switch subtype {
+        case kCMTimeCodeFormatType_TimeCode64:
+            width = 8
+        case kCMTimeCodeFormatType_TimeCode32:
+            width = 4
+        default:
+            // Counter32/Counter64 samples count ticks, not frames; a
+            // frame-number label would be wrong.
+            return nil
+        }
+        guard let frame = timecodeFrameNumber(in: block, width: width) else {
+            return nil
+        }
+        let dropFrame = (
+            CMTimeCodeFormatDescriptionGetTimeCodeFlags(format)
+                & kCMTimeCodeFlag_DropFrame
+        ) != 0
+        let frameDuration = CMTimeCodeFormatDescriptionGetFrameDuration(
+            format
+        )
+        let frameRate = frameDuration.isNumeric
+            && frameDuration.seconds > 0
+            ? 1 / frameDuration.seconds
+            : nil
+        let quanta = Int(
+            CMTimeCodeFormatDescriptionGetFrameQuanta(format)
+        )
+        let presentation = CMSampleBufferGetPresentationTimeStamp(sample)
+        guard presentation.isNumeric,
+              presentation.seconds.isFinite else {
+            return nil
+        }
+        let sampleDuration = CMSampleBufferGetDuration(sample)
+        let duration = sampleDuration.isNumeric
+            && sampleDuration.seconds.isFinite
+            && sampleDuration.seconds > 0
+            ? sampleDuration.seconds
+            : nil
+        return MediaTimecode.SourceSegment(
+            time: presentation.seconds,
+            startFrame: frame,
+            frameRate: frameRate,
+            frameQuanta: quanta > 0 ? quanta : nil,
+            isDropFrame: dropFrame,
+            duration: duration
+        )
     }
 
     /// Copies exactly the sample's frame-number bytes out of the block

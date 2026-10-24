@@ -237,16 +237,24 @@ enum WaveformExtractor {
         guard reader.canAdd(output) else {
             throw WaveformError.cannotRead
         }
-        reader.add(output)
-        guard reader.startReading() else {
-            throw reader.error ?? WaveformError.cannotRead
+        let provider = reader.outputProvider(for: output)
+        do {
+            try reader.start()
+        } catch {
+            throw reader.error ?? error
         }
         defer { reader.cancelReading() }
 
         var accumulator = BucketAccumulator(duration: duration)
-        while let sample = output.copyNextSampleBuffer() {
-            try Task.checkCancellation()
-            accumulator.consume(sample)
+        do {
+            while let sample = try await provider.next() {
+                try Task.checkCancellation()
+                sample.withUnsafeSampleBuffer { buffer in
+                    accumulator.consume(buffer)
+                }
+            }
+        } catch {
+            throw reader.error ?? error
         }
 
         if reader.status == .failed {

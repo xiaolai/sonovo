@@ -182,7 +182,7 @@ final class SubtitleMediaPlayer {
             }
         }
         endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
             object: item,
             queue: .main
         ) { [weak self] _ in

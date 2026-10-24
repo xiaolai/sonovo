@@ -1,9 +1,9 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
     name: "Sonovo",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS(.v27)],
     products: [
         .executable(name: "Sonovo", targets: ["Sonovo"]),
         .library(name: "SonovoCore", targets: ["SonovoCore"])
@@ -99,7 +99,10 @@ let package = Package(
                 "Sonovo",
                 "SonovoCore"
             ],
-            path: "Tests/SonovoAppTests"
+            path: "Tests/SonovoAppTests",
+            resources: [
+                .copy("Fixtures")
+            ]
         )
     ]
 )

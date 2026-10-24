@@ -5,5 +5,5 @@
 /// without a window.
 public enum SonovoCore {
     /// The minimum macOS version the core is built against.
-    public static let minimumMacOSVersion = "26.0"
+    public static let minimumMacOSVersion = "27.0"
 }
