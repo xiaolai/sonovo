@@ -13,11 +13,17 @@ struct ProjectScanResult: Sendable {
     let isPartial: Bool
 }
 
+/// The scan boundary, so recovery tests can gate a scan and prove that
+/// `Project.load()` waits for the completed snapshot.
+protocol ProjectScanning: Sendable {
+    func scan(root: URL) -> ProjectScanResult
+}
+
 /// Pure, bounded folder scan. It never follows directory symlinks, resolves
 /// file symlinks and requires them to stay inside the root, and stops on a
 /// visited-entry cap so a tree of unsupported files cannot outrun the asset
 /// cap.
-struct ProjectScanner: Sendable {
+struct ProjectScanner: ProjectScanning {
     struct Limits: Sendable {
         var maximumDepth = 12
         var maximumAssets = 20_000

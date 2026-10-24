@@ -209,7 +209,6 @@ enum MediaTimecodeFormatter {
         guard drop.isFinite, perTenMinutes.isFinite,
               perMinute.isFinite, perDay.isFinite,
               drop >= 0,
-              let dropFrames = Int64(exactly: drop),
               let framesPer10Minutes = Int64(exactly: perTenMinutes),
               framesPer10Minutes > 0,
               let framesPerMinute = Int64(exactly: perMinute),

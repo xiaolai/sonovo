@@ -197,7 +197,7 @@ enum WaveformExtractor {
 
     static func extract(url: URL) async throws -> WaveformData {
         let task = Task.detached(priority: .userInitiated) {
-            try extractSync(url: url)
+            try await extractAsync(url: url)
         }
         // Cancelling the caller must cancel the detached decode too; its
         // per-sample check otherwise never observes the cancellation.
@@ -208,12 +208,14 @@ enum WaveformExtractor {
         }
     }
 
-    private static func extractSync(url: URL) throws -> WaveformData {
+    private static func extractAsync(url: URL) async throws -> WaveformData {
         let asset = AVURLAsset(url: url)
-        guard let track = asset.tracks(withMediaType: .audio).first else {
+        guard let track = (try? await asset.loadTracks(
+            withMediaType: .audio
+        ))?.first else {
             throw WaveformError.noAudioTrack
         }
-        let duration = asset.duration.seconds
+        let duration = (try? await asset.load(.duration))?.seconds ?? 0
         guard duration.isFinite, duration > 0 else {
             throw WaveformError.invalidDuration
         }

@@ -23,14 +23,6 @@ struct ProjectChipBar: View {
             menuButton
         }
         .frame(height: AppTheme.Layout.tabBarHeight)
-        .task {
-            // A terminal's live process is a Ghostty query, not an observable
-            // property. Poll only while the rail is visible.
-            while !Task.isCancelled {
-                state.workspace.refreshTerminalProcessStates()
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
         .popover(isPresented: $showingOverview, arrowEdge: .bottom) {
             ProjectOverviewView(state: state)
         }

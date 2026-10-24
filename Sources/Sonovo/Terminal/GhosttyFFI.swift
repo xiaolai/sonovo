@@ -96,9 +96,6 @@ enum GhosttyFFI {
         ghostty_app_set_color_scheme(app, scheme)
     }
 
-    /// Send a key event at the app level (for global keybinds).
-    @discardableResult
-
     /// Update the app configuration.
     static func appUpdateConfig(_ app: ghostty_app_t, config: ghostty_config_t) {
         ghostty_app_update_config(app, config)

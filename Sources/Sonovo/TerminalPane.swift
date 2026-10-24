@@ -7,6 +7,7 @@ struct TerminalPane: View {
     let availableHeight: CGFloat
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openWindow) private var openWindow
     @State private var focusToken = 0
 
     private var store: TerminalSessionsStore {
@@ -60,6 +61,11 @@ struct TerminalPane: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(terminalBackground)
+        .onAppear {
+            if isVisible {
+                focusToken += 1
+            }
+        }
         .onChange(of: state.terminalPresentation) { _, newValue in
             if newValue != .hidden {
                 focusToken += 1
@@ -86,11 +92,16 @@ struct TerminalPane: View {
             TerminalTabBar(store: store)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            BarIconButton(systemName: "list.bullet.rectangle", help: "Manage Sessions…") {
+                openWindow(id: "sessions")
+            }
+            .focusable(false)
+
             Menu {
                 Picker("Dock", selection: $state.terminalDock) {
-                    Text("Automatic").tag(TerminalDock.automatic)
-                    Text("Right").tag(TerminalDock.right)
-                    Text("Bottom").tag(TerminalDock.bottom)
+                    ForEach(TerminalDock.allCases) { dock in
+                        Text(dock.label).tag(dock)
+                    }
                 }
             } label: {
                 Image(systemName: "rectangle.split.2x1")

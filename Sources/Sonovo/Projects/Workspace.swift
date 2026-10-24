@@ -17,16 +17,19 @@ final class Workspace {
     var lastError: String?
 
     private let store: WorkspacePersisting
-    private let scanner: ProjectScanner
+    private let scanner: any ProjectScanning
     private let watchFactory: ProjectWatchFactory
     private let terminalEnvironment: TerminalEnvironment
     @ObservationIgnored private var mountObserver: NSObjectProtocol?
     @ObservationIgnored private var unmountObserver: NSObjectProtocol?
+    /// Notifies the hygiene layer that the open-project set changed. The
+    /// coordinator uses it to invalidate queued actions.
+    @ObservationIgnored var onKnownPathsChanged: (() -> Void)?
 
     init(
         demoProject: Project,
         store: WorkspacePersisting = UserDefaultsWorkspaceStore(),
-        scanner: ProjectScanner = ProjectScanner(),
+        scanner: any ProjectScanning = ProjectScanner(),
         watchFactory: @escaping ProjectWatchFactory = {
             FSEventSource(root: $0, onChange: $1)
         },
@@ -104,6 +107,9 @@ final class Workspace {
                 continue
             }
 
+            if available {
+                recordFolderIdentity(for: canonical)
+            }
             let project = available
                 ? Project(
                     folderURL: canonical,
@@ -147,6 +153,7 @@ final class Workspace {
             demoProject.activate()
         }
         recentPaths = store.recentPaths
+        onKnownPathsChanged?()
 
         for project in projects
         where !project.isOffline || project.id == activeProjectID {
@@ -185,6 +192,7 @@ final class Workspace {
 
         let selection = store.selections[project.id]
         let selectionRevision = project.selectionRevision
+        let tabRevision = project.tabRevision
         project.isRestoringSelection = true
         await project.load()
         project.isRestoringSelection = false
@@ -194,14 +202,16 @@ final class Workspace {
         guard projects.contains(where: { $0 === project }) else {
             return
         }
-        if project.selectionRevision != selectionRevision {
-            // The user changed the selection while the scan was running,
-            // including choosing a synthetic workspace tab or closing every
-            // tab. Persist that choice even when the project went offline
-            // during the scan: the next recovery must not treat the stored
-            // old selection as still valid. A nil selection is deliberate;
-            // assigning nil removes the stored path.
+        if project.selectionRevision != selectionRevision
+            || project.tabRevision != tabRevision {
+            // The user changed the selection or the open tabs while the scan
+            // was running, including choosing a synthetic workspace tab,
+            // closing an unselected tab, or closing every tab. Persist both
+            // choices even when the project went offline during the scan:
+            // the next recovery must not reopen a tab the user closed. A nil
+            // selection is deliberate; assigning nil removes the stored path.
             store.selections[project.id] = project.selectedAssetID
+            store.openTabs[project.id] = project.restorableTabIDs
             return
         }
         guard !project.isOffline else { return }
@@ -261,6 +271,7 @@ final class Workspace {
         }
 
         let volume = volumeIdentifier(for: canonical)
+        recordFolderIdentity(for: canonical)
         let project = Project(
             folderURL: canonical,
             expectedVolumeIdentifier: volume,
@@ -276,6 +287,7 @@ final class Workspace {
         if shouldActivate {
             activate(project)
         }
+        onKnownPathsChanged?()
         Task { @MainActor in
             await project.load()
         }
@@ -435,6 +447,7 @@ final class Workspace {
                 activateDemo()
             }
         }
+        onKnownPathsChanged?()
         return true
     }
 
@@ -444,6 +457,55 @@ final class Workspace {
         for project in allProjects {
             project.prepareForTermination()
         }
+    }
+
+    // MARK: - Folder identity
+
+    var hygieneKnownPaths: TmuxKnownPaths {
+        var paths = TmuxKnownPaths()
+        for project in projects {
+            paths.insertOpen(project.id)
+        }
+        for path in recentPaths {
+            paths.insertRecentClosed(path)
+        }
+        return paths
+    }
+
+    func folderIdentity(forPath path: String) -> FolderIdentityRecord? {
+        store.folderIdentities[TmuxKnownPaths.canonical(path)]
+    }
+
+    func folderIdentity(for project: Project) -> FolderIdentityRecord? {
+        folderIdentity(forPath: project.id)
+    }
+
+    /// A unique positive identity match among stored, non-open paths. More
+    /// than one match is ambiguous and returns nil; the UI falls back to
+    /// manual source selection.
+    func migrationSourceHint(for project: Project) -> String? {
+        guard let identity = folderIdentity(for: project) else {
+            return nil
+        }
+        let candidates = store.folderIdentities.filter { path, record in
+            path != project.id
+                && !projects.contains(where: { $0.id == path })
+                && FolderIdentity.matches(record, identity)
+        }
+        guard candidates.count == 1 else { return nil }
+        return candidates.first?.key
+    }
+
+    private func recordFolderIdentity(for url: URL) {
+        guard let identity = FolderIdentity.record(for: url) else {
+            return
+        }
+        let path = TmuxKnownPaths.canonical(url.path)
+        if let existing = store.folderIdentities[path],
+           FolderIdentity.matches(existing, identity) {
+            return
+        }
+        store.folderIdentities[path] = identity
     }
 
     // MARK: - Helpers

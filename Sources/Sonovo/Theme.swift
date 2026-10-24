@@ -56,6 +56,13 @@ enum AppTheme {
         static let urlBarMaxWidth: CGFloat = 420
         static let emptyDescriptionMaxWidth: CGFloat = 300
 
+        static let sessionsMinWidth: CGFloat = 340
+        static let sessionsDefaultWidth: CGFloat = 880
+        static let sessionsDefaultHeight: CGFloat = 620
+        static let sessionsDetailWidth: CGFloat = 280
+        static let sessionsListMinWidth: CGFloat = 340
+        static let sessionsNarrowListMinHeight: CGFloat = 240
+
         static let settingsWidth: CGFloat = 720
         static let settingsHeight: CGFloat = 500
         static let settingsSidebarWidth: CGFloat = 184
@@ -64,7 +71,6 @@ enum AppTheme {
         static let settingsPickerNarrowWidth: CGFloat = 170
         static let settingsCustomShellWidth: CGFloat = 360
         static let settingsPickerTinyWidth: CGFloat = 130
-        static let settingsPickerCompactWidth: CGFloat = 120
     }
 
     // MARK: - Spacing
@@ -409,6 +415,8 @@ enum AppTheme {
         /// Settings-preview slider defaults, as fractions of their ranges.
         static let foregroundIntensityDefault: Double = 0.48
         static let backgroundIntensityDefault: Double = 0.34
+        /// How far the chosen theme accent blends toward white for chrome.
+        static let accentBlendFactor: Double = 0.18
     }
 
     /// The editor canvas is the rounded, recessed surface inside the workspace.
@@ -491,6 +499,9 @@ enum AppTheme {
         static let progressWidth: CGFloat = 180
         static let renderButtonMinWidth: CGFloat = 140
         static let terminalTabMaxWidth: CGFloat = 150
+        static let sessionBadge: CGFloat = 7
+        static let sessionRowMinHeight: CGFloat = 34
+        static let sessionDetailLabelWidth: CGFloat = 108
         static let tabClose: CGFloat = 20
         static let terminalTabClose: CGFloat = 20
         static let menuIcon: CGFloat = 18
@@ -682,7 +693,6 @@ extension Color {
     static var appCard: Color { AppTheme.Palette.card }
     static var appText: Color { AppTheme.Palette.text }
     static var appLabel: Color { AppTheme.Palette.label }
-    static var appSecondaryLabel: Color { AppTheme.Palette.secondaryLabel }
     static var appTertiaryLabel: Color { AppTheme.Palette.tertiaryLabel }
     static var appSeparator: Color { AppTheme.Palette.separator }
 

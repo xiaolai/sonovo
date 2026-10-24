@@ -45,10 +45,22 @@ final class AppState {
     let production = Production.sample
     let transcript = SampleContent.transcript
     let workspace: Workspace
+    let hygiene: TmuxHygieneStore
+    let actionCoordinator: TmuxActionCoordinator?
+    let archive: TmuxArchiveStore?
+    let sessionsWindow: TmuxSessionsWindowModel
+    private(set) var cleanupScheduler: TmuxCleanupScheduler?
 
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
-    var editorMode: EditorMode = .player
+    private var storedEditorMode: EditorMode = .player
+    /// Compare and Transcript are demo surfaces that need an audio or video
+    /// tab. The getter clamps the mode for every navigation path, including
+    /// the Project methods that do not pass through `selectTab`.
+    var editorMode: EditorMode {
+        get { canUseMediaModes ? storedEditorMode : .player }
+        set { storedEditorMode = newValue }
+    }
     var inspectorVisible = true
     var showTabBar = true
     var showBreadcrumbs = Preferences.showBreadcrumbs {
@@ -115,40 +127,39 @@ final class AppState {
 
     var liveProject: Project { workspace.liveProject }
 
-    /// The one activation path for UI and commands. Leaving the demo must
-    /// stop its transport; a hidden demo host must not keep playing audio.
-    func activateProject(_ project: Project) {
-        if liveProject.isDemo, !project.isDemo {
+    /// Every active-project transition passes through here. Leaving the demo
+    /// stops its transport; staying on the demo leaves playback alone.
+    private func withProjectTransition<T>(_ change: () -> T) -> T {
+        let wasDemo = liveProject.isDemo
+        let result = change()
+        if wasDemo, !liveProject.isDemo {
             isPlaying = false
         }
-        workspace.activate(project)
+        return result
+    }
+
+    func activateProject(_ project: Project) {
+        withProjectTransition {
+            workspace.activate(project)
+        }
     }
 
     @discardableResult
     func openProject(at url: URL) -> Project? {
-        let wasDemo = liveProject.isDemo
-        guard let project = workspace.openProject(at: url) else {
-            return nil
+        withProjectTransition {
+            workspace.openProject(at: url)
         }
-        if wasDemo, !workspace.liveProject.isDemo {
-            isPlaying = false
-        }
-        return project
     }
 
     func activateNextProject() {
-        let wasDemo = liveProject.isDemo
-        guard let next = workspace.activateNext() else { return }
-        if wasDemo, !next.isDemo {
-            isPlaying = false
+        withProjectTransition {
+            _ = workspace.activateNext()
         }
     }
 
     func activatePreviousProject() {
-        let wasDemo = liveProject.isDemo
-        guard let previous = workspace.activatePrevious() else { return }
-        if wasDemo, !previous.isDemo {
-            isPlaying = false
+        withProjectTransition {
+            _ = workspace.activatePrevious()
         }
     }
     var markdown: MarkdownWorkspace { liveProject.markdown }
@@ -185,15 +196,137 @@ final class AppState {
             : liveProject.name
     }
 
+    private struct TerminalServices {
+        let hygiene: TmuxHygieneStore
+        let coordinator: TmuxActionCoordinator?
+        let archive: TmuxArchiveStore?
+        let environment: TerminalEnvironment
+    }
+
     init() {
-        let terminalEnvironment = Self.isRunningTests
-            ? TerminalEnvironment.disabled
-            : TerminalEnvironment.live(isEnabled: {
-                UserDefaults.standard.object(
-                    forKey: "sonovo.terminals.tmux"
-                ) as? Bool ?? true
-            })
-        let demo = Project.demo(
+        let runningTests = Self.isRunningTests
+        let boot = BootIdentity(launchID: UUID(), startedAt: Date())
+        let services = Self.makeTerminalServices(
+            boot: boot,
+            runningTests: runningTests
+        )
+        hygiene = services.hygiene
+        actionCoordinator = services.coordinator
+        archive = services.archive
+        workspace = Workspace(
+            demoProject: Self.makeDemoProject(
+                production: production,
+                terminalEnvironment: services.environment
+            ),
+            terminalEnvironment: services.environment
+        )
+        sessionsWindow = Self.makeSessionsWindow(services: services)
+        cleanupScheduler = services.coordinator.map {
+            TmuxCleanupScheduler(
+                hygiene: services.hygiene,
+                coordinator: $0
+            )
+        }
+        AppStateRegistry.active = self
+        applyLaunchEnvironment()
+        configureHygiene(runningTests: runningTests)
+    }
+
+    private static func makeTerminalServices(
+        boot: BootIdentity,
+        runningTests: Bool
+    ) -> TerminalServices {
+        if runningTests {
+            return TerminalServices(
+                hygiene: TmuxHygieneStore(
+                    transport: nil,
+                    boot: boot,
+                    ledgerStore: ObservedIdleLedgerStore(url: nil),
+                    registry: TmuxOwnershipRegistryStore(url: nil),
+                    settingsStore: TmuxHygieneSettingsStore(
+                        defaults: UserDefaults(
+                            suiteName:
+                                "sonovo.tests.hygiene.\(UUID().uuidString)"
+                        ) ?? .standard
+                    ),
+                    budgetStore: TmuxCleanupBudgetStore(url: nil),
+                    reportStore: TmuxCleanupReportStore(url: nil)
+                ),
+                coordinator: nil,
+                archive: nil,
+                environment: .disabled
+            )
+        }
+
+        let settingsStore = TmuxHygieneSettingsStore()
+        let archive = TmuxArchiveStore(
+            isEnabled: settingsStore.settings.captureEnabled,
+            retentionDays: settingsStore.settings.retentionDays
+        )
+        let registry = TmuxOwnershipRegistryStore()
+        let ledger = ObservedIdleLedgerStore()
+        let coordinator = TmuxActionCoordinator(
+            transport: LiveTmux.shared,
+            boot: boot,
+            archive: archive,
+            registry: registry,
+            ledger: ledger
+        )
+        let hygiene = TmuxHygieneStore(
+            transport: LiveTmux.shared,
+            boot: boot,
+            ledgerStore: ledger,
+            registry: registry,
+            settingsStore: settingsStore,
+            archive: archive
+        )
+        hygiene.uncertainProvider = {
+            [weak coordinator] identity in
+            coordinator?.isUncertain(identity) ?? true
+        }
+        coordinator.killSwitchProvider = {
+            [weak hygiene] in
+            guard let hygiene else { return true }
+            return !hygiene.settings.isArmed
+        }
+        // Automatic End always captures and commits first. The archive being
+        // off is a refusal, never a reason to delete without one.
+        coordinator.captureRequiredProvider = { true }
+        coordinator.automaticEligibilityProvider = {
+            [weak hygiene] identity in
+            hygiene?.attributes(for: identity)?.autoEligibility.eligible
+                ?? false
+        }
+        hygiene.onPolicyChanged = { [weak coordinator] in
+            coordinator?.invalidatePolicy()
+        }
+        coordinator.onActionCompleted = { [weak hygiene] in
+            guard let hygiene else { return }
+            hygiene.invalidateScan()
+            Task { await hygiene.refresh() }
+        }
+        archive.isEnabled = settingsStore.settings.captureEnabled
+        archive.setRetentionDays(settingsStore.settings.retentionDays)
+        return TerminalServices(
+            hygiene: hygiene,
+            coordinator: coordinator,
+            archive: archive,
+            environment: TerminalEnvironment.live(
+                isEnabled: {
+                    UserDefaults.standard.object(
+                        forKey: "sonovo.terminals.tmux"
+                    ) as? Bool ?? true
+                },
+                coordinator: { [weak coordinator] in coordinator }
+            )
+        )
+    }
+
+    private static func makeDemoProject(
+        production: Production,
+        terminalEnvironment: TerminalEnvironment
+    ) -> Project {
+        Project.demo(
             production: production,
             markdown: MarkdownWorkspace(),
             subtitles: SubtitleWorkspace(),
@@ -206,12 +339,26 @@ final class AppState {
             ),
             sampleDocuments: SampleProjectDocuments.live()
         )
-        workspace = Workspace(
-            demoProject: demo,
-            terminalEnvironment: terminalEnvironment
-        )
-        AppStateRegistry.active = self
+    }
 
+    private static func makeSessionsWindow(
+        services: TerminalServices
+    ) -> TmuxSessionsWindowModel {
+        TmuxSessionsWindowModel(
+            hygiene: services.hygiene,
+            coordinator: services.coordinator,
+            archive: services.archive,
+            migration: TmuxMigrationModel(
+                reportStore: TmuxMigrationReportStore(
+                    url: TmuxMigrationReportStore.defaultURL()
+                )
+            )
+        )
+    }
+
+    /// Launch-only presentation and demo environment. Kept out of `init` so
+    /// construction and launch policy can be read independently.
+    private func applyLaunchEnvironment() {
         let environment = ProcessInfo.processInfo.environment
         let demoMode = environment["SONOVO_DEMO_TAB"] != nil
             || environment["SONOVO_DEMO_MODEL"] != nil
@@ -220,30 +367,140 @@ final class AppState {
         if !Self.isRunningTests, !demoMode {
             workspace.restore()
         }
-
         if demoMode {
             workspace.activateDemo()
         }
         if let demoAssetID = environment["SONOVO_DEMO_TAB"],
            production.asset(id: demoAssetID) != nil {
-            demo.openAsset(id: demoAssetID)
+            workspace.demoProject.openAsset(id: demoAssetID)
         }
-
         if let rawMode = environment["SONOVO_DEMO_MODE"],
            let mode = EditorMode(rawValue: rawMode) {
             editorMode = mode
         }
-
         if let rawTerminal = environment["SONOVO_DEMO_TERMINAL"] {
             let normalized = rawTerminal == "half" ? "split" : rawTerminal
             if let presentation = TerminalPresentation(rawValue: normalized) {
                 terminalPresentation = presentation
             }
         }
-
         if environment["SONOVO_DEMO_MODEL"] != nil {
             showModel3DWorkspace()
         }
+    }
+
+    private func configureHygiene(runningTests: Bool) {
+        let store = hygiene
+        let workspace = workspace
+        store.knownPathsProvider = { [weak workspace] in
+            workspace?.hygieneKnownPaths ?? TmuxKnownPaths()
+        }
+        workspace.onKnownPathsChanged = { [weak self] in
+            guard let self else { return }
+            self.hygiene.knownPaths = self.workspace.hygieneKnownPaths
+            self.hygiene.recomputeAttributes()
+            self.actionCoordinator?.invalidateWorkspace()
+        }
+        sessionsWindow.knownPathsProvider = { [weak workspace] in
+            workspace?.hygieneKnownPaths ?? TmuxKnownPaths()
+        }
+        sessionsWindow.projectChoices = { [weak self] in
+            self?.projectChoices() ?? []
+        }
+        sessionsWindow.openSession = { [weak self] observation in
+            self?.openTmuxSession(observation) ?? false
+        }
+        sessionsWindow.folderIdentity = { [weak self] path in
+            self?.workspace.folderIdentity(forPath: path)
+        }
+        sessionsWindow.migrationSourceHint = { [weak self] projectID in
+            guard let self,
+                  let project = self.workspace.projects.first(where: {
+                      $0.id == projectID
+                  }) else {
+                return nil
+            }
+            return self.workspace.migrationSourceHint(for: project)
+        }
+        sessionsWindow.reserveNames = { [weak self] names in
+            self?.forAllTerminalStores { $0.reserveSessionNames(names) }
+        }
+        sessionsWindow.releaseNames = { [weak self] names in
+            self?.forAllTerminalStores { $0.releaseSessionNames(names) }
+        }
+        sessionsWindow.rebindTabs = { [weak self] rebind in
+            self?.rebindAdoptedTabs(rebind)
+        }
+        if !runningTests {
+            store.startCadence()
+            cleanupScheduler?.start()
+        }
+    }
+
+    private func forAllTerminalStores(
+        _ body: (TerminalSessionsStore) -> Void
+    ) {
+        for project in workspace.allProjects {
+            body(project.terminalSessions)
+        }
+    }
+
+    /// Adoption rebinds across both terminal stores: the source tab is
+    /// removed (never killed), and the destination project gets an
+    /// attach-only tab for the renamed session. Restarting a stale source
+    /// tab can no longer recreate the old session.
+    private func rebindAdoptedTabs(_ rebind: AdoptedTabRebind) {
+        forAllTerminalStores { store in
+            store.detachTab(named: rebind.oldName)
+        }
+        let canonical = TmuxKnownPaths.canonical(rebind.destinationPath)
+        guard let destination = workspace.projects.first(where: {
+            TmuxKnownPaths.canonical($0.id) == canonical
+        }) else {
+            return
+        }
+        destination.terminalSessions.attachExistingSession(
+            named: rebind.newName
+        )
+    }
+
+    private func projectChoices() -> [SessionsProjectChoice] {
+        workspace.projects.filter { !$0.isOffline }.map { project in
+            SessionsProjectChoice(
+                id: project.id,
+                name: project.name,
+                prefix: TmuxNaming.prefix(
+                    projectKey: project.id,
+                    projectName: project.name
+                ),
+                identity: workspace.folderIdentity(for: project)
+            )
+        }
+    }
+
+    /// Open from the Sessions window is attach-only: it selects or appends a
+    /// tab in the project that verifiably owns the session. It never creates
+    /// a session or a project.
+    func openTmuxSession(
+        _ observation: TmuxSessionObservation
+    ) -> Bool {
+        guard let path = observation.ownership.verifiedProjectPath else {
+            return false
+        }
+        let canonical = TmuxKnownPaths.canonical(path)
+        guard let project = workspace.projects.first(where: {
+            TmuxKnownPaths.canonical($0.id) == canonical
+        }), !project.isOffline else {
+            return false
+        }
+        activateProject(project)
+        let attached = project.terminalSessions.attachExistingSession(
+            named: observation.name
+        )
+        if attached {
+            terminalPresentation = .split
+        }
+        return attached
     }
 
     private static var isRunningTests: Bool {
@@ -378,11 +635,6 @@ final class AppState {
 
     func selectTab(_ id: String) {
         liveProject.selectTab(id)
-        // One eligibility rule for every navigation path: media modes
-        // require an audio or video asset.
-        if !canUseMediaModes {
-            editorMode = .player
-        }
     }
 
     func selectTranscript(_ id: String) {
@@ -440,6 +692,21 @@ final class AppState {
             owner: owner
         ) { project in
             project.subtitles.select(document)
+        }
+    }
+
+    /// Brings a specific model to the front. Converting or reloading the
+    /// selected model must not leave another model's tab visible.
+    func revealModelDocument(_ document: Model3DDocument) {
+        let owner = workspace.allProjects.first { project in
+            project.models.documents.contains { $0 === document }
+        }
+        revealDocument(
+            kind: .model3d,
+            url: document.sourceURL,
+            owner: owner
+        ) { project in
+            project.models.select(document)
         }
     }
 
@@ -616,6 +883,9 @@ final class AppState {
     }
 
     func prepareForTermination() {
+        // No scan or automatic action may start on quit.
+        hygiene.stopCadence()
+        cleanupScheduler?.stop()
         workspace.prepareForTermination()
     }
 

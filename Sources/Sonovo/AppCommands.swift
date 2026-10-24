@@ -163,7 +163,7 @@ struct SubtitleCommands: Commands {
                 guard let document = state.subtitles.selectedDocument else {
                     return
                 }
-                state.showSubtitleWorkspace()
+                state.revealSubtitleDocument(document)
                 state.subtitles.presentOpenMediaPanel(for: document)
             }
             .disabled(state.subtitles.selectedDocument == nil)
@@ -202,7 +202,7 @@ struct Model3DCommands: Commands {
                 guard let document = state.models.selectedDocument else {
                     return
                 }
-                state.showModel3DWorkspace()
+                state.revealModelDocument(document)
                 state.models.convert(document)
             }
             .disabled(
@@ -223,9 +223,16 @@ struct Model3DCommands: Commands {
 @MainActor
 struct TerminalCommands: Commands {
     @Bindable var state: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandMenu("Terminal") {
+            Button("Manage Sessions…") {
+                openWindow(id: "sessions")
+            }
+
+            Divider()
+
             Button("Toggle Terminal") {
                 state.terminalPresentation =
                     state.terminalPresentation == .hidden ? .split : .hidden

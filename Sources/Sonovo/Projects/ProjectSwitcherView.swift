@@ -25,6 +25,15 @@ struct ProjectSwitcherView: View {
                     }
             }
         }
+        .task {
+            // A terminal's live process is a Ghostty/tmux query, not an
+            // observable property. Poll while either switcher presentation
+            // is visible; the chip rail alone is hidden for a single project.
+            while !Task.isCancelled {
+                state.workspace.refreshTerminalProcessStates()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     private var compactSwitcher: some View {

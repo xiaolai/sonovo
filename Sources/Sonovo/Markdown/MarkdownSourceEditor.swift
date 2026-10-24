@@ -21,8 +21,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     private let weakSelf = WeakController()
-    nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
-    nonisolated(unsafe) private var preferenceObserver: NSObjectProtocol?
+    private var scrollObserver: NSObjectProtocol?
+    private var preferenceObserver: NSObjectProtocol?
     private var visibleHighlightTask: Task<Void, Never>?
 
     private let parseService: MarkdownParseService
@@ -102,7 +102,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         syncFromDocument()
     }
 
-    deinit {
+    isolated deinit {
         if let scrollObserver {
             NotificationCenter.default.removeObserver(scrollObserver)
         }
@@ -334,7 +334,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         let upper = min(length, location + max(0, selected.length))
         textView.setSelectedRange(NSRange(location: location, length: upper - location))
 
-        if let range = NSRange(location: location, length: upper - location).toRange() {
+        if let range = Range(NSRange(location: location, length: upper - location)) {
             document.selection = range
         }
     }
@@ -397,7 +397,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 return
             }
         }
-        if let range = textView.selectedRange().toRange() {
+        if let range = Range(textView.selectedRange()) {
             document.selection = range
         }
 
@@ -415,7 +415,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        if let range = textView.selectedRange().toRange() {
+        if let range = Range(textView.selectedRange()) {
             document.selection = range
         }
     }
@@ -444,7 +444,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             do {
                 let context = MarkdownCommandContext(
                     source: self.textView.string,
-                    selection: self.textView.selectedRange().toRange() ?? 0..<0,
+                    selection: Range(self.textView.selectedRange()) ?? 0..<0,
                     isReadOnly: self.document.isReadOnly,
                     hasMarkedText: self.textView.hasMarkedText(),
                     mode: self.document.mode

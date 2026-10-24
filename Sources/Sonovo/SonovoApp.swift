@@ -43,6 +43,19 @@ struct SonovoApp: App {
             ProjectCommands(state: state)
         }
 
+        Window("Sonovo Sessions", id: "sessions") {
+            TmuxSessionsWindow(model: state.sessionsWindow)
+                .environment(state)
+                .tint(workspaceTheme.accent)
+                .preferredColorScheme(preferredColorScheme)
+                .background(WindowChromeConfigurator())
+        }
+        .defaultSize(
+            width: AppTheme.Layout.sessionsDefaultWidth,
+            height: AppTheme.Layout.sessionsDefaultHeight
+        )
+        .windowToolbarStyle(.unified)
+
         Settings {
             SettingsView(state: state)
                 .environment(state)
@@ -65,7 +78,7 @@ struct SonovoApp: App {
         return WorkspaceTheme(
             accent: AppTheme.blendedAccent(
                 base,
-                fraction: foregroundIntensity * 0.18
+                fraction: foregroundIntensity * AppTheme.Preferences.accentBlendFactor
             ),
             wash: base,
             backgroundIntensity: backgroundIntensity
@@ -180,25 +193,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 
+@MainActor
 private func configureWindowChrome(_ window: NSWindow) {
     applyToolbarChrome(window)
-    // SwiftUI can install the toolbar after the window first appears; the
-    // separator returns unless the setting is applied once it exists.
-    DispatchQueue.main.async { [weak window] in
-        guard let window else { return }
-        applyToolbarChrome(window)
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak window] in
-        guard let window else { return }
-        applyToolbarChrome(window)
-    }
 }
 
-
-
+@MainActor
 private func applyToolbarChrome(_ window: NSWindow) {
     window.titlebarSeparatorStyle = .none
-    window.toolbar?.showsBaselineSeparator = false
     hideTitlebarHairlines(in: window.contentView?.superview)
 }
 
@@ -206,44 +208,84 @@ private func applyToolbarChrome(_ window: NSWindow) {
 /// titlebar background, even with `titlebarSeparatorStyle = .none`. Hiding
 /// those thin solid layers removes the line; the titlebar material, glass,
 /// and controls are untouched. Matching is structural and fails closed.
+@MainActor
 private func hideTitlebarHairlines(in view: NSView?) {
     guard let view else { return }
-    if String(describing: type(of: view)) == "NSTitlebarBackgroundView" {
-        hideHairlineLayers(in: view.layer)
+    if isTitlebarBackgroundView(view) {
+        hideHairlineLayers(in: view.layer, minimumWidth: view.bounds.width)
     }
     for subview in view.subviews {
         hideTitlebarHairlines(in: subview)
     }
 }
 
-private func hideHairlineLayers(in layer: CALayer?) {
-    guard let layer else { return }
+/// The AppKit internal view that hosts the titlebar material. Isolated here
+/// so the implementation-name fallback is one small, replaceable check.
+@MainActor
+private func isTitlebarBackgroundView(_ view: NSView) -> Bool {
+    String(describing: type(of: view)) == "NSTitlebarBackgroundView"
+}
+
+@MainActor
+private func hideHairlineLayers(
+    in layer: CALayer?,
+    minimumWidth: CGFloat
+) {
+    guard let layer, minimumWidth > 0 else { return }
+    // Only a layer spanning at least half the titlebar can be the separator.
+    // Button and control borders are narrow and must not be hidden.
     if layer.frame.height > 0,
        layer.frame.height <= 1,
-       layer.backgroundColor != nil {
+       layer.backgroundColor != nil,
+       layer.frame.width >= minimumWidth * 0.5 {
         layer.isHidden = true
     }
     for sublayer in layer.sublayers ?? [] {
-        hideHairlineLayers(in: sublayer)
+        hideHairlineLayers(in: sublayer, minimumWidth: minimumWidth)
     }
 }
 
 private struct WindowChromeConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            if let window = view.window {
-                configureWindowChrome(window)
+    /// Coalesces the immediate and delayed chrome passes. SwiftUI can update
+    /// this view many times before the toolbar exists; only the newest
+    /// generation is allowed to apply.
+    @MainActor
+    final class Coordinator {
+        weak var view: NSView?
+        private var generation = 0
+
+        func schedule(_ view: NSView) {
+            self.view = view
+            generation &+= 1
+            let token = generation
+            Task { @MainActor [weak self] in
+                self?.apply(token)
+            }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                self?.apply(token)
             }
         }
+
+        private func apply(_ token: Int) {
+            guard token == generation, let window = view?.window else {
+                return
+            }
+            configureWindowChrome(window)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.schedule(view)
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async {
-            if let window = view.window {
-                configureWindowChrome(window)
-            }
-        }
+        context.coordinator.schedule(view)
     }
 }

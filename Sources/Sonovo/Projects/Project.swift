@@ -54,13 +54,17 @@ final class Project: Identifiable {
     /// deliberate choice (including clearing the selection) from its own
     /// work.
     private(set) var selectionRevision: UInt64 = 0
+    /// Counts tab-set changes that leave the selection alone, such as closing
+    /// an unselected tab. Recovery compares it so a deliberate close is not
+    /// undone by the saved tab list.
+    private(set) var tabRevision: UInt64 = 0
     /// True only while scan reconciliation mutates selection synchronously.
     private var isApplyingScan = false
 
     /// Workspace persistence hook. Called when the selection changes.
     var onSelectionChanged: (() -> Void)?
 
-    private let scanner: ProjectScanner
+    private let scanner: any ProjectScanning
     private let watchFactory: ProjectWatchFactory
     private let sampleDocuments: SampleProjectDocuments?
     private(set) var watcher: ProjectWatching?
@@ -73,6 +77,7 @@ final class Project: Identifiable {
     private var sharedReservedDestinations: [String: UUID] = [:]
     private var scanInFlight = false
     private var rescanRequested = false
+    private var scanSettlementWaiters: [CheckedContinuation<Void, Never>] = []
     /// Invalidates an in-flight scan when the project goes offline or closes.
     private var lifecycleGeneration: UInt64 = 0
     /// A removed project must never restart a queued scan or apply results.
@@ -123,7 +128,7 @@ final class Project: Identifiable {
         selectedAssetID: String?,
         availability: Availability,
         expectedVolumeIdentifier: String?,
-        scanner: ProjectScanner,
+        scanner: any ProjectScanning,
         watchFactory: @escaping ProjectWatchFactory,
         sampleDocuments: SampleProjectDocuments?
     ) {
@@ -262,7 +267,7 @@ final class Project: Identifiable {
     convenience init(
         folderURL: URL,
         expectedVolumeIdentifier: String? = nil,
-        scanner: ProjectScanner = ProjectScanner(),
+        scanner: any ProjectScanning = ProjectScanner(),
         watchFactory: @escaping ProjectWatchFactory = {
             FSEventSource(root: $0, onChange: $1)
         },
@@ -282,7 +287,7 @@ final class Project: Identifiable {
         offlinePath: String,
         reason: String,
         expectedVolumeIdentifier: String? = nil,
-        scanner: ProjectScanner = ProjectScanner(),
+        scanner: any ProjectScanning = ProjectScanner(),
         watchFactory: @escaping ProjectWatchFactory = {
             FSEventSource(root: $0, onChange: $1)
         },
@@ -305,7 +310,7 @@ final class Project: Identifiable {
         folderBackedRoot root: URL,
         availability: Availability,
         expectedVolumeIdentifier: String?,
-        scanner: ProjectScanner,
+        scanner: any ProjectScanning,
         watchFactory: @escaping ProjectWatchFactory,
         terminalEnvironment: TerminalEnvironment
     ) {
@@ -384,6 +389,27 @@ final class Project: Identifiable {
         guard !isDemo, !isInvalidated, let root else { return }
         startWatcherIfNeeded(root: root)
         await performScan(root: root)
+        // A scan already in flight makes performScan queue one rescan and
+        // return. Recovery must wait for the snapshot that includes that
+        // rescan, not continue against the previous index.
+        await waitForScanSettlement()
+    }
+
+    private func waitForScanSettlement() async {
+        while scanInFlight || rescanRequested {
+            await withCheckedContinuation { continuation in
+                scanSettlementWaiters.append(continuation)
+            }
+        }
+    }
+
+    private func settleScanIfIdle() {
+        guard !scanInFlight, !rescanRequested else { return }
+        let waiters = scanSettlementWaiters
+        scanSettlementWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func startWatcherIfNeeded(root: URL) {
@@ -428,7 +454,10 @@ final class Project: Identifiable {
     }
 
     private func performScan(root: URL) async {
-        guard !isInvalidated else { return }
+        guard !isInvalidated else {
+            settleScanIfIdle()
+            return
+        }
         let generation = lifecycleGeneration
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(
@@ -449,6 +478,7 @@ final class Project: Identifiable {
             return
         }
         scanInFlight = true
+        defer { settleScanIfIdle() }
         let scanner = scanner
         let result = await Task.detached(priority: .userInitiated) {
             scanner.scan(root: root)
@@ -786,6 +816,11 @@ final class Project: Identifiable {
         selectionRevision &+= 1
     }
 
+    private func noteTabChange() {
+        guard !isApplyingScan else { return }
+        tabRevision &+= 1
+    }
+
     func openAsset(_ asset: ProjectAsset) {
         noteSelectionChange()
         let path = MarkdownSecurity.canonical(asset.url).path
@@ -1020,6 +1055,7 @@ final class Project: Identifiable {
             return
         }
         openTabs.remove(at: index)
+        noteTabChange()
         guard selectedTabID == id else { return }
         noteSelectionChange()
         if openTabs.isEmpty {
@@ -1381,6 +1417,7 @@ final class Project: Identifiable {
         guard !ids.isEmpty else { return }
         let removedSelected = ids.contains(selectedTabID)
         openTabs.removeAll { ids.contains($0.id) }
+        noteTabChange()
         noteSelectionChange()
         if removedSelected {
             if let first = openTabs.first {
@@ -1526,6 +1563,7 @@ final class Project: Identifiable {
         let removedSelected = ids.contains(selectedTabID)
         let previousSelection = selectedTabID
         openTabs.removeAll { ids.contains($0.id) }
+        noteTabChange()
         if removedSelected {
             selectedTabID = ""
             selectedAssetID = nil
@@ -1577,6 +1615,7 @@ final class Project: Identifiable {
         }
         let removedSelected = ids.contains(selectedTabID)
         openTabs.removeAll { ids.contains($0.id) }
+        noteTabChange()
         if removedSelected {
             selectedTabID = ""
             selectedAssetID = nil

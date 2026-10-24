@@ -121,6 +121,63 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertTrue(workspace.projects.isEmpty)
     }
 
+    func testClosingAnUnselectedTabBumpsTheTabRevisionOnly() async throws {
+        let root = try makeRoot(files: ["a.md": "a", "b.md": "b"])
+        let workspace = makeWorkspace()
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        let loaded = await waitUntil { project.assets.count == 2 }
+        XCTAssertTrue(loaded)
+        let a = try XCTUnwrap(project.assets.first { $0.name == "a.md" })
+        let b = try XCTUnwrap(project.assets.first { $0.name == "b.md" })
+        project.openAsset(a)
+        project.openAsset(b)
+        XCTAssertEqual(project.selectedAssetID, b.id)
+        let tabs = project.tabRevision
+        let selection = project.selectionRevision
+
+        await project.closeTab(a.id)
+
+        XCTAssertEqual(project.selectedAssetID, b.id)
+        XCTAssertEqual(project.selectionRevision, selection)
+        XCTAssertEqual(project.tabRevision, tabs + 1)
+        XCTAssertFalse(project.openTabs.contains { $0.assetID == a.id })
+    }
+
+    func testLoadWaitsForInFlightScanAndQueuedRescan() async throws {
+        let root = try makeRoot(files: ["a.md": "a"])
+        let scanner = GatedScanner()
+        let project = Project(
+            folderURL: root,
+            scanner: scanner,
+            watchFactory: { _, _ in TestProjectWatcher() }
+        )
+        let first = Task { await project.load() }
+        let startDeadline = Date().addingTimeInterval(2)
+        while !scanner.hasStarted, Date() < startDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(scanner.hasStarted)
+
+        let completed = CompletionFlag()
+        let second = Task {
+            await project.load()
+            await completed.mark()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let returnedEarly = await completed.isSet()
+        XCTAssertFalse(
+            returnedEarly,
+            "A load queued behind an in-flight scan returned early."
+        )
+
+        scanner.release()
+        await first.value
+        await second.value
+        let finishedAfterRelease = await completed.isSet()
+        XCTAssertTrue(finishedAfterRelease)
+        XCTAssertEqual(project.assets.map(\.name), ["a.md"])
+    }
+
     func testExpectedVolumeMismatchKeepsTheProjectOffline() async throws {
         let root = try makeRoot(files: ["a.md": "a"])
         let project = Project(
@@ -358,6 +415,29 @@ final class WorkspaceTests: XCTestCase {
 
     // MARK: - Helpers
 
+    func testMigrationSourceHintRequiresAUniqueIdentityMatch() throws {
+        let root = try makeRoot(files: ["a.md": "a"])
+        let store = InMemoryWorkspaceStore()
+        let workspace = makeWorkspace(store: store)
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        XCTAssertNotNil(workspace.folderIdentity(for: project))
+
+        let identity = FolderIdentityRecord(
+            volumeUUID: "VOLUME",
+            fileResourceIdentifier: "RESOURCE",
+            capturedAt: Date(),
+            provenance: .observed
+        )
+        store.folderIdentities[project.id] = identity
+        store.folderIdentities["/tmp/old-one"] = identity
+        XCTAssertEqual(
+            workspace.migrationSourceHint(for: project),
+            "/tmp/old-one"
+        )
+        store.folderIdentities["/tmp/old-two"] = identity
+        XCTAssertNil(workspace.migrationSourceHint(for: project))
+    }
+
     private func makeWorkspace(
         store: WorkspacePersisting = InMemoryWorkspaceStore(),
         watchFactory: @escaping ProjectWatchFactory = { _, _ in
@@ -411,6 +491,42 @@ final class WorkspaceTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(20))
         }
         return condition()
+    }
+}
+
+private actor CompletionFlag {
+    private var value = false
+
+    func mark() { value = true }
+    func isSet() -> Bool { value }
+}
+
+/// Blocks the first scan so a second load arrives while one is in flight.
+private final class GatedScanner: ProjectScanning, @unchecked Sendable {
+    private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var calls = 0
+    private var didStart = false
+    private let scanner = ProjectScanner()
+
+    var hasStarted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didStart
+    }
+
+    func scan(root: URL) -> ProjectScanResult {
+        lock.lock()
+        calls += 1
+        let call = calls
+        if call == 1 { didStart = true }
+        lock.unlock()
+        if call == 1 { gate.wait() }
+        return scanner.scan(root: root)
+    }
+
+    func release() {
+        gate.signal()
     }
 }
 

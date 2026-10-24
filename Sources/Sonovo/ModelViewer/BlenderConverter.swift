@@ -443,7 +443,9 @@ final class BlenderConverter: BlendConverting {
     }
 
     /// Reads bytes already buffered in a pipe without blocking.
-    private static func drainAvailable(_ handle: FileHandle) -> Data {
+    nonisolated private static func drainAvailable(
+        _ handle: FileHandle
+    ) -> Data {
         let descriptor = handle.fileDescriptor
         // Give the writer's final bytes a moment to reach the pipe. The
         // process has already exited; a surviving descendant that holds the

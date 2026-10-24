@@ -3,5 +3,20 @@
 // unique names and we use Ghostty for other things.
 module GhosttyKit {
     umbrella header "ghostty.h"
+    // The vt/ tree is a separate public C API. Its headers define some of the
+    // same enumerator names as ghostty.h, so including them in this umbrella
+    // would be a redefinition. Exclude them rather than leave Clang reporting
+    // every unreachable header on every build.
+    exclude header "ghostty/vt.h"
+    exclude header "ghostty/vt/allocator.h"
+    exclude header "ghostty/vt/color.h"
+    exclude header "ghostty/vt/key.h"
+    exclude header "ghostty/vt/key/encoder.h"
+    exclude header "ghostty/vt/key/event.h"
+    exclude header "ghostty/vt/osc.h"
+    exclude header "ghostty/vt/paste.h"
+    exclude header "ghostty/vt/result.h"
+    exclude header "ghostty/vt/sgr.h"
+    exclude header "ghostty/vt/wasm.h"
     export *
 }

@@ -58,14 +58,14 @@ final class MarkdownWorkspace {
     @ObservationIgnored
     private var autosave: AutosaveDriver<MarkdownDocument>!
     private var reservedDestinations: Set<String> = []
-    nonisolated(unsafe) private var workspaceWatcher: WorkspaceDirectoryWatcher?
+    private var workspaceWatcher: WorkspaceDirectoryWatcher?
     private var workspaceScanTask: Task<Void, Never>?
     @ObservationIgnored
     private var watcherRetryTask: Task<Void, Never>?
     private var workspaceScanGeneration = 0
-    nonisolated(unsafe) private var fileChangeObserver: NSObjectProtocol?
+    private var fileChangeObserver: NSObjectProtocol?
 
-    deinit {
+    isolated deinit {
         if let fileChangeObserver {
             NotificationCenter.default.removeObserver(fileChangeObserver)
         }

@@ -852,6 +852,7 @@ final class CodeWorkspace {
         watchers[document.id]?.stop()
         let id = document.id
         let watcher = MarkdownFileWatcher(fileURL: document.fileURL) {
+            [weak self] in
             // Never call back synchronously on the watcher queue: stop()
             // waits for that queue while holding the main actor.
             Task { @MainActor [weak self] in

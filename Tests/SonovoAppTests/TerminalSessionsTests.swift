@@ -123,8 +123,7 @@ final class TerminalSessionsTests: XCTestCase {
         )
         XCTAssertEqual(
             store.sessions[1].view.initialInput,
-            "launch:\(prefix)3:"
-                + FileManager.default.temporaryDirectory.path
+            "attach:\(prefix)3"
         )
 
         store.addSession()
@@ -241,11 +240,79 @@ final class TerminalSessionsTests: XCTestCase {
         XCTAssertTrue(direct.hasLiveDirectProcess)
     }
 
+    func testPerTabBadgeIsUnknownThenRunningThenIdle() async {
+        let prefix = TmuxNaming.prefix(
+            projectKey: "/tmp/project",
+            projectName: "Project"
+        )
+        let fake = FakeTmux()
+        let store = makeTmuxStore(fake: fake, path: "/tmp/project")
+        let session = store.sessions[0]
+        XCTAssertEqual(store.badge(for: session), .unknown)
+
+        fake.markRunning([prefix + "1"])
+        store.refreshProcessStates()
+        let deadline = Date().addingTimeInterval(2)
+        while store.badge(for: session) != .running, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(store.badge(for: session), .running)
+
+        fake.markRunning([])
+        store.refreshProcessStates()
+        let idleDeadline = Date().addingTimeInterval(2)
+        while store.badge(for: session) != .idle,
+              Date() < idleDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(store.badge(for: session), .idle)
+    }
+
+    func testTabEndRoutesThroughTheCoordinator() async {
+        let prefix = TmuxNaming.prefix(
+            projectKey: "/tmp/project",
+            projectName: "Project"
+        )
+        let name = prefix + "1"
+        let observation = TmuxTestData.observation(
+            name: name,
+            sessionID: "$1"
+        )
+        let service = FakeHygieneService(sessions: [observation])
+        let coordinator = TmuxActionCoordinator(
+            transport: service,
+            boot: TmuxTestData.boot,
+            uncertainStore: TmuxUncertainStore(url: nil)
+        )
+        let fake = FakeTmux(names: [name])
+        fake.identity = TmuxTestData.identity(
+            sessionID: observation.sessionID
+        )
+        let store = TerminalSessionsStore(
+            workingDirectory: FileManager.default.temporaryDirectory.path,
+            projectKey: "/tmp/project",
+            projectName: "Project",
+            terminalEnvironment: TerminalEnvironment(
+                tmux: fake,
+                isEnabled: { true },
+                coordinator: { coordinator }
+            )
+        )
+        let id = store.sessions[0].id
+        await store.endSession(id)
+        XCTAssertEqual(service.killRequests.count, 1)
+        XCTAssertEqual(service.killRequests[0].name, name)
+        XCTAssertTrue(store.sessions.isEmpty)
+    }
+
     private func makeTmuxStore(
         fake: FakeTmux,
         path: String
     ) -> TerminalSessionsStore {
-        TerminalSessionsStore(
+        if fake.identity == nil {
+            fake.identity = TmuxTestData.identity()
+        }
+        return TerminalSessionsStore(
             workingDirectory: FileManager.default.temporaryDirectory.path,
             projectKey: path,
             projectName: URL(fileURLWithPath: path).lastPathComponent,
@@ -265,9 +332,20 @@ private final class FakeTmux: TmuxControlling, @unchecked Sendable {
     private var running: Set<String> = []
     var killSucceeds = true
     private var namesUnavailable = false
+    var identity: TmuxSessionIdentity?
 
     init(names: [String] = []) {
         self.known = Set(names)
+    }
+
+    func attachOnlyInput(name: String) -> String {
+        "attach:\(name)"
+    }
+
+    func sessionIdentity(named name: String) -> TmuxSessionIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return known.contains(name) ? identity : nil
     }
 
     func failDiscovery() {

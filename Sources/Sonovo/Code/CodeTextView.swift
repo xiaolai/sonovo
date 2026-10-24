@@ -74,7 +74,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     private var pendingLine: Int?
     private var compositionBaseline: String?
     private var suppressSync = false
-    nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
+    private var scrollObserver: NSObjectProtocol?
     private var symbolTask: Task<Void, Never>?
     /// The language the current snapshot was lexed with. Save As can change
     /// the language without changing the revision or the text.
@@ -120,7 +120,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         observeDocument()
     }
 
-    deinit {
+    isolated deinit {
         if let scrollObserver {
             NotificationCenter.default.removeObserver(scrollObserver)
         }
@@ -317,7 +317,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         let upper = min(length, location + max(0, selected.length))
         let range = NSRange(location: location, length: upper - location)
         textView.setSelectedRange(range)
-        if let swiftRange = range.toRange() {
+        if let swiftRange = Range(range) {
             document.selection = swiftRange
         }
     }
@@ -383,8 +383,8 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
                 return
             }
         }
-        if let range = textView.selectedRange().toRange() {
-            document.selection = range
+        if let swiftRange = Range(textView.selectedRange()) {
+            document.selection = swiftRange
         }
         scheduleHighlight(editedLine: pendingLine)
         pendingLine = nil
@@ -400,8 +400,8 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     }
 
     private func selectionDidMove() {
-        if let range = textView.selectedRange().toRange() {
-            document.selection = range
+        if let swiftRange = Range(textView.selectedRange()) {
+            document.selection = swiftRange
         }
         updateCursorState()
         refreshBracketHighlight()

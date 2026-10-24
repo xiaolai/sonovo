@@ -109,7 +109,70 @@ final class ProjectNavigationTests: XCTestCase {
         XCTAssertTrue(state.liveProject.isDemo)
     }
 
+    func testEditorModeClampsForEveryNavigationPath() {
+        let state = AppState()
+        state.activateProject(state.workspace.demoProject)
+        state.openAsset("vo-take-03")
+        state.editorMode = .compare
+        XCTAssertEqual(state.editorMode, .compare)
+
+        state.openAsset("script-md")
+        XCTAssertEqual(state.editorMode, .player)
+
+        // A direct Project call bypasses AppState.openAsset; the getter must
+        // still clamp against the active tab.
+        state.liveProject.openAsset(id: "vo-take-03")
+        XCTAssertEqual(state.editorMode, .compare)
+        state.liveProject.openAsset(id: "script-md")
+        XCTAssertEqual(state.editorMode, .player)
+    }
+
+    func testRevealingASubtitleSelectsThatDocumentTab() async throws {
+        let root = try makeRoot(files: [
+            "a.srt": "1\n00:00:00,000 --> 00:00:01,000\nA\n",
+            "b.srt": "1\n00:00:00,000 --> 00:00:01,000\nB\n"
+        ])
+        let state = AppState()
+        let project = try XCTUnwrap(state.openProject(at: root))
+        let loaded = await waitUntil { project.assets.count == 2 }
+        XCTAssertTrue(loaded)
+        let a = try XCTUnwrap(project.assets.first { $0.name == "a.srt" })
+        let b = try XCTUnwrap(project.assets.first { $0.name == "b.srt" })
+        project.openAsset(a)
+        project.openAsset(b)
+        let documentB = try XCTUnwrap(
+            project.subtitles.documents.first {
+                $0.fileURL.lastPathComponent == "b.srt"
+            }
+        )
+        project.openAsset(a)
+        XCTAssertEqual(
+            project.subtitles.selectedDocument?.fileURL.lastPathComponent,
+            "a.srt"
+        )
+
+        state.revealSubtitleDocument(documentB)
+
+        XCTAssertEqual(
+            project.subtitles.selectedDocument?.fileURL.lastPathComponent,
+            "b.srt"
+        )
+        XCTAssertEqual(project.selectedAssetID, b.id)
+    }
+
     // MARK: - Helpers
+
+    private func waitUntil(
+        timeout: TimeInterval = 3,
+        _ condition: @escaping () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return condition()
+    }
 
     private func makeWorkspace() -> Workspace {
         let demo = Project.demo(
@@ -127,7 +190,9 @@ final class ProjectNavigationTests: XCTestCase {
         )
     }
 
-    private func makeRoot() throws -> URL {
+    private func makeRoot(
+        files: [String: String] = ["a.md": "one"]
+    ) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "SonovoProjectNavigation-\(UUID().uuidString)",
@@ -137,9 +202,11 @@ final class ProjectNavigationTests: XCTestCase {
             at: root,
             withIntermediateDirectories: true
         )
-        try Data("one".utf8).write(
-            to: root.appendingPathComponent("a.md")
-        )
+        for (name, contents) in files {
+            try Data(contents.utf8).write(
+                to: root.appendingPathComponent(name)
+            )
+        }
         roots.append(root)
         return root
     }

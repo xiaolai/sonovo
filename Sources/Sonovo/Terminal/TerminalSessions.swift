@@ -10,8 +10,9 @@ final class TerminalSession: Identifiable {
     var workingDirectory: String
     let view: GhosttyTerminalView
     /// The tmux session this tab is a client of, when tmux is active. The
-    /// client can detach without ending the session or its processes.
-    let tmuxSessionName: String?
+    /// client can detach without ending the session or its processes. A
+    /// migration rebinds the spelling; the session id never changes.
+    fileprivate(set) var tmuxSessionName: String?
 
     init(
         title: String,
@@ -42,7 +43,12 @@ final class TerminalSessionsStore {
     var selectedID: UUID?
     let workingDirectory: String
     private let terminalEnvironment: TerminalEnvironment
+    private let projectKey: String?
     private let tmuxPrefix: String?
+    /// Names reserved by a migration preview. Allocation skips them so a
+    /// new tab cannot consume a destination index before adoption commits.
+    private var reservedNames: Set<String> = []
+    private var probedNames: Set<String> = []
     private var nextNumber = 1
     private var highestTmuxIndex = 0
     /// Only the first tab created in `init` may skip the server lookup; a
@@ -84,6 +90,7 @@ final class TerminalSessionsStore {
     ) {
         self.workingDirectory = workingDirectory
         self.terminalEnvironment = terminalEnvironment
+        self.projectKey = projectKey
         self.tmuxPrefix = projectKey.map {
             TmuxNaming.prefix(projectKey: $0, projectName: projectName)
         }
@@ -190,23 +197,60 @@ final class TerminalSessionsStore {
         }
     }
 
-    private func allocateSession(name: String?) {
+    private enum TabLaunch {
+        /// Start a named session with ownership metadata.
+        case create
+        /// Attach to a session discovered elsewhere; never recreate it.
+        case attach
+        /// No tmux: run a direct shell.
+        case directShell
+    }
+
+    /// The one construction path for every terminal tab. Selection, counters,
+    /// and restoration policy stay with the caller.
+    private func makeTab(
+        title: String,
+        tmuxName: String?,
+        launch: TabLaunch
+    ) -> TerminalSession {
         let session = TerminalSession(
-            title: "Terminal \(nextNumber)",
+            title: title,
             workingDirectory: workingDirectory,
-            tmuxSessionName: name
+            tmuxSessionName: tmuxName
+        )
+        switch launch {
+        case .create:
+            session.view.initialCommand = "/bin/sh"
+            session.view.initialInput = terminalEnvironment.tmux?
+                .launchInput(
+                    name: tmuxName ?? "",
+                    directory: workingDirectory,
+                    ownership: launchOwnership()
+                )
+        case .attach:
+            session.view.initialCommand = "/bin/sh"
+            session.view.initialInput = terminalEnvironment.tmux?
+                .attachOnlyInput(name: tmuxName ?? "")
+        case .directShell:
+            break
+        }
+        wire(session)
+        return session
+    }
+
+    private func allocateSession(name: String?) {
+        let session = makeTab(
+            title: "Terminal \(nextNumber)",
+            tmuxName: name,
+            launch: name == nil ? .directShell : .create
         )
         nextNumber += 1
         if let name {
-            session.view.initialCommand = "/bin/sh"
-            session.view.initialInput = terminalEnvironment.tmux?
-                .launchInput(name: name, directory: workingDirectory)
             highestTmuxIndex = max(
                 highestTmuxIndex,
                 indexFromName(name) ?? 0
             )
         }
-        wire(session)
         sessions.append(session)
         selectedID = session.id
         refreshProcessStates()
@@ -251,18 +295,22 @@ final class TerminalSessionsStore {
 
         for (index, name) in parsed {
             highestTmuxIndex = max(highestTmuxIndex, index)
-            if sessions.contains(where: { $0.tmuxSessionName == name }) {
+            if let existing = sessions.first(where: {
+                $0.tmuxSessionName == name
+            }) {
+                // Discovery saw the session: an as-yet-unstarted tab must
+                // attach, not create it again.
+                existing.view.initialInput = terminalEnvironment.tmux?
+                    .attachOnlyInput(name: name)
                 continue
             }
-            let session = TerminalSession(
+            // A discovered session may vanish before the surface starts.
+            // Attach-only prevents that race from recreating it.
+            let session = makeTab(
                 title: "Terminal \(index)",
-                workingDirectory: workingDirectory,
-                tmuxSessionName: name
+                tmuxName: name,
+                launch: .attach
             )
-            session.view.initialCommand = "/bin/sh"
-            session.view.initialInput = terminalEnvironment.tmux?
-                .launchInput(name: name, directory: workingDirectory)
-            wire(session)
             sessions.append(session)
         }
         nextNumber = max(nextNumber, highestTmuxIndex + 1)
@@ -279,11 +327,26 @@ final class TerminalSessionsStore {
 
     private func nextTmuxName() -> TmuxAllocation {
         guard usesTmux, let prefix = tmuxPrefix else { return .allocate(nil) }
-        let index = max(nextNumber, highestTmuxIndex + 1)
+        var index = max(nextNumber, highestTmuxIndex + 1)
+        while reservedNames.contains(
+            TmuxNaming.sessionName(prefix: prefix, index: index)
+        ) {
+            index += 1
+        }
         // The parser accepts indexes up to this ceiling; allocating beyond
         // it would create a name that never restores.
         guard index <= 999_999 else { return .refuse }
         return .allocate(TmuxNaming.sessionName(prefix: prefix, index: index))
+    }
+
+    /// Ownership metadata is written only for real projects. The demo
+    /// `sonovo-sample-*` sessions have no project path and stay manual-only.
+    private func launchOwnership() -> TmuxLaunchOwnership? {
+        guard let projectKey, projectKey != "sample" else { return nil }
+        return TmuxLaunchOwnership(
+            projectPath: projectKey,
+            appVersion: AppVersion.current
+        )
     }
 
     private func indexFromName(_ name: String) -> Int? {
@@ -345,6 +408,12 @@ final class TerminalSessionsStore {
 
         // Both tmux queries run off the main actor: a stalled server must
         // not freeze the window. The tab is revalidated after each await.
+        // Capture the identity before the existence probe so a name reused
+        // between the two steps cannot become the End target.
+        let identity = await Task.detached(priority: .userInitiated) {
+            tmux.sessionIdentity(named: name)
+        }.value
+        guard sessions.contains(where: { $0.id == id }) else { return }
         let exists = await Task.detached(priority: .userInitiated) {
             tmux.sessionExists(name: name)
         }.value
@@ -369,15 +438,43 @@ final class TerminalSessionsStore {
                 let confirmed = endConfirmation?(name) ?? confirmEnd(name)
                 guard confirmed else { return }
             }
-            let killed = await Task.detached(priority: .userInitiated) {
-                tmux.kill(name: name)
-            }.value
-            guard killed else {
-                // Keep the tab: the agent may still be running, and the
-                // UI must not claim it ended.
-                lastError = "Could not end \(name). "
-                    + "The session may still be running."
-                return
+            if let coordinator = terminalEnvironment.coordinator?() {
+                guard let identity else {
+                    lastError = "Could not identify \(name). "
+                        + "The session was not ended."
+                    return
+                }
+                // Every End path goes through the coordinator. Its guarded
+                // mutation binds the action to the session identity, not
+                // this tab's name alone.
+                let outcome = await coordinator.end(
+                    identity: identity,
+                    name: name
+                )
+                switch outcome {
+                case .ended, .absent:
+                    break
+                case let .skipped(reason), let .refused(reason),
+                     let .uncertain(reason), let .notAttempted(reason):
+                    lastError = "Could not end \(name). \(reason)"
+                    return
+                }
+            } else {
+                guard let identity else {
+                    lastError = "Could not identify \(name). "
+                        + "The session was not ended."
+                    return
+                }
+                let killed = await Task.detached(priority: .userInitiated) {
+                    tmux.kill(identity: identity, name: name)
+                }.value
+                guard killed else {
+                    // Keep the tab: the agent may still be running, and the
+                    // UI must not claim it ended.
+                    lastError = "Could not end \(name). "
+                        + "The session may still be running."
+                    return
+                }
             }
         }
         guard let current = sessions.first(where: { $0.id == id }) else {
@@ -402,6 +499,87 @@ final class TerminalSessionsStore {
         lastError = nil
     }
 
+    // MARK: - Sessions window support
+
+    enum TabBadge: Sendable, Equatable {
+        case running
+        case idle
+        case uncertain
+        case unknown
+    }
+
+    /// Per-tab state for the small badge. A tmux tab is idle only after a
+    /// successful probe said so; a failed probe is unknown, never idle.
+    func badge(for session: TerminalSession) -> TabBadge {
+        guard let name = session.tmuxSessionName else {
+            return processProbe(session) ? .running : .idle
+        }
+        if terminalEnvironment.coordinator?()?.isUncertain(name: name) == true {
+            return .uncertain
+        }
+        if tmuxRunningNames.contains(name) { return .running }
+        return probedNames.contains(name) ? .idle : .unknown
+    }
+
+    /// Reserves tmux names for a migration preview. New-tab allocation skips
+    /// them until the preview commits, cancels, or fails.
+    func reserveSessionNames(_ names: [String]) {
+        // A reservation changes the next allocation, not the validity of an
+        // in-flight one. Bumping allocationGeneration here stranded the
+        // allocation queue with allocationRunning stuck true.
+        reservedNames.formUnion(names)
+        discoveryGeneration &+= 1
+    }
+
+    func releaseSessionNames(_ names: [String]) {
+        reservedNames.subtract(names)
+        discoveryGeneration &+= 1
+    }
+
+    /// Removes a tab whose session was adopted by another project. This
+    /// detaches the client; it never kills the session. A pending discovery
+    /// is invalidated so the old tab is not recreated.
+    func detachTab(named name: String) {
+        guard let session = sessions.first(where: {
+            $0.tmuxSessionName == name
+        }) else {
+            return
+        }
+        discoveryGeneration &+= 1
+        removeSession(session)
+    }
+
+    /// Attach-only Open from the Sessions window. It never creates a
+    /// session; a vanished session leaves the tab with a failed attach.
+    @discardableResult
+    func attachExistingSession(named name: String) -> Bool {
+        guard let tmuxPrefix,
+              let index = TmuxNaming.index(of: name, prefix: tmuxPrefix) else {
+            return false
+        }
+        if let existing = sessions.first(where: {
+            $0.tmuxSessionName == name
+        }) {
+            // The session exists now; rewriting the launch input prevents a
+            // later restart from recreating it after it disappears.
+            existing.view.initialInput = terminalEnvironment.tmux?
+                .attachOnlyInput(name: name)
+            selectedID = existing.id
+            return true
+        }
+        let session = makeTab(
+            title: "Terminal \(index)",
+            tmuxName: name,
+            launch: .attach
+        )
+        sessions.append(session)
+        selectedID = session.id
+        highestTmuxIndex = max(highestTmuxIndex, index)
+        nextNumber = max(nextNumber, highestTmuxIndex + 1)
+        refreshProcessStates()
+        return true
+    }
+
     /// A live process in a tab that is not protected by tmux. Project close
     /// and quit only need to warn about these.
     var hasLiveDirectProcess: Bool {
@@ -419,6 +597,8 @@ final class TerminalSessionsStore {
         }) else {
             return
         }
+        // A discovery started during End must not re-add the removed tab.
+        discoveryGeneration &+= 1
         sessions.remove(at: index)
         session.view.shutdown()
 
@@ -471,6 +651,7 @@ final class TerminalSessionsStore {
             probeNames = []
             tmuxRunningNames = []
             tmuxRunningCount = 0
+            probedNames = []
             setRunningCount(directCount)
             return
         }
@@ -503,10 +684,16 @@ final class TerminalSessionsStore {
             self.probeInFlight = false
             // nil is unknown: keep the previous badge rather than claim idle.
             if let running {
+                self.probedNames = tmuxNames
                 self.tmuxRunningNames = running
                 self.tmuxRunningCount = running
                     .intersection(tmuxNames)
                     .count
+            } else {
+                // A failed probe is unknown, never the previous idle badge.
+                self.probedNames = []
+                self.tmuxRunningNames = []
+                self.tmuxRunningCount = 0
             }
             // A direct process may have started while the probe ran; use the
             // current count, not the snapshot captured at launch.
@@ -711,12 +898,27 @@ private struct TerminalTabButton: View {
         store.selectedID == session.id
     }
 
+    private var badgeColor: Color {
+        switch store.badge(for: session) {
+        case .running: AppTheme.Palette.success
+        case .idle: AppTheme.Palette.tertiaryLabel
+        case .uncertain: AppTheme.Palette.warning
+        case .unknown: AppTheme.Palette.secondaryLabel
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .trailing) {
             Button {
                 store.select(session.id)
             } label: {
                 HStack(spacing: AppTheme.Spacing.xs) {
+                    Circle()
+                        .fill(badgeColor)
+                        .frame(
+                            width: AppTheme.Size.sessionBadge,
+                            height: AppTheme.Size.sessionBadge
+                        )
                     Image(systemName: "terminal")
                         .font(.system(size: AppTheme.TypeScale.xxs))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)

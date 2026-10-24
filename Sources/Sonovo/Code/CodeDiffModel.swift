@@ -92,9 +92,9 @@ struct CodeDiffModel: Sendable, Equatable {
             return "\n"
         case .some(.crlf):
             return "\r\n"
-        case .some(.none):
+        case .some(CodeLineTerminator.none):
             return "\n\\ No newline at end of file\n"
-        case .none:
+        case nil:
             return ""
         }
     }

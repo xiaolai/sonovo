@@ -93,36 +93,21 @@ final class ThumbnailProvider {
             representationTypes: .all
         )
         let box = ThumbnailRequestBox(request: request)
-        let gate = ThumbnailWaiter()
         return await withTaskCancellationHandler {
-            QLThumbnailGenerator.shared.generateBestRepresentation(
-                for: request
-            ) { representation, _ in
-                let image: NSImage?
-                if let representation,
-                   representation.type != .icon {
-                    image = NSImage(
-                        cgImage: representation.cgImage,
-                        size: NSSize(
-                            width: representation.cgImage.width,
-                            height: representation.cgImage.height
-                        )
-                    )
-                } else {
-                    image = nil
-                }
-                Task { @MainActor in
-                    gate.finish(image)
-                }
+            guard let representation = try? await QLThumbnailGenerator.shared
+                .generateBestRepresentation(for: box.request),
+                  representation.type != .icon else {
+                return nil
             }
-            return await gate.wait()
+            return NSImage(
+                cgImage: representation.cgImage,
+                size: NSSize(
+                    width: representation.cgImage.width,
+                    height: representation.cgImage.height
+                )
+            )
         } onCancel: {
-            // A cancelled Quick Look request does not guarantee its
-            // completion handler runs; resume the gate ourselves.
             QLThumbnailGenerator.shared.cancel(box.request)
-            Task { @MainActor in
-                gate.cancel()
-            }
         }
     }
 

@@ -17,96 +17,25 @@ enum QuickLookSupport {
             scale: AppTheme.Size.previewProbeScale,
             representationTypes: .all
         )
-        let gate = PreviewGate()
         let box = PreviewRequestBox(request: request)
         return await withTaskCancellationHandler {
             // A task cancelled before this point must not submit work at all.
             guard !Task.isCancelled else { return false }
-            QLThumbnailGenerator.shared.generateBestRepresentation(
-                for: box.request
-            ) { representation, _ in
-                let available = representation != nil
-                    && representation?.type != .icon
-                gate.finish(available)
+            guard let representation = try? await QLThumbnailGenerator.shared
+                .generateBestRepresentation(for: box.request) else {
+                return false
             }
-            // Cancellation may have run between the guard and submission;
-            // in that case the handler's QL cancel was a no-op.
-            if gate.wasCancelled {
-                QLThumbnailGenerator.shared.cancel(box.request)
-            }
-            return await gate.wait()
+            return representation.type != .icon
         } onCancel: {
             // Switching documents must stop the probe now, not after the
             // thumbnail generator finishes a file nobody is looking at.
             QLThumbnailGenerator.shared.cancel(box.request)
-            gate.cancel()
         }
     }
 }
 
 private struct PreviewRequestBox: @unchecked Sendable {
     let request: QLThumbnailGenerator.Request
-}
-
-/// Exactly-once bridge between Quick Look's callback, the caller, and
-/// cancellation.
-private final class PreviewGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Bool, Never>?
-    private var result: Bool?
-    private var cancelled = false
-
-    func wait() async -> Bool {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                lock.lock()
-                if let result {
-                    lock.unlock()
-                    continuation.resume(returning: result)
-                } else if cancelled {
-                    lock.unlock()
-                    continuation.resume(returning: false)
-                } else {
-                    self.continuation = continuation
-                    lock.unlock()
-                }
-            }
-        } onCancel: {
-            cancel()
-        }
-    }
-
-    var wasCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelled
-    }
-
-    func finish(_ value: Bool) {
-        lock.lock()
-        guard result == nil, !cancelled else {
-            lock.unlock()
-            return
-        }
-        result = value
-        let continuation = continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(returning: value)
-    }
-
-    func cancel() {
-        lock.lock()
-        guard result == nil, !cancelled else {
-            lock.unlock()
-            return
-        }
-        cancelled = true
-        let continuation = continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(returning: false)
-    }
 }
 
 @MainActor

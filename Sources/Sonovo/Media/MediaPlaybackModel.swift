@@ -699,7 +699,7 @@ final class MediaPlaybackModel {
               let first = descriptions.first else {
             return nil
         }
-        let description = first as! CMFormatDescription
+        let description = first
         return fourCC(CMFormatDescriptionGetMediaSubType(description))
     }
 
@@ -710,7 +710,7 @@ final class MediaPlaybackModel {
               let first = descriptions.first else {
             return nil
         }
-        let description = first as! CMFormatDescription
+        let description = first
         guard let stream = CMAudioFormatDescriptionGetStreamBasicDescription(
             description
         )?.pointee else {
