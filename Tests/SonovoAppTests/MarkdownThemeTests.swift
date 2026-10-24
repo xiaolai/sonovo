@@ -268,6 +268,149 @@ final class MarkdownThemeTests: XCTestCase {
         )
     }
 
+    func testDuplicateOfAMaximumLengthIdentifierStaysValid() throws {
+        let id = String(repeating: "a", count: 64)
+        try write(
+            """
+            {
+              "schemaVersion": 1,
+              "id": "\(id)",
+              "name": "Long"
+            }
+            """,
+            as: id
+        )
+        let store = makeStore()
+        let newID = try store.duplicateTheme(id: id)
+
+        XCTAssertLessThanOrEqual(newID.count, 64)
+        XCTAssertTrue(newID.hasPrefix("a"))
+        XCTAssertEqual(store.theme(id: newID).name, "Long Copy")
+    }
+
+    func testInheritanceDepthIsBounded() throws {
+        for index in 0..<10 {
+            let id = "deep-\(index)"
+            let base = index + 1 < 10
+                ? ",\"extends\":\"deep-\(index + 1)\""
+                : ""
+            try write(
+                "{\"schemaVersion\":1,\"id\":\"\(id)\","
+                    + "\"name\":\"Deep \(index)\"\(base)}",
+                as: id
+            )
+        }
+        let store = makeStore()
+        XCTAssertTrue(
+            store.catalog().issues.contains { $0.contains("deeper than") }
+        )
+    }
+
+    func testInheritanceDepthBoundaryAllowsEightThemes() throws {
+        for index in 0..<7 {
+            let id = "ok-\(index)"
+            let base = index + 1 < 7
+                ? ",\"extends\":\"ok-\(index + 1)\""
+                : ""
+            try write(
+                "{\"schemaVersion\":1,\"id\":\"\(id)\","
+                    + "\"name\":\"OK \(index)\"\(base)}",
+                as: id
+            )
+        }
+        let theme = makeStore().theme(id: "ok-0")
+
+        XCTAssertEqual(theme.id, "ok-0")
+    }
+
+    func testInheritanceDepthBoundaryRejectsNineThemes() throws {
+        for index in 0..<8 {
+            let id = "too-\(index)"
+            let base = index + 1 < 8
+                ? ",\"extends\":\"too-\(index + 1)\""
+                : ""
+            try write(
+                "{\"schemaVersion\":1,\"id\":\"\(id)\","
+                    + "\"name\":\"Too \(index)\"\(base)}",
+                as: id
+            )
+        }
+        let store = makeStore()
+
+        XCTAssertTrue(
+            store.catalog().issues.contains { $0.contains("deeper than") }
+        )
+    }
+
+    func testCatalogGenerationInvalidatesOlderScans() {
+        let store = makeStore()
+        let first = store.beginCatalogScan()
+        let second = store.beginCatalogScan()
+
+        XCTAssertFalse(store.isCurrentCatalogScan(first))
+        XCTAssertTrue(store.isCurrentCatalogScan(second))
+
+        _ = store.beginCatalogScan()
+        XCTAssertFalse(store.isCurrentCatalogScan(second))
+    }
+
+    func testCachedFallbackAnswersTheRequestedID() {
+        let store = makeStore()
+        let book = store.theme(id: "book")
+        store.cache(book, for: "missing")
+
+        // A Book answer proves the cache, not the Paper fallback.
+        XCTAssertEqual(store.theme(id: "missing").name, "Book")
+    }
+
+    func testUnreadableThemeIsReported() throws {
+        let url = directory.appendingPathComponent(
+            "unreadable.json",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true
+        )
+        let store = makeStore()
+
+        XCTAssertTrue(
+            store.catalog().issues.contains {
+                $0.contains("unreadable") && $0.contains("could not be read")
+            }
+        )
+        XCTAssertEqual(store.theme(id: "unreadable").id, "paper")
+    }
+
+    func testOversizedThemeIsRejected() throws {
+        let body = String(
+            repeating: " ",
+            count: Int(MarkdownThemeStore.maxThemeFileBytes) + 1
+        )
+        try Data(body.utf8).write(
+            to: directory.appendingPathComponent("oversized.json")
+        )
+        let store = makeStore()
+
+        XCTAssertTrue(
+            store.catalog().issues.contains {
+                $0.contains("oversized") && $0.contains("larger than")
+            }
+        )
+        XCTAssertEqual(store.theme(id: "oversized").id, "paper")
+    }
+
+    func testUppercaseExtensionIsNotDiscovered() throws {
+        try Data("{}".utf8).write(
+            to: directory.appendingPathComponent("upper.JSON")
+        )
+        let store = makeStore()
+        let catalog = store.catalog()
+
+        XCTAssertFalse(catalog.themes.contains { $0.id == "upper" })
+        XCTAssertFalse(catalog.issues.contains { $0.contains("upper") })
+    }
+
     func testOverridesClampAndZeroMeansThemeDefault() {
         let paper = makeStore().theme(id: "paper")
         let overridden = paper.withOverrides(bodySize: 100, measure: 100)

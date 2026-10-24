@@ -196,36 +196,36 @@ struct ThemePalette: Equatable, Sendable {
 /// A fully resolved reading theme. Every value is validated and clamped; the
 /// viewer never reads a raw theme file.
 struct MarkdownTheme: Equatable, Sendable, Identifiable {
-    let id: String
-    let name: String
+    private(set) var id: String
+    private(set) var name: String
 
-    let bodyFont: ThemeFont
-    let uiFont: ThemeFont
-    let bodySize: CGFloat
-    let bodyLineSpacing: CGFloat
-    let paragraphIndent: CGFloat
-    let measure: CGFloat
+    private(set) var bodyFont: ThemeFont
+    private(set) var uiFont: ThemeFont
+    private(set) var bodySize: CGFloat
+    private(set) var bodyLineSpacing: CGFloat
+    private(set) var paragraphIndent: CGFloat
+    private(set) var measure: CGFloat
 
-    let headingFont: ThemeFont
-    let headingSizes: [CGFloat]
-    let headingTopPaddings: [CGFloat]
+    private(set) var headingFont: ThemeFont
+    private(set) var headingSizes: [CGFloat]
+    private(set) var headingTopPaddings: [CGFloat]
 
-    let codeFont: ThemeFont
-    let codeSize: CGFloat
-    let codeLineSpacing: CGFloat
-    let tableSize: CGFloat
-    let captionSize: CGFloat
+    private(set) var codeFont: ThemeFont
+    private(set) var codeSize: CGFloat
+    private(set) var codeLineSpacing: CGFloat
+    private(set) var tableSize: CGFloat
+    private(set) var captionSize: CGFloat
 
-    let blockSpacing: CGFloat
-    let pagePadding: CGFloat
-    let codePadding: CGFloat
-    let codeRadius: CGFloat
+    private(set) var blockSpacing: CGFloat
+    private(set) var pagePadding: CGFloat
+    private(set) var codePadding: CGFloat
+    private(set) var codeRadius: CGFloat
 
-    let light: ThemePalette
-    let dark: ThemePalette
+    private(set) var light: ThemePalette
+    private(set) var dark: ThemePalette
 
     /// Non-fatal problems, such as a clamped value or a contrast warning.
-    let warnings: [String]
+    private(set) var warnings: [String]
 
     func palette(for scheme: ColorScheme) -> ThemePalette {
         scheme == .dark ? dark : light
@@ -260,31 +260,10 @@ struct MarkdownTheme: Equatable, Sendable, Identifiable {
         guard size != self.bodySize || width != self.measure else {
             return self
         }
-        return MarkdownTheme(
-            id: id,
-            name: name,
-            bodyFont: bodyFont,
-            uiFont: uiFont,
-            bodySize: size,
-            bodyLineSpacing: bodyLineSpacing,
-            paragraphIndent: paragraphIndent,
-            measure: width,
-            headingFont: headingFont,
-            headingSizes: headingSizes,
-            headingTopPaddings: headingTopPaddings,
-            codeFont: codeFont,
-            codeSize: codeSize,
-            codeLineSpacing: codeLineSpacing,
-            tableSize: tableSize,
-            captionSize: captionSize,
-            blockSpacing: blockSpacing,
-            pagePadding: pagePadding,
-            codePadding: codePadding,
-            codeRadius: codeRadius,
-            light: light,
-            dark: dark,
-            warnings: warnings
-        )
+        var copy = self
+        copy.bodySize = size
+        copy.measure = width
+        return copy
     }
 }
 
@@ -299,13 +278,21 @@ struct MarkdownThemeCatalog: Sendable {
 
 /// Loads built-in and user themes. Built-ins are required resources; user
 /// themes live in Application Support and never execute code.
-@MainActor
+///
+/// The shared instance is main-actor-confined by convention. Catalog scans
+/// run on a fresh instance off the main actor, so a large themes folder
+/// cannot stall Settings.
 final class MarkdownThemeStore {
-    static let shared = MarkdownThemeStore()
+    /// Main-actor-confined. Catalog scans construct a fresh store inside
+    /// their detached task instead of touching this one.
+    @MainActor static let shared = MarkdownThemeStore()
 
     static let builtInOrder = ["paper", "book", "editorial", "draft"]
     static let defaultID = "paper"
     static let schemaVersion = 1
+    static let maxIdentifierLength = 64
+    static let maxThemeFileBytes = 262_144
+    static let maxInheritanceDepth = 8
 
     private let bundle: Bundle
     private let userDirectory: URL
@@ -335,6 +322,39 @@ final class MarkdownThemeStore {
         themeCache.removeAll()
         dictionaryCache.removeAll()
     }
+
+    /// Publishes a theme loaded off the main actor. Call on the main actor;
+    /// the shared instance is main-confined.
+    func cache(_ theme: MarkdownTheme) {
+        cache(theme, for: theme.id)
+    }
+
+    /// Caches a resolved theme under a requested id. Used when a selection
+    /// is missing or malformed: the viewer asks for the invalid id and gets
+    /// the fallback from cache instead of retrying the file on the main actor.
+    func cache(_ theme: MarkdownTheme, for id: String) {
+        themeCache[id] = theme
+    }
+
+    func cachedTheme(id: String) -> MarkdownTheme? {
+        themeCache[id]
+    }
+
+    // MARK: Catalog scan generation
+
+    private var catalogGeneration = 0
+
+    /// Starts a scan and returns its generation. The newest generation wins,
+    /// across panes: a scan from a replaced Settings pane cannot publish.
+    func beginCatalogScan() -> Int {
+        catalogGeneration += 1
+        return catalogGeneration
+    }
+
+    func isCurrentCatalogScan(_ generation: Int) -> Bool {
+        generation == catalogGeneration
+    }
+
 
     func defaultTheme() -> MarkdownTheme {
         if let cached = themeCache[Self.defaultID] { return cached }
@@ -396,7 +416,12 @@ final class MarkdownThemeStore {
             withIntermediateDirectories: true
         )
 
-        let newID = uniqueID(base: "\(id)-copy")
+        // Reserve room for "-copy" and a collision suffix inside the id cap.
+        let suffix = "-copy"
+        let stem = String(
+            id.prefix(Self.maxIdentifierLength - suffix.count)
+        )
+        let newID = uniqueID(base: stem + suffix)
         let document = DerivedTheme(
             schemaVersion: Self.schemaVersion,
             id: newID,
@@ -404,10 +429,16 @@ final class MarkdownThemeStore {
             extends: id
         )
         let data = try JSONEncoder.pretty.encode(document)
-        try data.write(
-            to: userDirectory.appendingPathComponent("\(newID).json"),
-            options: .atomic
-        )
+        let url = userDirectory.appendingPathComponent("\(newID).json")
+        try data.write(to: url, options: .atomic)
+        do {
+            _ = try loadTheme(id: newID)
+        } catch {
+            // Do not leave a derived theme that cannot resolve, for example
+            // one that would exceed the inheritance depth.
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
         reload()
         return newID
     }
@@ -433,8 +464,6 @@ final class MarkdownThemeStore {
                 options: []
             )
             document = try JSONDecoder().decode(ResolvedDocument.self, from: data)
-        } catch let error as MarkdownThemeError {
-            throw error
         } catch {
             throw MarkdownThemeError.invalidJSON(error.localizedDescription)
         }
@@ -449,6 +478,11 @@ final class MarkdownThemeStore {
     ) throws -> [String: Any]? {
         guard !visited.contains(id) else {
             throw MarkdownThemeError.cycle(id)
+        }
+        guard visited.count < Self.maxInheritanceDepth else {
+            throw MarkdownThemeError.invalidValue(
+                "Theme inheritance is deeper than \(Self.maxInheritanceDepth) themes."
+            )
         }
         // An id becomes a file name. Reject anything that is not a plain
         // slug before touching the filesystem, including `extends` values.
@@ -525,7 +559,7 @@ final class MarkdownThemeStore {
 
     private func rawObject(id: String) throws -> [String: Any]? {
         if let cached = dictionaryCache[id] { return cached }
-        guard let text = rawText(id: id) else { return nil }
+        guard let text = try rawText(id: id) else { return nil }
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               let dictionary = object as? [String: Any] else {
@@ -537,16 +571,56 @@ final class MarkdownThemeStore {
         return dictionary
     }
 
-    private func rawText(id: String) -> String? {
+    private func rawText(id: String) throws -> String? {
         if let url = bundle.url(
             forResource: id,
             withExtension: "json",
             subdirectory: "ReadingThemes"
-        ), let text = try? String(contentsOf: url, encoding: .utf8) {
-            return text
+        ) {
+            return try readBoundedText(url: url, id: id)
         }
         let url = userDirectory.appendingPathComponent("\(id).json")
-        return try? String(contentsOf: url, encoding: .utf8)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: url.path,
+            isDirectory: &isDirectory
+        ) else {
+            return nil
+        }
+        guard !isDirectory.boolValue else {
+            throw MarkdownThemeError.unreadable(
+                "\(id).json is a directory."
+            )
+        }
+        return try readBoundedText(url: url, id: id)
+    }
+
+    /// Reads at most the cap plus one byte, so a file that grows after any
+    /// metadata check cannot make this read unbounded.
+    private func readBoundedText(url: URL, id: String) throws -> String {
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(
+                upToCount: Self.maxThemeFileBytes + 1
+            ) ?? Data()
+            guard data.count <= Self.maxThemeFileBytes else {
+                throw MarkdownThemeError.invalidValue(
+                    "\(id).json is larger than "
+                        + "\(Self.maxThemeFileBytes / 1024) KB."
+                )
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw MarkdownThemeError.unreadable(
+                    "\(id).json is not UTF-8."
+                )
+            }
+            return text
+        } catch let error as MarkdownThemeError {
+            throw error
+        } catch {
+            throw MarkdownThemeError.unreadable(error.localizedDescription)
+        }
     }
 
     private func userThemeFiles() -> [URL] {
@@ -556,8 +630,10 @@ final class MarkdownThemeStore {
         ) else {
             return []
         }
+        // Loading builds `\(id).json`; a differently-cased extension would
+        // be discovered but unreadable on a case-sensitive volume.
         return contents
-            .filter { $0.pathExtension.lowercased() == "json" }
+            .filter { $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
@@ -567,12 +643,18 @@ final class MarkdownThemeStore {
                 $0.deletingPathExtension().lastPathComponent
             }
         )
-        if !existing.contains(base) { return base }
+        let trimmed = String(base.prefix(Self.maxIdentifierLength))
+        if !existing.contains(trimmed) { return trimmed }
         var index = 2
-        while existing.contains("\(base)-\(index)") {
+        while true {
+            let suffix = "-\(index)"
+            let stem = String(
+                trimmed.prefix(Self.maxIdentifierLength - suffix.count)
+            )
+            let candidate = stem + suffix
+            if !existing.contains(candidate) { return candidate }
             index += 1
         }
-        return "\(base)-\(index)"
     }
 
     // MARK: Validation
@@ -623,7 +705,10 @@ final class MarkdownThemeStore {
 
         let light = try palette(document.colors.light)
         let dark = try palette(document.colors.dark)
-        let theme = MarkdownTheme(
+        warnings.append(
+            contentsOf: contrastWarnings(light: light, dark: dark)
+        )
+        return MarkdownTheme(
             id: document.id,
             name: document.name,
             bodyFont: ThemeFont(
@@ -710,32 +795,6 @@ final class MarkdownThemeStore {
             ),
             light: light,
             dark: dark,
-            warnings: []
-        )
-        warnings.append(contentsOf: contrastWarnings(for: theme))
-        return MarkdownTheme(
-            id: theme.id,
-            name: theme.name,
-            bodyFont: theme.bodyFont,
-            uiFont: theme.uiFont,
-            bodySize: theme.bodySize,
-            bodyLineSpacing: theme.bodyLineSpacing,
-            paragraphIndent: theme.paragraphIndent,
-            measure: theme.measure,
-            headingFont: theme.headingFont,
-            headingSizes: theme.headingSizes,
-            headingTopPaddings: theme.headingTopPaddings,
-            codeFont: theme.codeFont,
-            codeSize: theme.codeSize,
-            codeLineSpacing: theme.codeLineSpacing,
-            tableSize: theme.tableSize,
-            captionSize: theme.captionSize,
-            blockSpacing: theme.blockSpacing,
-            pagePadding: theme.pagePadding,
-            codePadding: theme.codePadding,
-            codeRadius: theme.codeRadius,
-            light: theme.light,
-            dark: theme.dark,
             warnings: warnings
         )
     }
@@ -761,9 +820,12 @@ final class MarkdownThemeStore {
         )
     }
 
-    private func contrastWarnings(for theme: MarkdownTheme) -> [String] {
+    private func contrastWarnings(
+        light: ThemePalette,
+        dark: ThemePalette
+    ) -> [String] {
         var warnings: [String] = []
-        for (appearance, palette) in [("Light", theme.light), ("Dark", theme.dark)] {
+        for (appearance, palette) in [("Light", light), ("Dark", dark)] {
             if palette.paper.alpha < 1 {
                 warnings.append("\(appearance) paper must be opaque.")
             }
@@ -796,7 +858,7 @@ final class MarkdownThemeStore {
     }
 
     private static func isValidIdentifier(_ id: String) -> Bool {
-        guard !id.isEmpty, id.count <= 64 else { return false }
+        guard !id.isEmpty, id.count <= maxIdentifierLength else { return false }
         return id.allSatisfy {
             $0.isLowercase || $0.isNumber || $0 == "-"
         }
