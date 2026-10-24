@@ -49,6 +49,7 @@ struct QuickLookDocumentView: View {
     }
 
     @State private var check: Check = .checking
+    @State private var previewUnavailable = false
 
     var body: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
@@ -59,17 +60,33 @@ struct QuickLookDocumentView: View {
                 ProgressView("Preparing preview…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .preview:
-                QuickLookPreview(url: asset.url)
+                if previewUnavailable {
+                    previewUnavailableState
+                } else {
+                    QuickLookPreview(
+                        url: asset.url,
+                        isUnavailable: $previewUnavailable
+                    )
+                }
             case .metadata:
                 metadataState
             }
         }
         .viewerCard()
         .task {
+            previewUnavailable = false
             check = await QuickLookSupport.canPreview(asset.url)
                 ? .preview
                 : .metadata
         }
+    }
+
+    private var previewUnavailableState: some View {
+        Text("Preview unavailable — open the file in its default app.")
+            .font(.system(size: AppTheme.TypeScale.sm))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -128,12 +145,17 @@ struct QuickLookDocumentView: View {
 
 private struct QuickLookPreview: NSViewRepresentable {
     let url: URL
+    @Binding var isUnavailable: Bool
 
     func makeNSView(context: Context) -> NSView {
         guard let view = QLPreviewView(frame: .zero, style: .normal) else {
             // The system can refuse to create a preview view after a
-            // thumbnail suggested one exists. A message beats a crash.
-            return unavailableView()
+            // thumbnail suggested one exists. Switch the card to a SwiftUI
+            // message instead of leaving a hand-built AppKit label behind.
+            DispatchQueue.main.async {
+                isUnavailable = true
+            }
+            return NSView()
         }
         view.autoresizingMask = [.width, .height]
         view.previewItem = url as NSURL
@@ -150,21 +172,5 @@ private struct QuickLookPreview: NSViewRepresentable {
 
     static func dismantleNSView(_ view: NSView, coordinator: ()) {
         (view as? QLPreviewView)?.previewItem = nil
-    }
-
-    private func unavailableView() -> NSView {
-        let container = NSView()
-        let label = NSTextField(
-            labelWithString: "Preview unavailable — open the file in its default app."
-        )
-        label.font = .systemFont(ofSize: AppTheme.TypeScale.sm)
-        label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
-        ])
-        return container
     }
 }

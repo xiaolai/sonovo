@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 /// The second image always comes from the same project. There is no

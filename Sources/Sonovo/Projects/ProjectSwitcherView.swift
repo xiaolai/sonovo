@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 /// The workspace switcher. A project is a folder; this is the only list of

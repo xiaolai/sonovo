@@ -756,6 +756,8 @@ struct TerminalSessionsHost: NSViewRepresentable {
     let isActive: Bool
     let focusToken: Int
 
+    @Environment(\.openSettings) private var openSettings
+
     func makeNSView(context: Context) -> TerminalHostView {
         let view = TerminalHostView()
         view.wantsLayer = true
@@ -767,7 +769,8 @@ struct TerminalSessionsHost: NSViewRepresentable {
             sessions: sessions,
             selectedID: selectedID,
             isActive: isActive,
-            focusToken: focusToken
+            focusToken: focusToken,
+            openSettings: openSettings
         )
     }
 }
@@ -803,7 +806,8 @@ final class TerminalHostView: NSView {
         sessions: [TerminalSession],
         selectedID: UUID?,
         isActive: Bool,
-        focusToken: Int
+        focusToken: Int,
+        openSettings: OpenSettingsAction
     ) {
         self.selectedID = selectedID
         self.isActive = isActive
@@ -826,6 +830,7 @@ final class TerminalHostView: NSView {
             }
 
             view.frame = bounds
+            view.onOpenSettings = { openSettings() }
             let visible = isActive && session.id == selectedID
             view.isHidden = !visible
             if !visible {

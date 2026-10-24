@@ -37,6 +37,7 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     var onCloseRequested: (() -> Void)?
     var onNewTabRequested: (() -> Void)?
+    var onOpenSettings: (() -> Void)?
     var onTitleChanged: ((String) -> Void)?
     var onWorkingDirectoryChanged: ((String) -> Void)?
 
@@ -524,7 +525,8 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags == .command, event.charactersIgnoringModifiers == "," {
-            openSonovoSettings()
+            guard let onOpenSettings else { return false }
+            onOpenSettings()
             return true
         }
 

@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 struct TerminalPane: View {
@@ -176,13 +175,7 @@ private struct TerminalResizeHandle: View {
                 .frame(width: AppTheme.Size.resizeHandleWidth, height: AppTheme.Size.resizeHandleHeight)
         }
         .contentShape(Rectangle())
-        .onHover { hovering in
-            if hovering {
-                NSCursor.resizeUpDown.set()
-            } else {
-                NSCursor.arrow.set()
-            }
-        }
+        .pointerStyle(.frameResize(position: .top))
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
@@ -206,23 +199,4 @@ private struct TerminalResizeHandle: View {
 
 extension Notification.Name {
     static let sonovoRestartTerminal = Notification.Name("com.sonovo.restartTerminal")
-}
-
-@MainActor
-func openSonovoSettings() {
-    if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-        return
-    }
-    if NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil) {
-        return
-    }
-
-    guard let appMenu = NSApp.mainMenu?.items.first(where: { item in
-        item.submenu?.items.contains(where: { $0.title.hasPrefix("Settings") }) == true
-    }),
-    let settingsItem = appMenu.submenu?.items.first(where: { $0.title.hasPrefix("Settings") }),
-    let action = settingsItem.action else {
-        return
-    }
-    NSApp.sendAction(action, to: settingsItem.target, from: settingsItem)
 }

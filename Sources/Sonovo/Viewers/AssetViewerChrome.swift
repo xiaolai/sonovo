@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 /// The header every document-like viewer shares: kind glyph, file name, an

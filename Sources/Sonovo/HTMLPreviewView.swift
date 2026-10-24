@@ -2,13 +2,32 @@ import SwiftUI
 import WebKit
 
 struct HTMLPreviewView: View {
+    let html: String
+
+    @State private var page = HTMLPreviewView.makePage()
+
+    init(html: String = SampleHTML.storyboard) {
+        self.html = html
+    }
+
     var body: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
             browserBar
 
-            HTMLWebView(html: SampleHTML.storyboard)
+            WebView(page)
+                .webViewMagnificationGestures(.enabled)
+                .webViewContentBackground(.hidden)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .task(id: html) {
+                    page.load(html: html)
+                }
         }
+    }
+
+    private static func makePage() -> WebPage {
+        var configuration = WebPage.Configuration()
+        configuration.defaultNavigationPreferences.allowsContentJavaScript = false
+        return WebPage(configuration: configuration)
     }
 
     private var browserBar: some View {
@@ -71,36 +90,5 @@ struct HTMLPreviewView: View {
         .padding(.horizontal, AppTheme.Spacing.md)
         .frame(height: AppTheme.Size.browserBarHeight)
         .background(AppTheme.Surface.chrome)
-    }
-}
-
-private struct HTMLWebView: NSViewRepresentable {
-    let html: String
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.underPageBackgroundColor = .clear
-        webView.allowsMagnification = true
-        webView.loadHTMLString(html, baseURL: nil)
-
-        context.coordinator.lastHTML = html
-        return webView
-    }
-
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.lastHTML != html else { return }
-        context.coordinator.lastHTML = html
-        webView.loadHTMLString(html, baseURL: nil)
-    }
-
-    final class Coordinator {
-        var lastHTML: String?
     }
 }
