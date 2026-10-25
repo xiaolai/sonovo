@@ -49,26 +49,48 @@ enum TimelineAudioPeak {
                 guard let block = CMSampleBufferGetDataBuffer(sample) else {
                     return
                 }
+                var lengthAtOffset = 0
                 var length = 0
                 var pointer: UnsafeMutablePointer<Int8>?
                 let status = CMBlockBufferGetDataPointer(
                     block,
                     atOffset: 0,
-                    lengthAtOffsetOut: nil,
+                    lengthAtOffsetOut: &lengthAtOffset,
                     totalLengthOut: &length,
                     dataPointerOut: &pointer
                 )
-                guard status == kCMBlockBufferNoErr, let pointer else {
+                guard status == kCMBlockBufferNoErr else { return }
+                let sampleCount = length / MemoryLayout<Float>.size
+                guard sampleCount > 0 else { return }
+                if lengthAtOffset == length, let pointer {
+                    pointer.withMemoryRebound(
+                        to: Float.self,
+                        capacity: sampleCount
+                    ) { samples in
+                        for index in 0..<sampleCount {
+                            peak = max(peak, abs(samples[index]))
+                        }
+                    }
                     return
                 }
-                let count = length / MemoryLayout<Float>.size
-                pointer.withMemoryRebound(
-                    to: Float.self,
-                    capacity: count
-                ) { samples in
-                    for index in 0..<count {
-                        peak = max(peak, abs(samples[index]))
-                    }
+                // A fragmented block buffer's pointer covers only
+                // lengthAtOffset bytes. Copy the whole payload into an
+                // aligned buffer before scanning it.
+                var samples = [Float](
+                    repeating: 0,
+                    count: sampleCount
+                )
+                let copied = samples.withUnsafeMutableBytes { bytes in
+                    CMBlockBufferCopyDataBytes(
+                        block,
+                        atOffset: 0,
+                        dataLength: length,
+                        destination: bytes.baseAddress!
+                    )
+                }
+                guard copied == kCMBlockBufferNoErr else { return }
+                for value in samples {
+                    peak = max(peak, abs(value))
                 }
             }
         }

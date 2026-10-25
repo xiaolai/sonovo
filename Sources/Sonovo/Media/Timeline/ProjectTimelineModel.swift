@@ -44,6 +44,10 @@ struct TimelineClip: Codable, Identifiable, Hashable, Sendable, Equatable {
     /// timeline files remain readable; a present value that no longer
     /// matches the project scan marks the clip stale.
     var sourceRevision: String? = nil
+    /// Content hash captured when the clip was placed or relinked. New clips
+    /// use it to detect a same-size, same-mtime source replacement; legacy
+    /// clips without it fall back to revision metadata.
+    var sourceFingerprint: String? = nil
 
     var sourceRange: MediaTimeRange {
         MediaTimeRange(
@@ -171,6 +175,14 @@ struct ProjectTimeline: Codable, Sendable, Equatable {
                 throw TimelineValidationError.duplicateClipID(clip.id)
             }
         }
+        guard Self.isFiniteTime(duration),
+              duration.seconds >= 0 else {
+            throw TimelineValidationError.invalidTime("project")
+        }
+    }
+
+    private static func isFiniteTime(_ time: CMTime) -> Bool {
+        time.isNumeric && time.seconds.isFinite
     }
 
     private func validateTrack(
@@ -192,6 +204,10 @@ struct ProjectTimeline: Codable, Sendable, Equatable {
                   clip.sourceStart.cmTime.isNumeric,
                   clip.sourceDuration.cmTime.isNumeric,
                   clip.timelineStart.cmTime.isNumeric,
+                  Self.isFiniteTime(clip.fadeIn.cmTime),
+                  Self.isFiniteTime(clip.fadeOut.cmTime),
+                  Self.isFiniteTime(clip.sourceEnd),
+                  Self.isFiniteTime(clip.timelineEnd),
                   clip.sourceStart.seconds >= 0,
                   clip.sourceDuration.seconds > 0,
                   clip.timelineStart.seconds >= 0 else {
@@ -202,8 +218,8 @@ struct ProjectTimeline: Codable, Sendable, Equatable {
             }
             guard clip.fadeIn.seconds >= 0,
                   clip.fadeOut.seconds >= 0,
-                  clip.fadeIn.seconds + clip.fadeOut.seconds
-                    <= clip.sourceDuration.seconds else {
+                  clip.fadeIn.cmTime + clip.fadeOut.cmTime
+                    <= clip.sourceDuration.cmTime else {
                 throw TimelineValidationError.invalidFade(clip.id)
             }
             guard Self.isSafeProjectPath(clip.relativePath) else {

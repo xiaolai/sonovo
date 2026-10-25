@@ -105,7 +105,8 @@ extension ProjectTimeline {
     mutating func relink(
         clipID: String,
         to asset: ProjectAsset,
-        sourceDuration: CMTime
+        sourceDuration: CMTime,
+        sourceFingerprint: String? = nil
     ) throws {
         guard Self.isSafeProjectPath(asset.relativePath) else {
             throw TimelineRelinkError.invalidPath
@@ -133,7 +134,8 @@ extension ProjectTimeline {
                 gain: clip.gain,
                 fadeIn: clip.fadeIn,
                 fadeOut: clip.fadeOut,
-                sourceRevision: asset.revision.token
+                sourceRevision: asset.revision.token,
+                sourceFingerprint: sourceFingerprint
             )
             switch kind {
             case .video:
@@ -147,5 +149,61 @@ extension ProjectTimeline {
             return
         }
         throw TimelineRelinkError.unknownClip(clipID)
+    }
+}
+
+extension ProjectTimeline {
+    /// Re-hashes the stored content fingerprints off the main actor. The
+    /// project directory is a trust boundary, so metadata identity alone is
+    /// not enough for a same-size replacement.
+    func contentFingerprintIssues(
+        assets: [ProjectAsset]
+    ) async -> [TimelineSourceIssue] {
+        let byPath = Dictionary(
+            assets.map { ($0.relativePath, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let clips = allClips.compactMap { clip -> (
+            TimelineClip,
+            ProjectAsset,
+            TimelineTrackKind
+        )? in
+            guard let expected = clip.sourceFingerprint,
+                  let asset = byPath[clip.relativePath],
+                  let track = trackContaining(clipID: clip.id) else {
+                return nil
+            }
+            _ = expected
+            return (clip, asset, track)
+        }
+        return await Task.detached(priority: .utility) {
+            var checksums: [String: String] = [:]
+            var issues: [TimelineSourceIssue] = []
+            for (clip, asset, track) in clips {
+                guard let expected = clip.sourceFingerprint else { continue }
+                let current: String?
+                if let cached = checksums[clip.relativePath] {
+                    current = cached
+                } else {
+                    current = try? TimelineAssetProbe.fingerprint(
+                        for: asset.url
+                    )
+                    if let current {
+                        checksums[clip.relativePath] = current
+                    }
+                }
+                if current != expected {
+                    issues.append(
+                        TimelineSourceIssue(
+                            clipID: clip.id,
+                            track: track,
+                            relativePath: clip.relativePath,
+                            reason: .changed
+                        )
+                    )
+                }
+            }
+            return issues
+        }.value
     }
 }

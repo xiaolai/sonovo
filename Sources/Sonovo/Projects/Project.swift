@@ -42,6 +42,9 @@ final class Project: Identifiable {
     /// Bumped when a media file is created or replaced. Demo assets are not
     /// scanned, so this is what makes their views re-read the file revision.
     private(set) var mediaGeneration: UInt64 = 0
+    /// Bumped after every applied scan, including one whose metadata looks
+    /// unchanged, so timeline source fingerprints are rechecked.
+    private(set) var scanRevision: UInt64 = 0
 
     var openTabs: [EditorTab]
     var selectedTabID: String
@@ -538,6 +541,9 @@ final class Project: Identifiable {
             effectiveAssets: effectiveAssets,
             previousAssets: previousAssets
         )
+        if let document = timelines.document {
+            timelines.handleExternalChange(url: document.url)
+        }
         reloadChangedModelResources()
 
         guard await reconcileMissingTabs(generation: generation) else {
@@ -585,6 +591,7 @@ final class Project: Identifiable {
         let wasOffline = isOffline
 
         assets = effectiveAssets
+        scanRevision &+= 1
         // A complete scan already built groups; only a merged partial or
         // truncated result needs them recomputed.
         groups = result.isPartial || result.truncated

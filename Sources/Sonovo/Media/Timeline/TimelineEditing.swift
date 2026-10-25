@@ -40,7 +40,8 @@ extension ProjectTimeline {
         duration: CMTime,
         gain: Double = 1,
         fadeIn: CMTime = .zero,
-        fadeOut: CMTime = .zero
+        fadeOut: CMTime = .zero,
+        sourceFingerprint: String? = nil
     ) throws {
         guard Self.isSafeProjectPath(asset.relativePath) else {
             throw TimelineEditError.invalidRange
@@ -69,7 +70,8 @@ extension ProjectTimeline {
             gain: gain,
             fadeIn: TimelineTimeDTO(fadeIn),
             fadeOut: TimelineTimeDTO(fadeOut),
-            sourceRevision: asset.revision.token
+            sourceRevision: asset.revision.token,
+            sourceFingerprint: sourceFingerprint
         )
         var next = self
         var clips = next.clips(for: track)
@@ -109,7 +111,8 @@ extension ProjectTimeline {
             gain: clip.gain,
             fadeIn: clip.fadeIn,
             fadeOut: clip.fadeOut,
-            sourceRevision: clip.sourceRevision
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
         )
         clips[index] = clip
         clips.sort {
@@ -157,7 +160,8 @@ extension ProjectTimeline {
             gain: clip.gain,
             fadeIn: clip.fadeIn,
             fadeOut: clip.fadeOut,
-            sourceRevision: clip.sourceRevision
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
         )
         next.setClips(clips, for: track)
         do {
@@ -198,7 +202,8 @@ extension ProjectTimeline {
             gain: clip.gain,
             fadeIn: clip.fadeIn,
             fadeOut: clip.fadeOut,
-            sourceRevision: clip.sourceRevision
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
         )
         next.setClips(clips, for: track)
         do {
@@ -243,7 +248,8 @@ extension ProjectTimeline {
             gain: clip.gain,
             fadeIn: clip.fadeIn,
             fadeOut: TimelineTimeDTO(.zero),
-            sourceRevision: clip.sourceRevision
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
         )
         let right = TimelineClip(
             id: rightID,
@@ -259,7 +265,8 @@ extension ProjectTimeline {
             gain: clip.gain,
             fadeIn: TimelineTimeDTO(.zero),
             fadeOut: clip.fadeOut,
-            sourceRevision: clip.sourceRevision
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
         )
         clips[index] = left
         clips.append(right)
@@ -270,6 +277,76 @@ extension ProjectTimeline {
         try next.validate()
         self = next
         return rightID
+    }
+
+    mutating func setGain(id: String, gain: Double) throws {
+        guard gain >= 0, gain <= 1 else {
+            throw TimelineEditError.invalidRange
+        }
+        var next = self
+        guard let track = next.trackContaining(clipID: id) else {
+            throw TimelineEditError.unknownClip(id)
+        }
+        var clips = next.clips(for: track)
+        guard let index = clips.firstIndex(where: { $0.id == id }) else {
+            throw TimelineEditError.unknownClip(id)
+        }
+        let clip = clips[index]
+        clips[index] = TimelineClip(
+            id: clip.id,
+            assetID: clip.assetID,
+            relativePath: clip.relativePath,
+            sourceStart: clip.sourceStart,
+            sourceDuration: clip.sourceDuration,
+            timelineStart: clip.timelineStart,
+            gain: gain,
+            fadeIn: clip.fadeIn,
+            fadeOut: clip.fadeOut,
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
+        )
+        next.setClips(clips, for: track)
+        try next.validate()
+        self = next
+    }
+
+    mutating func setFades(
+        id: String,
+        fadeIn: CMTime,
+        fadeOut: CMTime
+    ) throws {
+        guard fadeIn.isNumeric, fadeOut.isNumeric,
+              fadeIn >= .zero, fadeOut >= .zero else {
+            throw TimelineEditError.invalidRange
+        }
+        var next = self
+        guard let track = next.trackContaining(clipID: id) else {
+            throw TimelineEditError.unknownClip(id)
+        }
+        var clips = next.clips(for: track)
+        guard let index = clips.firstIndex(where: { $0.id == id }) else {
+            throw TimelineEditError.unknownClip(id)
+        }
+        let clip = clips[index]
+        guard fadeIn + fadeOut <= clip.sourceDuration.cmTime else {
+            throw TimelineEditError.invalidRange
+        }
+        clips[index] = TimelineClip(
+            id: clip.id,
+            assetID: clip.assetID,
+            relativePath: clip.relativePath,
+            sourceStart: clip.sourceStart,
+            sourceDuration: clip.sourceDuration,
+            timelineStart: clip.timelineStart,
+            gain: clip.gain,
+            fadeIn: TimelineTimeDTO(fadeIn),
+            fadeOut: TimelineTimeDTO(fadeOut),
+            sourceRevision: clip.sourceRevision,
+            sourceFingerprint: clip.sourceFingerprint
+        )
+        next.setClips(clips, for: track)
+        try next.validate()
+        self = next
     }
 
     mutating func deleteClip(id: String) throws {

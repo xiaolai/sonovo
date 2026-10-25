@@ -11,6 +11,8 @@ struct TimelineDocumentView: View {
     let workspace: TimelineWorkspace
     let assets: [ProjectAsset]
     let project: Project
+    let isVisible: Bool
+    let scanRevision: UInt64
 
     @State private var selectedClipID: String?
     @State private var playhead = CMTime.zero
@@ -20,9 +22,16 @@ struct TimelineDocumentView: View {
     @State private var dragOrigin = CMTime.zero
     @State private var dragDelta: CGFloat = AppTheme.Spacing.zero
     @State private var scrollOffset: CGFloat = AppTheme.Spacing.zero
+    @State private var gainDraft = AppTheme.Size.timelineMaximumGain
+    @State private var fadeInDraft = Double(AppTheme.Spacing.zero)
+    @State private var fadeOutDraft = Double(AppTheme.Spacing.zero)
     @State private var playback = MediaPlaybackModel()
     @State private var previewTask: Task<Void, Never>?
     @State private var peak: Float?
+    @State private var previewIssues: [TimelineSourceIssue] = []
+    @State private var recheckTask: Task<Void, Never>?
+    @State private var recheckGeneration: UInt64 = 0
+    @State private var previewFailed = false
 
     private var document: TimelineDocument? { workspace.document }
 
@@ -53,6 +62,24 @@ struct TimelineDocumentView: View {
         }
         .onChange(of: currentTimeline) {
             rebuildPreview()
+            syncClipDrafts()
+        }
+        .onChange(of: selectedClipID) {
+            syncClipDrafts()
+        }
+        .onChange(of: assets) {
+            recheckSources()
+        }
+        .onChange(of: scanRevision) {
+            recheckSources()
+        }
+        .onChange(of: isVisible) { _, visible in
+            if visible {
+                rebuildPreview()
+            } else {
+                previewTask?.cancel()
+                playback.pause()
+            }
         }
         .onChange(of: playback.elapsed) { _, seconds in
             if playback.isPlaying {
@@ -188,6 +215,13 @@ struct TimelineDocumentView: View {
             } else {
                 statusLabel
             }
+
+            if document?.errorMessage != nil {
+                Button("Discard & Reload") {
+                    workspace.reload()
+                }
+                .help("Discard the in-memory timeline and reload the file")
+            }
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, AppTheme.Spacing.md)
@@ -250,13 +284,14 @@ struct TimelineDocumentView: View {
 
     private func timelineContent(_ timeline: ProjectTimeline) -> some View {
         VStack(spacing: AppTheme.Spacing.zero) {
-            let issues = timeline.sourceIssues(assets: assets)
+            let issues = combinedIssues(timeline)
             if !issues.isEmpty {
                 sourceIssues(issues)
             }
-            if !timeline.videoTrack.clips.isEmpty {
-                previewPane
+            if selectedClipID != nil {
+                clipInspector
             }
+            previewPane
             GeometryReader { proxy in
                 let seconds = max(
                     timeline.duration.seconds,
@@ -347,11 +382,96 @@ struct TimelineDocumentView: View {
         .background(AppTheme.Palette.card)
     }
 
+    @ViewBuilder
+    private var clipInspector: some View {
+        if let clip = currentTimeline?.clip(id: selectedClipID ?? "") {
+            let maximumFadeIn = max(
+                clip.sourceDuration.seconds - fadeOutDraft,
+                Double(AppTheme.Spacing.zero)
+            )
+            let maximumFadeOut = max(
+                clip.sourceDuration.seconds - fadeInDraft,
+                Double(AppTheme.Spacing.zero)
+            )
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                HStack(spacing: AppTheme.Spacing.sm) {
+                    Image(systemName: "rectangle")
+                        .foregroundStyle(.secondary)
+                    Text(clip.relativePath)
+                        .font(
+                            .system(
+                                size: AppTheme.TypeScale.xs,
+                                weight: .medium
+                            )
+                        )
+                        .lineLimit(1)
+                    Spacer()
+                    Text(
+                        String(
+                            format: "Gain %.0f%%",
+                            gainDraft * AppTheme.Size.timelinePercentScale
+                        )
+                    )
+                    .font(.system(size: AppTheme.TypeScale.xxs))
+                    .foregroundStyle(.secondary)
+                }
+                HStack(spacing: AppTheme.Spacing.sm) {
+                    Text("Gain")
+                        .font(.system(size: AppTheme.TypeScale.xxs))
+                        .frame(
+                            width: AppTheme.Size.metadataLabelWidth,
+                            alignment: .leading
+                        )
+                    Slider(
+                        value: $gainDraft,
+                        in: Double(AppTheme.Spacing.zero)...AppTheme.Size.timelineMaximumGain,
+                        onEditingChanged: { editing in
+                            if !editing {
+                                commitGain(clipID: clip.id)
+                            }
+                        }
+                    )
+                }
+                HStack(spacing: AppTheme.Spacing.sm) {
+                    Text("Fade in/out")
+                        .font(.system(size: AppTheme.TypeScale.xxs))
+                        .frame(
+                            width: AppTheme.Size.metadataLabelWidth,
+                            alignment: .leading
+                        )
+                    Slider(
+                        value: $fadeInDraft,
+                        in: fadeRange(maximumFadeIn),
+                        onEditingChanged: { editing in
+                            if !editing {
+                                commitFades(clipID: clip.id)
+                            }
+                        }
+                    )
+                    Slider(
+                        value: $fadeOutDraft,
+                        in: fadeRange(maximumFadeOut),
+                        onEditingChanged: { editing in
+                            if !editing {
+                                commitFades(clipID: clip.id)
+                            }
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, AppTheme.Spacing.md)
+            .padding(.vertical, AppTheme.Spacing.xs)
+            .background(AppTheme.Palette.card)
+        }
+    }
+
     private var previewPane: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
-            MediaPlayerView(player: playback.player)
-                .frame(height: AppTheme.Size.timelinePreviewHeight)
-                .background(AppTheme.Palette.black)
+            if currentTimeline?.videoTrack.clips.isEmpty != true {
+                MediaPlayerView(player: playback.player)
+                    .frame(height: AppTheme.Size.timelinePreviewHeight)
+                    .background(AppTheme.Palette.black)
+            }
             HStack(spacing: AppTheme.Spacing.sm) {
                 Button {
                     playback.togglePlayback()
@@ -385,7 +505,15 @@ struct TimelineDocumentView: View {
                 Rectangle()
                     .fill(AppTheme.Palette.card)
                 // token-exempt: one-second ruler steps are content spacing
-                let steps = Int(ceil(seconds / AppTheme.Size.timelineRulerStepSeconds))
+                let rawSteps = ceil(
+                    seconds / AppTheme.Size.timelineRulerStepSeconds
+                )
+                let steps = Int(
+                    min(
+                        rawSteps,
+                        Double(AppTheme.Size.timelineMaximumRulerSteps)
+                    )
+                )
                 ForEach(0...steps, id: \.self) { step in
                     let value = Double(step)
                         * AppTheme.Size.timelineRulerStepSeconds
@@ -515,7 +643,7 @@ struct TimelineDocumentView: View {
                     }
                     .onEnded { value in
                         let proposed = dragOrigin
-                            + seconds(value.translation.width / pixelsPerSecond)
+                            + seconds(value.translation.width)
                         commitMove(clipID: clip.id, to: snapTime(proposed))
                         dragClipID = nil
                         dragOrigin = .zero
@@ -540,9 +668,7 @@ struct TimelineDocumentView: View {
             .highPriorityGesture(
                 DragGesture()
                     .onEnded { value in
-                        let delta = seconds(
-                            value.translation.width / pixelsPerSecond
-                        )
+                        let delta = seconds(value.translation.width)
                         let base = leading
                             ? clip.timelineStart.cmTime
                             : clip.timelineEnd
@@ -573,6 +699,7 @@ struct TimelineDocumentView: View {
 
     private func relink(_ issue: TimelineSourceIssue) {
         guard let root = project.root, let document else { return }
+        let targetDocument = document
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -595,18 +722,64 @@ struct TimelineDocumentView: View {
                 return
             }
             do {
-                let duration = try await TimelineAssetProbe.duration(for: asset)
-                try document.mutate { timeline in
+                let probed = try await TimelineAssetProbe.probe(
+                    asset: asset,
+                    track: issue.track
+                )
+                guard workspace.document === targetDocument else { return }
+                try targetDocument.mutate { timeline in
                     try timeline.relink(
                         clipID: issue.clipID,
                         to: asset,
-                        sourceDuration: duration
+                        sourceDuration: probed.duration,
+                        sourceFingerprint: probed.fingerprint
                     )
                 }
                 editError = nil
             } catch {
                 editError = error.localizedDescription
             }
+        }
+    }
+
+    private func fadeRange(_ maximum: Double) -> ClosedRange<Double> {
+        let upper = max(maximum, Double(AppTheme.Spacing.zero))
+        return Double(AppTheme.Spacing.zero)...upper
+    }
+
+    private func syncClipDrafts() {
+        guard let clip = currentTimeline?.clip(id: selectedClipID ?? "")
+        else { return }
+        gainDraft = clip.gain
+        fadeInDraft = clip.fadeIn.seconds
+        fadeOutDraft = clip.fadeOut.seconds
+    }
+
+    private func commitGain(clipID: String) {
+        do {
+            try document?.mutate { timeline in
+                try timeline.setGain(id: clipID, gain: gainDraft)
+            }
+            editError = nil
+        } catch {
+            syncClipDrafts()
+            editError = error.localizedDescription
+        }
+    }
+
+    private func commitFades(clipID: String) {
+        do {
+            try document?.mutate { timeline in
+                try timeline.setFades(
+                    id: clipID,
+                    fadeIn: time(fadeInDraft),
+                    fadeOut: time(fadeOutDraft)
+                )
+            }
+            editError = nil
+        } catch {
+            syncClipDrafts()
+            editError = error.localizedDescription
         }
     }
 
@@ -623,10 +796,22 @@ struct TimelineDocumentView: View {
         playback.pause()
         guard let document,
               let timeline = document.timeline else {
+            clearPreview()
+            return
+        }
+        let issues = timeline.sourceIssues(assets: assets)
+        guard issues.isEmpty else {
+            previewIssues = issues
+            clearPreview()
+            editError = issues.map(\.message).joined(separator: "\n")
             return
         }
         let url = document.url
         let assets = assets
+        let resumeAt = min(
+            playhead.seconds,
+            timeline.duration.seconds
+        )
         previewTask = Task { @MainActor in
             do {
                 let built = try await ProjectTimelineCompositionBuilder.build(
@@ -639,19 +824,86 @@ struct TimelineDocumentView: View {
                     sourceURL: url,
                     fileSize: 0,
                     audioMix: built.audioMix,
-                    videoComposition: built.videoComposition
+                    videoComposition: built.videoComposition,
+                    resumeAt: resumeAt
                 )
                 peak = try await TimelineAudioPeak.measure(
                     asset: built.composition,
                     audioMix: built.audioMix
                 )
+                previewIssues = []
+                previewFailed = false
                 editError = nil
             } catch is CancellationError {
                 // A newer edit owns the preview.
+            } catch let TimelineCompositionError.sourceIssues(issues) {
+                clearPreview()
+                previewIssues = issues
+                previewFailed = true
+                editError = issues.map(\.message).joined(separator: "\n")
             } catch {
+                clearPreview()
+                previewIssues = []
+                previewFailed = true
                 editError = error.localizedDescription
             }
         }
+    }
+
+    private func recheckSources() {
+        recheckTask?.cancel()
+        recheckGeneration &+= 1
+        let generation = recheckGeneration
+        guard let timeline = currentTimeline else {
+            previewIssues = []
+            clearPreview()
+            return
+        }
+        let metadataIssues = timeline.sourceIssues(assets: assets)
+        guard metadataIssues.isEmpty else {
+            previewIssues = metadataIssues
+            clearPreview()
+            return
+        }
+        let assets = assets
+        recheckTask = Task { @MainActor in
+            let conflicts = await timeline.contentFingerprintIssues(
+                assets: assets
+            )
+            guard !Task.isCancelled,
+                  generation == recheckGeneration,
+                  currentTimeline == timeline else {
+                return
+            }
+            let hadIssues = !previewIssues.isEmpty
+            previewIssues = conflicts
+            if conflicts.isEmpty {
+                if hadIssues || previewFailed {
+                    editError = nil
+                    rebuildPreview()
+                }
+            } else {
+                clearPreview()
+                editError = conflicts.map(\.message).joined(separator: "\n")
+            }
+        }
+    }
+
+    private func combinedIssues(
+        _ timeline: ProjectTimeline
+    ) -> [TimelineSourceIssue] {
+        var seen = Set<String>()
+        return (timeline.sourceIssues(assets: assets) + previewIssues)
+            .filter { issue in
+                seen.insert("\(issue.clipID)|\(issue.reason.rawValue)")
+                    .inserted
+            }
+    }
+
+    private func clearPreview() {
+        previewTask?.cancel()
+        playback.unload()
+        peak = nil
     }
 
     private func exportTimeline() {
@@ -689,15 +941,23 @@ struct TimelineDocumentView: View {
         to kind: TimelineTrackKind,
         at start: CMTime
     ) {
+        guard let targetDocument = document else { return }
         Task { @MainActor in
             do {
-                let duration = try await TimelineAssetProbe.duration(for: asset)
-                try document?.mutate { timeline in
+                let probed = try await TimelineAssetProbe.probe(
+                    asset: asset,
+                    track: kind
+                )
+                // The user may have opened another timeline while the probe
+                // awaited. Never insert into a document they did not target.
+                guard workspace.document === targetDocument else { return }
+                try targetDocument.mutate { timeline in
                     try timeline.addClip(
                         asset: asset,
                         track: kind,
                         at: start,
-                        duration: duration
+                        duration: probed.duration,
+                        sourceFingerprint: probed.fingerprint
                     )
                 }
                 editError = nil
@@ -733,6 +993,7 @@ struct TimelineDocumentView: View {
             }
             editError = nil
         } catch {
+            syncClipDrafts()
             editError = error.localizedDescription
         }
     }
@@ -785,7 +1046,7 @@ struct TimelineDocumentView: View {
         return timeline.snap(
             time,
             candidates: candidates,
-            tolerance: seconds(AppTheme.Spacing.s10 / pixelsPerSecond)
+            tolerance: seconds(AppTheme.Spacing.s10)
         )
     }
 
@@ -801,7 +1062,10 @@ struct TimelineDocumentView: View {
     }
 
     private func timeLabel(_ seconds: Double) -> String {
-        let whole = Int(max(seconds, 0))
+        let safe = seconds.isFinite
+            ? min(max(seconds, Double(AppTheme.Spacing.zero)), Double(Int.max / 2))
+            : Double(AppTheme.Spacing.zero)
+        let whole = Int(safe)
         let minutes = whole / 60
         let remainder = whole % 60
         return String(format: "%d:%02d", minutes, remainder)

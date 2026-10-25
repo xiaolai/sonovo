@@ -527,6 +527,8 @@ enum AppTheme {
         static let timelineRulerStepSeconds: Double = 1
         static let timelineZoomFactor: Double = 1.5
         static let timelinePercentScale: Double = 100
+        static let timelineMaximumGain: Double = 1
+        static let timelineMaximumRulerSteps: Int = 10_000
         static let timelinePlayheadWidth: CGFloat = 1
         static let timelineTrimHandleWidth: CGFloat = 8
         static let letterBadge: CGFloat = 17

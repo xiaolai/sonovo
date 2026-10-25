@@ -253,3 +253,107 @@ final class TimelineDocumentTests: XCTestCase {
         return url
     }
 }
+
+@MainActor
+final class TimelineAuditRegressionTests: XCTestCase {
+    func testOverflowingClipEndIsRejected() {
+        var timeline = ProjectTimeline(name: "Overflow")
+        timeline.videoTrack.clips = [
+            TimelineClip(
+                id: "overflow",
+                assetID: "video.mov",
+                relativePath: "video.mov",
+                sourceStart: TimelineTimeDTO(value: 0, timescale: 1),
+                sourceDuration: TimelineTimeDTO(value: 2, timescale: 1),
+                timelineStart: TimelineTimeDTO(
+                    value: Int64.max,
+                    timescale: 1
+                ),
+                gain: 1,
+                fadeIn: TimelineTimeDTO(value: 0, timescale: 1),
+                fadeOut: TimelineTimeDTO(value: 0, timescale: 1)
+            )
+        ]
+        XCTAssertThrowsError(try timeline.validate())
+    }
+
+    func testExactCMTimeFadeBoundaryIsAccepted() throws {
+        var timeline = ProjectTimeline(name: "Fades")
+        timeline.voiceTrack.clips = [
+            TimelineClip(
+                id: "exact",
+                assetID: "voice.wav",
+                relativePath: "voice.wav",
+                sourceStart: TimelineTimeDTO(value: 0, timescale: 600_000),
+                sourceDuration: TimelineTimeDTO(
+                    value: 180_000,
+                    timescale: 600_000
+                ),
+                timelineStart: TimelineTimeDTO(value: 0, timescale: 600_000),
+                gain: 1,
+                fadeIn: TimelineTimeDTO(value: 60_000, timescale: 600_000),
+                fadeOut: TimelineTimeDTO(value: 120_000, timescale: 600_000)
+            )
+        ]
+        XCTAssertNoThrow(try timeline.validate())
+    }
+
+    func testFirstSaveRefusesAFileCreatedElsewhere() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "timeline-first-save-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("Episode.timeline.json")
+        let document = TimelineDocument(url: url)
+        defer { document.close() }
+        try document.create(ProjectTimeline(name: "Mine"))
+        try TimelineFileStore(url: url).save(
+            ProjectTimeline(name: "Theirs")
+        )
+        do {
+            try document.save()
+            XCTFail("an external first write must be refused")
+        } catch {
+            XCTAssertEqual(
+                error as? TimelineDocument.DocumentError,
+                .externalChange
+            )
+        }
+        XCTAssertTrue(document.hasUnsavedChanges)
+    }
+
+    func testSwitchingTimelinesFlushesTheDirtyOne() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "timeline-switch-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstURL = directory.appendingPathComponent("First.timeline.json")
+        let secondURL = directory.appendingPathComponent("Second.timeline.json")
+        let workspace = TimelineWorkspace()
+        try workspace.create(
+            url: firstURL,
+            timeline: ProjectTimeline(name: "First")
+        )
+        try workspace.document?.mutate { timeline in
+            timeline.name = "First edited"
+        }
+        try workspace.create(
+            url: secondURL,
+            timeline: ProjectTimeline(name: "Second")
+        )
+        let saved = try TimelineFileStore(url: firstURL).load()
+        XCTAssertEqual(saved.name, "First edited")
+    }
+}

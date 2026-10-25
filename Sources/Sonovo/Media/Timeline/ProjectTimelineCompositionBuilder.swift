@@ -49,17 +49,45 @@ enum ProjectTimelineCompositionBuilder {
         timeline: ProjectTimeline,
         assets: [ProjectAsset]
     ) async throws -> TimelineComposition {
-        let issues = timeline.sourceIssues(assets: assets)
+        var issues = timeline.sourceIssues(assets: assets)
+        let byPath = Dictionary(
+            assets.map { ($0.relativePath, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var checkedFingerprints: [String: String] = [:]
+        for clip in timeline.allClips {
+            guard let expected = clip.sourceFingerprint,
+                  let asset = byPath[clip.relativePath],
+                  let track = timeline.trackContaining(clipID: clip.id) else {
+                continue
+            }
+            let current: String
+            if let cached = checkedFingerprints[clip.relativePath] {
+                current = cached
+            } else {
+                current = try TimelineAssetProbe.fingerprint(for: asset.url)
+                checkedFingerprints[clip.relativePath] = current
+            }
+            if current != expected,
+               !issues.contains(where: {
+                   $0.clipID == clip.id && $0.reason == .changed
+               }) {
+                issues.append(
+                    TimelineSourceIssue(
+                        clipID: clip.id,
+                        track: track,
+                        relativePath: clip.relativePath,
+                        reason: .changed
+                    )
+                )
+            }
+        }
         guard issues.isEmpty else {
             throw TimelineCompositionError.sourceIssues(issues)
         }
         guard !timeline.allClips.isEmpty else {
             throw TimelineCompositionError.emptyTimeline
         }
-        let byPath = Dictionary(
-            assets.map { ($0.relativePath, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
         let composition = AVMutableComposition()
         let videoTrack = composition.addMutableTrack(
             withMediaType: .video,

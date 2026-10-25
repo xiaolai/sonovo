@@ -1,7 +1,25 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Observation
 import SonovoCore
+
+enum TimelineStoreError: LocalizedError, Equatable {
+    case externalChange
+    case existingFile
+    case lockFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .externalChange:
+            "The timeline changed on disk. Reload it before saving."
+        case .existingFile:
+            "A timeline file already exists at this path."
+        case .lockFailed:
+            "The timeline file could not be locked for writing."
+        }
+    }
+}
 
 struct TimelineFileStore: Sendable {
     let url: URL
@@ -19,20 +37,89 @@ struct TimelineFileStore: Sendable {
     }
 
     func load() throws -> ProjectTimeline {
+        try loadSnapshot().timeline
+    }
+
+    /// Reads and hashes one byte range, so a writer that replaces the file
+    /// between two independent reads cannot become an acknowledged baseline
+    /// without its contents being decoded.
+    func loadSnapshot() throws -> (
+        timeline: ProjectTimeline,
+        checksum: String
+    ) {
         let data = try Data(contentsOf: url)
         let timeline = try decoder.decode(ProjectTimeline.self, from: data)
         try timeline.validate()
-        return timeline
+        return (timeline, Self.checksum(data))
     }
 
+    /// Unconditional write for tests and fixtures. The document uses the
+    /// checksum-guarded overload below.
     func save(_ timeline: ProjectTimeline) throws {
         try timeline.validate()
+        try prepareDirectory()
+        try writeData(try encoder.encode(timeline), url)
+    }
+
+    /// Compare-and-swap save under an exclusive lock shared by every
+    /// TimelineDocument writing this path. `expected == nil` means the file
+    /// must not exist yet.
+    @discardableResult
+    func save(
+        _ timeline: ProjectTimeline,
+        expectedChecksum: String?
+    ) throws -> String {
+        try timeline.validate()
+        try prepareDirectory()
+        let data = try encoder.encode(timeline)
+        let lockURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).lock")
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, 0o600)
+        guard descriptor >= 0 else {
+            throw TimelineStoreError.lockFailed
+        }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else {
+            throw TimelineStoreError.lockFailed
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        let current: Data?
+        if exists {
+            do {
+                current = try Data(contentsOf: url)
+            } catch {
+                // An existing but unreadable file is not absent. Writing over
+                // it would destroy bytes the document could not inspect.
+                throw TimelineStoreError.externalChange
+            }
+        } else {
+            current = nil
+        }
+        let currentChecksum = current.map(Self.checksum)
+        if let expectedChecksum {
+            guard currentChecksum == expectedChecksum else {
+                throw TimelineStoreError.externalChange
+            }
+        } else if exists {
+            throw TimelineStoreError.existingFile
+        }
+        try writeData(data, url)
+        return Self.checksum(data)
+    }
+
+    static func checksum(_ data: Data) -> String {
+        SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func prepareDirectory() throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let data = try encoder.encode(timeline)
-        try writeData(data, url)
     }
 
     private var encoder: JSONEncoder {
@@ -74,6 +161,12 @@ final class TimelineDocument {
     private(set) var timeline: ProjectTimeline?
     private(set) var status: Status = .idle
     private(set) var hasUnsavedChanges = false
+    var hasExternalChanges: Bool {
+        if let diskChecksum {
+            return checksum() != diskChecksum
+        }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
 
     private var undoStack: [ProjectTimeline] = []
     private var redoStack: [ProjectTimeline] = []
@@ -99,8 +192,9 @@ final class TimelineDocument {
     func load() throws {
         status = .loading
         do {
-            timeline = try store.load()
-            diskChecksum = checksum()
+            let snapshot = try store.loadSnapshot()
+            timeline = snapshot.timeline
+            diskChecksum = snapshot.checksum
             status = .saved
             hasUnsavedChanges = false
             undoStack.removeAll()
@@ -179,21 +273,21 @@ final class TimelineDocument {
         autosaveTask = nil
         saveGeneration &+= 1
         status = .saving
-        // A save is the only path that may overwrite the canonical file. If
-        // the bytes changed since this document read or wrote them, surface
-        // the conflict and leave the dirty document in place.
-        if let expected = diskChecksum {
-            guard checksum() == expected else {
-                status = .failed(TimelineDocument.DocumentError.externalChange.localizedDescription)
-                hasUnsavedChanges = true
-                throw TimelineDocument.DocumentError.externalChange
-            }
-        }
         do {
-            try store.save(timeline)
-            diskChecksum = checksum()
+            diskChecksum = try store.save(
+                timeline,
+                expectedChecksum: diskChecksum
+            )
             status = .saved
             hasUnsavedChanges = false
+        } catch TimelineStoreError.externalChange,
+                TimelineStoreError.existingFile {
+            status = .failed(
+                TimelineDocument.DocumentError.externalChange
+                    .localizedDescription
+            )
+            hasUnsavedChanges = true
+            throw TimelineDocument.DocumentError.externalChange
         } catch {
             // A failed write never clears dirty state or claims Saved.
             status = .failed(error.localizedDescription)
@@ -247,8 +341,6 @@ final class TimelineDocument {
 
     private func checksum() -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return SHA256.hash(data: data)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        return TimelineFileStore.checksum(data)
     }
 }

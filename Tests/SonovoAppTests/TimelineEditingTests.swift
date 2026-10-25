@@ -231,3 +231,91 @@ final class TimelineEditingTests: XCTestCase {
         TimelineTimeDTO(time(seconds))
     }
 }
+
+final class TimelineClipLevelTests: XCTestCase {
+    func testGainAndFadesAreEditedAsOneClipChange() throws {
+        var timeline = ProjectTimeline(name: "Levels")
+        let asset = ProjectAsset(
+            id: "voice.wav",
+            url: URL(fileURLWithPath: "/tmp/voice.wav"),
+            name: "voice.wav",
+            relativePath: "voice.wav",
+            kind: .audio,
+            size: 1,
+            modified: nil,
+            revision: AssetRevision(
+                fileIdentifier: "voice",
+                size: 1,
+                modified: nil
+            )
+        )
+        try timeline.addClip(
+            asset: asset,
+            track: .voice,
+            at: time(0),
+            duration: time(4)
+        )
+        let id = try XCTUnwrap(timeline.voiceTrack.clips.first?.id)
+        try timeline.setGain(id: id, gain: 0.4)
+        try timeline.setFades(
+            id: id,
+            fadeIn: time(0.25),
+            fadeOut: time(0.5)
+        )
+        let clip = try XCTUnwrap(timeline.clip(id: id))
+        XCTAssertEqual(clip.gain, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(clip.fadeIn.seconds, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(clip.fadeOut.seconds, 0.5, accuracy: 0.0001)
+        XCTAssertThrowsError(try timeline.setGain(id: id, gain: 1.5))
+        XCTAssertThrowsError(
+            try timeline.setFades(
+                id: id,
+                fadeIn: time(3.9),
+                fadeOut: time(0.5)
+            )
+        )
+    }
+
+    private func time(_ seconds: Double) -> CMTime {
+        CMTime(seconds: seconds, preferredTimescale: 600_000)
+    }
+}
+
+final class TimelineFingerprintEditingTests: XCTestCase {
+    func testEditingOperationsPreserveSourceFingerprint() throws {
+        var timeline = ProjectTimeline(name: "Fingerprint")
+        let asset = ProjectAsset(
+            id: "voice.wav",
+            url: URL(fileURLWithPath: "/tmp/voice.wav"),
+            name: "voice.wav",
+            relativePath: "voice.wav",
+            kind: .audio,
+            size: 1,
+            modified: nil,
+            revision: AssetRevision(
+                fileIdentifier: "voice",
+                size: 1,
+                modified: nil
+            )
+        )
+        try timeline.addClip(
+            asset: asset,
+            track: .voice,
+            at: time(0),
+            duration: time(4),
+            sourceFingerprint: "abc123"
+        )
+        let id = try XCTUnwrap(timeline.voiceTrack.clips.first?.id)
+        try timeline.moveClip(id: id, to: time(0.5))
+        try timeline.trimStart(id: id, to: time(1))
+        try timeline.trimEnd(id: id, to: time(4))
+        try timeline.setGain(id: id, gain: 0.5)
+        let right = try timeline.splitClip(id: id, at: time(3))
+        XCTAssertEqual(timeline.clip(id: id)?.sourceFingerprint, "abc123")
+        XCTAssertEqual(timeline.clip(id: right)?.sourceFingerprint, "abc123")
+    }
+
+    private func time(_ seconds: Double) -> CMTime {
+        CMTime(seconds: seconds, preferredTimescale: 600_000)
+    }
+}

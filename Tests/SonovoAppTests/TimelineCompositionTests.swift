@@ -163,3 +163,128 @@ final class TimelineCompositionTests: XCTestCase {
         CMTime(seconds: seconds, preferredTimescale: 600_000)
     }
 }
+
+final class TimelineProbeAndFingerprintTests: XCTestCase {
+    func testRelinkProbeRequiresTheTrackStream() async throws {
+        let video = try fixtureAsset(
+            "cfr.mov",
+            relativePath: "video-only.mov",
+            kind: .video
+        )
+        do {
+            _ = try await TimelineAssetProbe.probe(
+                asset: video,
+                track: .voice
+            )
+            XCTFail("a video-only file must not satisfy an audio track")
+        } catch {
+            XCTAssertEqual(
+                error as? TimelineAssetProbeError,
+                .missingStream
+            )
+        }
+        let probed = try await TimelineAssetProbe.probe(
+            asset: video,
+            track: .video
+        )
+        XCTAssertFalse(probed.fingerprint.isEmpty)
+        XCTAssertGreaterThan(probed.duration.seconds, 0)
+    }
+
+    func testChangedSourceFingerprintBlocksComposition() async throws {
+        let source = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "vo-take-02",
+                withExtension: "wav",
+                subdirectory: "Fixtures"
+            )
+        )
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "timeline-fingerprint-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copy = directory.appendingPathComponent("voice.wav")
+        try FileManager.default.copyItem(at: source, to: copy)
+        let asset = ProjectAsset(
+            id: "voice.wav",
+            url: copy,
+            name: "voice.wav",
+            relativePath: "voice.wav",
+            kind: .audio,
+            size: 1,
+            modified: nil,
+            revision: AssetRevision(
+                fileIdentifier: "voice",
+                size: 1,
+                modified: nil
+            )
+        )
+        let probed = try await TimelineAssetProbe.probe(
+            asset: asset,
+            track: .voice
+        )
+        var timeline = ProjectTimeline(name: "Fingerprint")
+        try timeline.addClip(
+            asset: asset,
+            track: .voice,
+            at: time(0),
+            duration: time(2),
+            sourceFingerprint: probed.fingerprint
+        )
+        let handle = try FileHandle(forWritingTo: copy)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data([0]))
+        try handle.close()
+
+        do {
+            _ = try await ProjectTimelineCompositionBuilder.build(
+                timeline: timeline,
+                assets: [asset]
+            )
+            XCTFail("changed source bytes must block composition")
+        } catch let error as TimelineCompositionError {
+            guard case let .sourceIssues(issues) = error else {
+                return XCTFail("unexpected error \(error)")
+            }
+            XCTAssertEqual(issues.first?.reason, .changed)
+        }
+    }
+
+    private func fixtureAsset(
+        _ name: String,
+        relativePath: String,
+        kind: AssetKind
+    ) throws -> ProjectAsset {
+        let url = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: (name as NSString).deletingPathExtension,
+                withExtension: (name as NSString).pathExtension,
+                subdirectory: "Fixtures"
+            )
+        )
+        return ProjectAsset(
+            id: relativePath,
+            url: url,
+            name: name,
+            relativePath: relativePath,
+            kind: kind,
+            size: 1,
+            modified: nil,
+            revision: AssetRevision(
+                fileIdentifier: name,
+                size: 1,
+                modified: nil
+            )
+        )
+    }
+
+    private func time(_ seconds: Double) -> CMTime {
+        CMTime(seconds: seconds, preferredTimescale: 600_000)
+    }
+}

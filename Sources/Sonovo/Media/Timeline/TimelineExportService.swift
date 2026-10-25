@@ -42,6 +42,7 @@ enum TimelineExportService {
         timeline: ProjectTimeline,
         assets: [ProjectAsset],
         destinationDirectory: URL,
+        beforeInstall: @Sendable () async throws -> Void = {},
         progress: @escaping @Sendable @MainActor (Double) -> Void
     ) async throws -> TimelineExportResult {
         let sources = referencedSources(timeline: timeline, assets: assets)
@@ -57,27 +58,35 @@ enum TimelineExportService {
         guard peak <= 1 else {
             throw TimelineExportError.peakOverFullScale(peak)
         }
+        let hasVideo = !timeline.videoTrack.clips.isEmpty
+        let fileType: AVFileType = hasVideo ? .mov : .m4a
+        let fileExtension = hasVideo ? "mov" : "m4a"
         let temporaryDirectory = try exportDirectory()
         let temporaryURL = temporaryDirectory.appendingPathComponent(
-            "\(UUID().uuidString).mov"
+            "\(UUID().uuidString).\(fileExtension)"
         )
         defer { try? FileManager.default.removeItem(at: temporaryURL) }
 
+        let presetName = hasVideo
+            ? AVAssetExportPresetHighestQuality
+            : AVAssetExportPresetAppleM4A
         guard let session = AVAssetExportSession(
             asset: built.composition,
-            presetName: AVAssetExportPresetHighestQuality
+            presetName: presetName
         ) else {
             throw TimelineExportError.exportFailed(
                 "No compatible export preset is available."
             )
         }
-        session.videoComposition = built.videoComposition
+        if hasVideo {
+            session.videoComposition = built.videoComposition
+        }
         session.audioMix = built.audioMix
         session.shouldOptimizeForNetworkUse = false
         try await run(
             session: session,
             outputURL: temporaryURL,
-            fileType: .mov,
+            fileType: fileType,
             progress: progress
         )
         try Task.checkCancellation()
@@ -85,6 +94,8 @@ enum TimelineExportService {
             output: temporaryURL,
             timeline: timeline
         )
+        try await beforeInstall()
+        try Task.checkCancellation()
         for (path, original) in fingerprints {
             guard let asset = sources[path],
                   try fingerprint(asset.url) == original else {
@@ -92,7 +103,8 @@ enum TimelineExportService {
             }
         }
         let destination = uniqueDestination(
-            in: destinationDirectory
+            in: destinationDirectory,
+            fileExtension: fileExtension
         )
         try await MediaStorage.installAtomicallyAsync(
             from: temporaryURL,
@@ -154,15 +166,22 @@ enum TimelineExportService {
         return directory
     }
 
-    private static func uniqueDestination(in directory: URL) -> URL {
+    private static func uniqueDestination(
+        in directory: URL,
+        fileExtension: String
+    ) -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let base = "Timeline-\(formatter.string(from: Date()))"
-        var url = directory.appendingPathComponent("\(base).mov")
+        var url = directory.appendingPathComponent(
+            "\(base).\(fileExtension)"
+        )
         var index = 2
         while FileManager.default.fileExists(atPath: url.path) {
-            url = directory.appendingPathComponent("\(base)-\(index).mov")
+            url = directory.appendingPathComponent(
+                "\(base)-\(index).\(fileExtension)"
+            )
             index += 1
         }
         return url

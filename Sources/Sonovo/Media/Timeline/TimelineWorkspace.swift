@@ -25,7 +25,12 @@ final class TimelineWorkspace {
            MarkdownSecurity.canonical(document.url) == target {
             return
         }
-        document?.close()
+        do {
+            try saveBeforeReplacing()
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
         let next = TimelineDocument(url: target)
         do {
             try next.load()
@@ -41,11 +46,21 @@ final class TimelineWorkspace {
 
     func create(url: URL, timeline: ProjectTimeline) throws {
         let target = MarkdownSecurity.canonical(url)
-        document?.close()
+        try saveBeforeReplacing()
         let next = TimelineDocument(url: target)
         try next.create(timeline)
         document = next
         lastError = nil
+    }
+
+    /// Never drop a dirty timeline to make room for another one. A failed
+    /// save keeps the old document and its error visible.
+    private func saveBeforeReplacing() throws {
+        guard let document else { return }
+        if document.hasUnsavedChanges {
+            try document.save()
+        }
+        document.close()
     }
 
     @discardableResult
@@ -170,7 +185,8 @@ final class TimelineWorkspace {
     func handleExternalChange(url: URL) {
         guard let document,
               MarkdownSecurity.canonical(document.url)
-                == MarkdownSecurity.canonical(url) else {
+                == MarkdownSecurity.canonical(url),
+              document.hasExternalChanges else {
             return
         }
         // A dirty document keeps its edits and its failure state; the next

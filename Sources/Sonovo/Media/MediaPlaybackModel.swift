@@ -123,8 +123,7 @@ final class MediaPlaybackModel {
         removeItemObservers()
     }
 
-    func load(url: URL) {
-        // Reset before validating. A rejected URL must not leave the
+    func load(url: URL) {        // Reset before validating. A rejected URL must not leave the
         // previous item playing behind the failure state, and an earlier
         // load must not be able to overwrite it.
         loadTask?.cancel()
@@ -161,7 +160,8 @@ final class MediaPlaybackModel {
         sourceURL: URL,
         fileSize: Int64,
         audioMix: AVAudioMix? = nil,
-        videoComposition: AVVideoComposition? = nil
+        videoComposition: AVVideoComposition? = nil,
+        resumeAt: Double? = nil
     ) {
         loadTask?.cancel()
         loadGeneration &+= 1
@@ -175,6 +175,7 @@ final class MediaPlaybackModel {
             fileSize: fileSize,
             audioMix: audioMix,
             videoComposition: videoComposition,
+            resumeAt: resumeAt,
             generation: generation
         )
     }
@@ -186,6 +187,7 @@ final class MediaPlaybackModel {
         fileSize: Int64,
         audioMix: AVAudioMix? = nil,
         videoComposition: AVVideoComposition? = nil,
+        resumeAt: Double? = nil,
         generation: UInt64
     ) {
         url = displayURL
@@ -197,6 +199,7 @@ final class MediaPlaybackModel {
                 timingURL: timingURL,
                 audioMix: audioMix,
                 videoComposition: videoComposition,
+                resumeAt: resumeAt,
                 generation: generation
             )
         }
@@ -230,6 +233,7 @@ final class MediaPlaybackModel {
         timingURL: URL?,
         audioMix: AVAudioMix?,
         videoComposition: AVVideoComposition?,
+        resumeAt: Double?,
         generation: UInt64
     ) async {
         let metadata = await readMetadata(
@@ -251,6 +255,16 @@ final class MediaPlaybackModel {
             item.videoComposition = videoComposition
             observe(item: item, generation: generation)
             player.replaceCurrentItem(with: item)
+            if let resumeAt, resumeAt > 0, resumeAt.isFinite {
+                _ = await player.seek(
+                    to: CMTime(
+                        seconds: resumeAt,
+                        preferredTimescale: Self.seekTimescale
+                    ),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+            }
         }
     }
 
@@ -680,6 +694,14 @@ final class MediaPlaybackModel {
                 }
                 if self.auditionRange != nil {
                     self.isPlaying = false
+                    // A boundary observer at the exact item end is not
+                    // guaranteed to fire before the item stops. The end
+                    // notification is the reliable loop trigger for a
+                    // selection that ends at the duration.
+                    let auditionGeneration = self.auditionGeneration
+                    await self.loopAudition(
+                        generation: auditionGeneration
+                    )
                     return
                 }
                 self.isPlaying = false
