@@ -20,6 +20,7 @@ struct TimelineDocumentView: View {
     @State private var dragClipID: String?
     @State private var dragOrigin = CMTime.zero
     @State private var dragDelta: CGFloat = AppTheme.Spacing.zero
+    @State private var scrollOffset: CGFloat = AppTheme.Spacing.zero
     @State private var playback = MediaPlaybackModel()
     @State private var previewTask: Task<Void, Never>?
     @State private var peak: Float?
@@ -253,7 +254,11 @@ struct TimelineDocumentView: View {
                 )
                 let laneWidth = CGFloat(seconds) * pixelsPerSecond
                 let contentWidth = AppTheme.Size.metadataLabelWidth + laneWidth
-                ScrollView([.horizontal]) {
+                let maxOffset = max(contentWidth - proxy.size.width, 0)
+                let trackHeight = AppTheme.Size.timelineRulerHeight
+                    + AppTheme.Size.timelineTrackHeight
+                    * CGFloat(TimelineTrackKind.allCases.count)
+                VStack(spacing: AppTheme.Spacing.zero) {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: AppTheme.Spacing.zero) {
                             ruler(seconds: seconds, laneWidth: laneWidth)
@@ -272,9 +277,7 @@ struct TimelineDocumentView: View {
                             .fill(AppTheme.Palette.selection)
                             .frame(
                                 width: AppTheme.Size.timelinePlayheadWidth,
-                                height: AppTheme.Size.timelineRulerHeight
-                                    + AppTheme.Size.timelineTrackHeight
-                                    * CGFloat(TimelineTrackKind.allCases.count)
+                                height: trackHeight
                             )
                             .offset(
                                 x: AppTheme.Size.metadataLabelWidth
@@ -283,9 +286,26 @@ struct TimelineDocumentView: View {
                             .allowsHitTesting(false)
                     }
                     .frame(
-                        width: max(contentWidth, proxy.size.width),
-                        alignment: .leading
+                        width: contentWidth,
+                        height: trackHeight,
+                        alignment: .topLeading
                     )
+                    .offset(x: -scrollOffset)
+                    .frame(
+                        width: proxy.size.width,
+                        height: trackHeight,
+                        alignment: .topLeading
+                    )
+                    .clipped()
+                    if maxOffset > 0 {
+                        Slider(value: $scrollOffset, in: 0...maxOffset)
+                            .help("Scroll the timeline")
+                            .padding(.horizontal, AppTheme.Spacing.md)
+                            .padding(.vertical, AppTheme.Spacing.xs)
+                    }
+                }
+                .onChange(of: maxOffset) { _, value in
+                    scrollOffset = min(scrollOffset, value)
                 }
             }
         }
@@ -468,8 +488,8 @@ struct TimelineDocumentView: View {
                 width: width,
                 height: AppTheme.Size.timelineClipHeight
             )
-            .offset(x: offset, y: AppTheme.Spacing.s10)
             .contentShape(Rectangle())
+            .offset(x: offset, y: AppTheme.Spacing.s10)
             .onTapGesture {
                 selectedClipID = clip.id
                 seek(to: clip.timelineStart.seconds)
@@ -507,7 +527,7 @@ struct TimelineDocumentView: View {
                     : AppTheme.Opacity.zero
             )
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture()
                     .onEnded { value in
                         let delta = seconds(
