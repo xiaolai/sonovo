@@ -6,6 +6,7 @@ struct MediaSilenceReview: View {
     let data: WaveformData?
     let sourceDuration: Double
     let keepRanges: [MediaTimeRange]
+    let selection: MediaTimeRange?
     @Binding var settings: MediaSilenceSettings
     let onCandidates: ([MediaTimeRange]) -> Void
     let onRemove: ([MediaTimeRange]) -> Void
@@ -14,6 +15,26 @@ struct MediaSilenceReview: View {
     @State private var candidates: [MediaTimeRange] = []
     @State private var isRunning = false
     @State private var failure: String?
+    @State private var selectionOnly = false
+
+    private struct DetectionKey: Equatable {
+        let settings: MediaSilenceSettings
+        let selectionOnly: Bool
+        let selection: MediaTimeRange?
+    }
+
+    private var detectionKey: DetectionKey {
+        DetectionKey(
+            settings: settings,
+            selectionOnly: selectionOnly,
+            selection: selection
+        )
+    }
+
+    private var searchRanges: [MediaTimeRange] {
+        guard selectionOnly, let selection else { return keepRanges }
+        return keepRanges.compactMap { $0.intersection(with: selection) }
+    }
 
     private var candidateDuration: Double {
         candidates.reduce(0) { $0 + $1.duration }
@@ -40,6 +61,12 @@ struct MediaSilenceReview: View {
             .font(.system(size: AppTheme.TypeScale.xs))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+
+            if selection != nil {
+                Toggle("Selection only", isOn: $selectionOnly)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+            }
 
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
                 Text("Threshold \(Int(settings.thresholdDBFS)) dBFS")
@@ -106,7 +133,7 @@ struct MediaSilenceReview: View {
         }
         .padding(AppTheme.Spacing.lg)
         .frame(width: AppTheme.Size.mediaSilencePopoverWidth)
-        .task(id: settings) {
+        .task(id: detectionKey) {
             await detect()
         }
     }
@@ -129,13 +156,15 @@ struct MediaSilenceReview: View {
         isRunning = true
         failure = nil
         let settings = settings
-        let ranges = keepRanges
+        let ranges = searchRanges
+        let scope = selectionOnly ? selection : nil
         let result = await Task.detached(priority: .userInitiated) {
             MediaSilenceDetector.detect(
                 data: data,
                 settings: settings,
                 sourceDuration: sourceDuration,
-                keepRanges: ranges
+                keepRanges: ranges,
+                within: scope
             )
         }.value
         guard !Task.isCancelled else { return }

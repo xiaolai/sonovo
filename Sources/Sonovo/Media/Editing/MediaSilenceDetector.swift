@@ -25,7 +25,8 @@ enum MediaSilenceDetector {
         data: WaveformData,
         settings: MediaSilenceSettings,
         sourceDuration: Double,
-        keepRanges: [MediaTimeRange]
+        keepRanges: [MediaTimeRange],
+        within scope: MediaTimeRange? = nil
     ) -> [MediaTimeRange] {
         guard data.sampleRate.isFinite,
               data.sampleRate > 0,
@@ -34,6 +35,15 @@ enum MediaSilenceDetector {
               !keepRanges.isEmpty else {
             return []
         }
+        let searchRanges: [MediaTimeRange]
+        if let scope {
+            searchRanges = keepRanges.compactMap {
+                $0.intersection(with: scope)
+            }
+        } else {
+            searchRanges = keepRanges
+        }
+        guard !searchRanges.isEmpty else { return [] }
         let duration = sourceDuration.isFinite && sourceDuration > 0
             ? sourceDuration
             : data.duration
@@ -85,7 +95,7 @@ enum MediaSilenceDetector {
             appendRun(from: start, to: duration, into: &silentRuns)
         }
 
-        let sortedKeep = keepRanges.sorted { $0.start < $1.start }
+        let sortedKeep = searchRanges.sorted { $0.start < $1.start }
         var candidates: [MediaTimeRange] = []
         var keepIndex = 0
         for run in silentRuns {

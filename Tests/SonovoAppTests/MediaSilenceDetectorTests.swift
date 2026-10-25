@@ -123,6 +123,35 @@ final class MediaSilenceDetectorTests: XCTestCase {
         )
     }
 
+    func testScopeRestrictsCandidatesToTheSelection() {
+        let data = makeData(silence(seconds: 2))
+        let scope = MediaTimeRange(start: 0.5, duration: 1)
+        let candidates = MediaSilenceDetector.detect(
+            data: data,
+            settings: settings,
+            sourceDuration: data.duration,
+            keepRanges: [
+                MediaTimeRange(start: 0, duration: data.duration)
+            ],
+            within: scope
+        )
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertGreaterThanOrEqual(candidates[0].start, scope.start)
+        XCTAssertLessThanOrEqual(candidates[0].end, scope.end)
+    }
+
+    func testScopeOutsideKeepRangesProducesNoCandidates() {
+        let data = makeData(silence(seconds: 2))
+        let candidates = MediaSilenceDetector.detect(
+            data: data,
+            settings: settings,
+            sourceDuration: data.duration,
+            keepRanges: [MediaTimeRange(start: 0.8, duration: 0.2)],
+            within: MediaTimeRange(start: 0, duration: 0.5)
+        )
+        XCTAssertTrue(candidates.isEmpty)
+    }
+
     func testAllMissingAudioProducesNoCandidates() {
         let data = makeData(Array(repeating: (nil, 0), count: 200))
         XCTAssertTrue(

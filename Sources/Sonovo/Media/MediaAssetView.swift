@@ -443,6 +443,7 @@ struct MediaAssetView: View {
                         data: waveform.data,
                         sourceDuration: editDocument.sourceDuration,
                         keepRanges: editDocument.editState?.keepRanges ?? [],
+                        selection: editDocument.selection,
                         settings: $silenceSettings,
                         onCandidates: { candidates in
                             silenceCandidates = candidates
