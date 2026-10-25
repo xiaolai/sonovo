@@ -306,7 +306,7 @@ enum MediaAudioExporter {
         let output: AVAssetReaderOutput
         if let audioMix {
             let mixOutput = AVAssetReaderAudioMixOutput(
-                audioTracks: [track],
+                audioTracks: tracks,
                 audioSettings: outputSettings
             )
             mixOutput.audioMix = audioMix
@@ -602,7 +602,7 @@ enum MediaVideoExporter {
             try muxTrack.insertTimeRange(
                 timeRange,
                 of: track,
-                at: .zero
+                at: timeRange.start
             )
             muxTrack.preferredTransform = try await track.load(
                 .preferredTransform
@@ -654,7 +654,7 @@ enum MediaVideoExporter {
         try muxAudio.insertTimeRange(
             audioRange,
             of: sourceAudio,
-            at: .zero
+            at: audioRange.start
         )
 
         guard let session = AVAssetExportSession(

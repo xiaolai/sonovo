@@ -293,6 +293,227 @@ final class MediaCompositionFadeTests: XCTestCase {
         XCTAssertLessThan(peak(samples, around: join, radius: 44), 0.08)
     }
 
+    func testVideoFadeMuxPreservesDelayedAudioOffset() async throws {
+        let videoURL = try await makeVideoOnly(duration: 2)
+        let audioURL = try makeTone(duration: 2)
+        let composition = AVMutableComposition()
+
+        let videoAsset = AVURLAsset(url: videoURL)
+        let videoTracks = try await videoAsset.loadTracks(
+            withMediaType: .video
+        )
+        let videoSource = try XCTUnwrap(videoTracks.first)
+        guard let videoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaTestFixtureError.writer
+        }
+        try videoTrack.insertTimeRange(
+            try await videoSource.load(.timeRange),
+            of: videoSource,
+            at: .zero
+        )
+        videoTrack.preferredTransform = try await videoSource.load(
+            .preferredTransform
+        )
+
+        let audioAsset = AVURLAsset(url: audioURL)
+        let audioTracks = try await audioAsset.loadTracks(
+            withMediaType: .audio
+        )
+        let audioSource = try XCTUnwrap(audioTracks.first)
+        guard let audioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaTestFixtureError.writer
+        }
+        try audioTrack.insertTimeRange(
+            try await audioSource.load(.timeRange),
+            of: audioSource,
+            at: CMTime(seconds: 0.4, preferredTimescale: 600)
+        )
+        let parameters = AVMutableAudioMixInputParameters(track: audioTrack)
+        parameters.setVolumeRamp(
+            fromStartVolume: 0,
+            toEndVolume: 1,
+            timeRange: CMTimeRange(
+                start: CMTime(seconds: 0.4, preferredTimescale: 600),
+                duration: CMTime(seconds: 0.03, preferredTimescale: 600)
+            )
+        )
+        let audioMix = AVMutableAudioMix()
+        audioMix.inputParameters = [parameters]
+
+        let output = try temporaryOutput(extension: "mov")
+        try await MediaVideoExporter.export(
+            composition: composition,
+            audioMix: audioMix,
+            outputURL: output,
+            fileType: .mov
+        ) { _ in }
+
+        let asset = AVURLAsset(url: output)
+        let writtenAudioTracks = try await asset.loadTracks(
+            withMediaType: .audio
+        )
+        let writtenAudio = try XCTUnwrap(writtenAudioTracks.first)
+        let trackStart = try await writtenAudio.load(.timeRange)
+            .start.seconds
+        let samples = try await readSamples(from: output)
+        let firstLoud = samples.firstIndex { abs($0) > 0.005 } ?? -1
+        XCTAssertGreaterThanOrEqual(firstLoud, 0)
+        let absoluteOnset = trackStart
+            + Double(firstLoud) / 44_100
+        XCTAssertEqual(
+            absoluteOnset,
+            0.4,
+            accuracy: 0.08,
+            "the fade mux must keep delayed audio at its composition offset"
+        )
+    }
+
+    func testMP4FadeMuxKeepsAudioOnset() async throws {
+        let videoURL = try await makeVideoOnly(duration: 2)
+        let audioURL = try makeBurstTone(duration: 2, start: 0.8)
+        let composition = AVMutableComposition()
+
+        let videoAsset = AVURLAsset(url: videoURL)
+        let videoTracks = try await videoAsset.loadTracks(
+            withMediaType: .video
+        )
+        let videoSource = try XCTUnwrap(videoTracks.first)
+        guard let videoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaTestFixtureError.writer
+        }
+        try videoTrack.insertTimeRange(
+            try await videoSource.load(.timeRange),
+            of: videoSource,
+            at: .zero
+        )
+
+        let audioAsset = AVURLAsset(url: audioURL)
+        let audioTracks = try await audioAsset.loadTracks(
+            withMediaType: .audio
+        )
+        let audioSource = try XCTUnwrap(audioTracks.first)
+        guard let audioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaTestFixtureError.writer
+        }
+        try audioTrack.insertTimeRange(
+            try await audioSource.load(.timeRange),
+            of: audioSource,
+            at: .zero
+        )
+        let parameters = AVMutableAudioMixInputParameters(track: audioTrack)
+        parameters.setVolume(1, at: .zero)
+        let audioMix = AVMutableAudioMix()
+        audioMix.inputParameters = [parameters]
+
+        let mov = try temporaryOutput(extension: "mov")
+        let mp4 = try temporaryOutput(extension: "mp4")
+        try await MediaVideoExporter.export(
+            composition: composition,
+            audioMix: audioMix,
+            outputURL: mov,
+            fileType: .mov
+        ) { _ in }
+        try await MediaVideoExporter.export(
+            composition: composition,
+            audioMix: audioMix,
+            outputURL: mp4,
+            fileType: .mp4
+        ) { _ in }
+
+        let movOnset = try await audioOnset(of: mov)
+        let mp4Onset = try await audioOnset(of: mp4)
+        XCTAssertEqual(movOnset, 0.8, accuracy: 0.04)
+        XCTAssertEqual(
+            mp4Onset,
+            movOnset,
+            accuracy: 0.015,
+            "AAC encoder priming must not move MP4 audio against the picture"
+        )
+    }
+
+    func testVideoFadeMuxMixesEveryAudioTrack() async throws {
+        let videoURL = try await makeVideoOnly(duration: 2)
+        let audioURL = try makeTone(duration: 2)
+        let composition = AVMutableComposition()
+
+        let videoAsset = AVURLAsset(url: videoURL)
+        let videoTracks = try await videoAsset.loadTracks(
+            withMediaType: .video
+        )
+        let videoSource = try XCTUnwrap(videoTracks.first)
+        guard let videoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaTestFixtureError.writer
+        }
+        try videoTrack.insertTimeRange(
+            try await videoSource.load(.timeRange),
+            of: videoSource,
+            at: .zero
+        )
+
+        let audioAsset = AVURLAsset(url: audioURL)
+        let audioTracks = try await audioAsset.loadTracks(
+            withMediaType: .audio
+        )
+        let audioSource = try XCTUnwrap(audioTracks.first)
+        let audioRange = try await audioSource.load(.timeRange)
+        guard let firstAudio = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ), let secondAudio = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaTestFixtureError.writer
+        }
+        try firstAudio.insertTimeRange(
+            audioRange,
+            of: audioSource,
+            at: .zero
+        )
+        try secondAudio.insertTimeRange(
+            audioRange,
+            of: audioSource,
+            at: .zero
+        )
+
+        let muted = AVMutableAudioMixInputParameters(track: firstAudio)
+        muted.setVolume(0, at: .zero)
+        let audible = AVMutableAudioMixInputParameters(track: secondAudio)
+        audible.setVolume(1, at: .zero)
+        let audioMix = AVMutableAudioMix()
+        audioMix.inputParameters = [muted, audible]
+
+        let output = try temporaryOutput(extension: "mov")
+        try await MediaVideoExporter.export(
+            composition: composition,
+            audioMix: audioMix,
+            outputURL: output,
+            fileType: .mov
+        ) { _ in }
+
+        let samples = try await readSamples(from: output)
+        XCTAssertGreaterThan(
+            peak(samples, around: 44_100, radius: 4_410),
+            0.2,
+            "a second audio track must not be silently dropped"
+        )
+    }
+
     func testVideoWithAudioProducesAWaveformAndAPreviewMix() async throws {
         let source = try await makeVideoWithAudio(duration: 2)
         let data = try await WaveformExtractor.extract(url: source)
@@ -351,6 +572,17 @@ final class MediaCompositionFadeTests: XCTestCase {
         let upper = min(index + radius, samples.count - 1)
         guard lower <= upper else { return 0 }
         return samples[lower...upper].map(abs).max() ?? 0
+    }
+
+    private func audioOnset(of url: URL) async throws -> Double {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        let track = try XCTUnwrap(tracks.first)
+        let trackStart = try await track.load(.timeRange).start.seconds
+        let samples = try await readSamples(from: url)
+        let firstLoud = samples.firstIndex { abs($0) > 0.005 } ?? -1
+        guard firstLoud >= 0 else { return .infinity }
+        return trackStart + Double(firstLoud) / 44_100
     }
 
     private func readSamples(from url: URL) async throws -> [Float] {
@@ -550,6 +782,42 @@ final class MediaCompositionFadeTests: XCTestCase {
 
     private enum MediaTestFixtureError: Error {
         case writer
+    }
+
+    private func makeBurstTone(
+        duration: Double,
+        start: Double
+    ) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fade-\(UUID().uuidString).wav")
+        temporaryItems.append(url)
+        let sampleRate = 44_100.0
+        let format = try XCTUnwrap(
+            AVAudioFormat(
+                standardFormatWithSampleRate: sampleRate,
+                channels: 1
+            )
+        )
+        let frames = AVAudioFrameCount(duration * sampleRate)
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)
+        )
+        buffer.frameLength = frames
+        let data = try XCTUnwrap(buffer.floatChannelData?[0])
+        let burstStart = Int(max(start, 0) * sampleRate)
+        for index in 0..<Int(frames) {
+            data[index] = index >= burstStart
+                ? 0.4 * sin(
+                    2 * .pi * 997 * Float(index) / Float(sampleRate)
+                )
+                : 0
+        }
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings
+        )
+        try file.write(from: buffer)
+        return url
     }
 
     private func makeTone(duration: Double) throws -> URL {
