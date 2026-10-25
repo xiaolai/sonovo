@@ -103,6 +103,10 @@ enum MediaEditLimits {
     /// sufficient on paper.
     // token-exempt: audio fade duration, not a visual value
     static let cutFadeDuration: Double = 0.030
+    /// Padding around a transcript word cut, clamped to the neighbouring
+    /// word boundary. This protects the onset and tail of the removed word.
+    // token-exempt: audio cut guard, not a visual value
+    static let transcriptGuardPadding: Double = 0.030
     // token-exempt: thumbnail request tolerance, not a visual value
     static let thumbnailTimeTolerance: Double = 0.1
     // token-exempt: thumbnail cache bound, not a visual value
