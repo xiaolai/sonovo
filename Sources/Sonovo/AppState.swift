@@ -61,7 +61,7 @@ final class AppState {
         get { canUseMediaModes ? storedEditorMode : .player }
         set { storedEditorMode = newValue }
     }
-    var inspectorVisible = true
+    var inspectorVisible = false
     var showTabBar = true
     var showBreadcrumbs = Preferences.showBreadcrumbs {
         didSet {
