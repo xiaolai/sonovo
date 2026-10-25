@@ -527,6 +527,12 @@ enum AppTheme {
         static let menuIcon: CGFloat = 18
         static let addIcon: CGFloat = 20
         static let mediaModePickerWidth: CGFloat = 94
+        static let mediaTrimStripHeight: CGFloat = 52
+        static let mediaTrimHandleWidth: CGFloat = 3
+        static let mediaTrimHandleHitRadius: CGFloat = 10
+        static let mediaRecordLevelWidth: CGFloat = 120
+        static let mediaRecordLevelHeight: CGFloat = 8
+        static let mediaStatusMaxWidth: CGFloat = 440
         static let miniWindowSidebar: CGFloat = 26
         static let miniWindowTrafficDot: CGFloat = 3
         static let miniWindowTitlebarHeight: CGFloat = 8

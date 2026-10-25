@@ -20,7 +20,7 @@ struct EditorTabBar: View {
 
             Menu {
                 if project.isDemo {
-                    ForEach(state.production.stages) { stage in
+                    ForEach(project.sampleStages) { stage in
                         Section(stage.title) {
                             ForEach(stage.assets) { asset in
                                 Button(asset.name) {

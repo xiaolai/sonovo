@@ -39,6 +39,7 @@ struct SonovoApp: App {
             MarkdownCommands(state: state)
             SubtitleCommands(state: state)
             Model3DCommands(state: state)
+            MediaCommands(state: state)
             TerminalCommands(state: state)
             ProjectCommands(state: state)
         }

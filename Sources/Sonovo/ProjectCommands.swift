@@ -68,6 +68,19 @@ struct ProjectCommands: Commands {
                 _ = state.workspace.closeProject(state.liveProject)
             }
             .disabled(state.liveProject.isDemo)
+
+            Divider()
+
+            if state.isRecordingAudio {
+                Button("Stop Recording") {
+                    state.stopAudioRecording()
+                }
+            } else {
+                Button("Record Audio…") {
+                    Task { await state.startAudioRecording() }
+                }
+                .disabled(!state.canStartAudioRecording)
+            }
         }
     }
 

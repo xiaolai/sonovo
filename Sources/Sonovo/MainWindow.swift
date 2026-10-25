@@ -82,5 +82,18 @@ struct MainWindow: View {
         } message: {
             Text("This document has unsaved changes.")
         }
+        .alert(
+            "Media Error",
+            isPresented: Binding(
+                get: { state.mediaErrorAlert != nil },
+                set: { presented in
+                    if !presented { state.mediaErrorAlert = nil }
+                }
+            )
+        ) {
+            Button("OK") { state.mediaErrorAlert = nil }
+        } message: {
+            Text(state.mediaErrorAlert ?? "")
+        }
     }
 }

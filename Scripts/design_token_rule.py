@@ -19,6 +19,10 @@ CONTENT_RENDERERS: tuple[tuple[str, str], ...] = (
         "media waveform geometry and amplitude",
     ),
     (
+        "Sources/Sonovo/Media/Editing/MediaSelectionWaveformView.swift",
+        "trim selection waveform geometry and timeline hit testing",
+    ),
+    (
         "Sources/Sonovo/SampleHTML.swift",
         "the embedded storyboard document",
     ),

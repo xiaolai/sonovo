@@ -170,7 +170,7 @@ struct TransportBar: View {
             )
         }
         if let tab = state.selectedTab,
-           let asset = state.production.asset(id: tab.assetID) {
+           let asset = state.liveProject.sampleProductionAsset(id: tab.assetID) {
             return Context(
                 icon: tab.kind.icon,
                 name: state.displayName(for: asset),

@@ -129,12 +129,51 @@ final class MediaPlaybackModel {
             state = .failed("Only local files can be opened.")
             return
         }
-        self.url = url
-        fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
-            .map(Int64.init) ?? 0
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey])
+            .fileSize).map(Int64.init) ?? 0
+        startLoad(
+            asset: AVURLAsset(url: url),
+            displayURL: url,
+            timingURL: url,
+            fileSize: fileSize,
+            generation: generation
+        )
+    }
+
+    /// Plays an edited composition while keeping the source file's identity
+    /// and metadata. Frame stepping is not claimed for the composition: its
+    /// frame timing has not been measured.
+    func load(asset: AVAsset, sourceURL: URL, fileSize: Int64) {
+        loadTask?.cancel()
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        seekGeneration &+= 1
+        reset()
+        startLoad(
+            asset: asset,
+            displayURL: sourceURL,
+            timingURL: nil,
+            fileSize: fileSize,
+            generation: generation
+        )
+    }
+
+    private func startLoad(
+        asset: AVAsset,
+        displayURL: URL,
+        timingURL: URL?,
+        fileSize: Int64,
+        generation: UInt64
+    ) {
+        url = displayURL
+        self.fileSize = fileSize
         state = .loading
         loadTask = Task { @MainActor [weak self] in
-            await self?.loadAsset(url: url, generation: generation)
+            await self?.loadAsset(
+                asset: asset,
+                timingURL: timingURL,
+                generation: generation
+            )
         }
     }
 
@@ -161,9 +200,15 @@ final class MediaPlaybackModel {
         let source: [MediaTimecode.SourceSegment]
     }
 
-    private func loadAsset(url: URL, generation: UInt64) async {
-        let asset = AVURLAsset(url: url)
-        let metadata = await readMetadata(asset: asset, url: url)
+    private func loadAsset(
+        asset: AVAsset,
+        timingURL: URL?,
+        generation: UInt64
+    ) async {
+        let metadata = await readMetadata(
+            asset: asset,
+            timingURL: timingURL
+        )
 
         // Every await above can be outrun by a newer load.
         guard !Task.isCancelled, generation == loadGeneration else {
@@ -184,8 +229,8 @@ final class MediaPlaybackModel {
     /// a stale load cannot apply half a snapshot. Failures carry the
     /// user-facing message that belongs to the specific validation.
     private func readMetadata(
-        asset: AVURLAsset,
-        url: URL
+        asset: AVAsset,
+        timingURL: URL?
     ) async -> MetadataResult {
         do {
             let playable = try await asset.load(.isPlayable)
@@ -217,12 +262,20 @@ final class MediaPlaybackModel {
                 let minFrameDuration = try? await videoTrack.load(
                     .minFrameDuration
                 )
-                let timing = await Self.frameTiming(
-                    url: url,
-                    trackID: videoTrack.trackID,
-                    nominalRate: rate,
-                    minFrameDuration: minFrameDuration
-                )
+                let timing: (variable: Bool, verified: Bool)
+                if let timingURL {
+                    timing = await Self.frameTiming(
+                        url: timingURL,
+                        trackID: videoTrack.trackID,
+                        nominalRate: rate,
+                        minFrameDuration: minFrameDuration
+                    )
+                } else {
+                    // A composition's frame timing is not the source file's
+                    // sample timing; frame stepping stays unavailable rather
+                    // than making an unverified claim.
+                    timing = (false, false)
+                }
                 let codec = await Self.codecName(for: videoTrack)
                 let exactDuration = minFrameDuration.flatMap { duration in
                     duration.isNumeric
@@ -244,12 +297,17 @@ final class MediaPlaybackModel {
             if let audioTrack {
                 audioInfo = await Self.audioDescription(for: audioTrack)
             }
-            let source = await Self.readTimecode(
-                url: url,
-                trackID: tracks.first(where: {
-                    $0.mediaType == .timecode
-                })?.trackID
-            )
+            let source: [MediaTimecode.SourceSegment]
+            if let timingURL {
+                source = await Self.readTimecode(
+                    url: timingURL,
+                    trackID: tracks.first(where: {
+                        $0.mediaType == .timecode
+                    })?.trackID
+                )
+            } else {
+                source = []
+            }
             return .success(
                 AssetMetadata(
                     duration: assetDuration.seconds,

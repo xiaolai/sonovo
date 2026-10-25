@@ -63,6 +63,12 @@ final class AppState {
     }
     var inspectorVisible = false
     var showTabBar = true
+    /// Set by the Media menu; the visible media edit surface owns the actual
+    /// destructive-confirmation dialog.
+    var mediaReplaceRequest = false
+    /// A recording error that needs an alert because no media tab may be
+    /// visible, such as a denied microphone request from the Project menu.
+    var mediaErrorAlert: String?
     var showBreadcrumbs = Preferences.showBreadcrumbs {
         didSet {
             UserDefaults.standard.set(
@@ -183,6 +189,10 @@ final class AppState {
     var focusSidebarFilter = 0
 
     var activityText: String {
+        if liveProject.isRecordingAudio { return "Recording audio…" }
+        if liveProject.mediaEdits.exportService.isBusy {
+            return "Exporting media…"
+        }
         if liveProject.isDemo {
             if isPlaying {
                 return "Playing \(selectedAsset?.name ?? "media")"
@@ -522,7 +532,7 @@ final class AppState {
         guard project.isDemo, let id = project.selectedAssetID else {
             return nil
         }
-        return production.asset(id: id)
+        return project.sampleProductionAsset(id: id)
     }
 
     var selectedTab: EditorTab? {
@@ -625,6 +635,102 @@ final class AppState {
         guard liveProject.isDemo,
               let kind = selectedTab?.kind else { return false }
         return kind == .video
+    }
+
+    var activeMediaEditDocument: MediaEditDocument? {
+        guard terminalPresentation != .full else { return nil }
+        return liveProject.mediaEdits.activeDocument
+    }
+
+    var isRecordingAudio: Bool {
+        liveProject.isRecordingAudio
+    }
+
+    var canStartAudioRecording: Bool {
+        liveProject.canRecordAudio && !liveProject.isRecordingAudio
+    }
+
+    var canTrimMediaSelection: Bool {
+        activeMediaEditDocument?.canTrimToSelection == true
+    }
+
+    var canDeleteMediaSelection: Bool {
+        activeMediaEditDocument?.canDeleteSelection == true
+    }
+
+    var canSaveMediaTake: Bool {
+        guard let document = activeMediaEditDocument else { return false }
+        return document.canExport
+            && !liveProject.mediaEdits.exportService.isBusy
+    }
+
+    var canReplaceMediaOriginal: Bool {
+        guard let document = activeMediaEditDocument else { return false }
+        return document.canReplaceOriginal
+            && !liveProject.mediaEdits.exportService.isBusy
+    }
+
+    var canUndoMediaEdit: Bool {
+        activeMediaEditDocument?.canUndo == true
+    }
+
+    var canRedoMediaEdit: Bool {
+        activeMediaEditDocument?.canRedo == true
+    }
+
+    func startAudioRecording() async {
+        let started = await liveProject.startAudioRecording()
+        if !started {
+            mediaErrorAlert = liveProject.mediaError
+                ?? "Audio recording could not start."
+        }
+    }
+
+    func stopAudioRecording() {
+        guard liveProject.isRecordingAudio else { return }
+        if liveProject.stopAudioRecording() == nil,
+           let message = liveProject.mediaError {
+            mediaErrorAlert = message
+        }
+    }
+
+    func trimMediaSelection() {
+        _ = activeMediaEditDocument?.trimToSelection()
+    }
+
+    func deleteMediaSelection() {
+        _ = activeMediaEditDocument?.deleteSelection()
+    }
+
+    func resetMediaEdit() {
+        _ = activeMediaEditDocument?.reset()
+    }
+
+    func undoMediaEdit() {
+        _ = activeMediaEditDocument?.undo()
+    }
+
+    func redoMediaEdit() {
+        _ = activeMediaEditDocument?.redo()
+    }
+
+    func saveMediaTake() async {
+        guard let document = activeMediaEditDocument else { return }
+        do {
+            _ = try await liveProject.exportMedia(
+                document,
+                mode: .newTake
+            )
+        } catch {
+            // The project records the error for the visible edit surface.
+        }
+    }
+
+    func requestReplaceMediaOriginal() {
+        guard activeMediaEditDocument?.canReplaceOriginal == true else {
+            return
+        }
+        mediaReplaceRequest = true
     }
 
     var filteredStages: [ProductionStage] {

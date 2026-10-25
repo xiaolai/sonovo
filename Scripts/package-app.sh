@@ -26,7 +26,8 @@ products=".build/out/Products/Release"
 binary="$products/Sonovo"
 resources="$products/Sonovo_Sonovo.bundle"
 icon_source="Sources/Sonovo/Resources/AppIcon.png"
-for required in "$binary" "$resources" "$icon_source"; do
+entitlements="Scripts/Sonovo.entitlements"
+for required in "$binary" "$resources" "$icon_source" "$entitlements"; do
     [[ -e "$required" ]] || { echo "missing $required" >&2; exit 1; }
 done
 
@@ -67,6 +68,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>27.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>Local build</string>
+    <key>NSMicrophoneUsageDescription</key><string>Sonovo records audio from the microphone you choose in System Settings.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>
@@ -89,11 +91,26 @@ case "$sign_mode" in
     *) echo "SONOVO_PACKAGE_SIGN must be adhoc or none" >&2; exit 2 ;;
 esac
 if [ "$sign_mode" = adhoc ]; then
-    codesign --force --sign - --timestamp=none "$app" > /dev/null
+    codesign --force --sign - --timestamp=none \
+        --entitlements "$entitlements" "$app" > /dev/null
     codesign --verify --strict "$app"
+    if ! codesign -d --entitlements - --xml "$app" 2>/dev/null \
+        | grep -q 'com.apple.security.device.audio-input'; then
+        echo "ad-hoc signature is missing the audio-input entitlement" >&2
+        exit 1
+    fi
 fi
 
 plutil -lint "$app/Contents/Info.plist" > /dev/null
+microphone_usage="$(plutil -extract NSMicrophoneUsageDescription raw \
+    "$app/Contents/Info.plist")" || {
+    echo "Info.plist is missing NSMicrophoneUsageDescription" >&2
+    exit 1
+}
+[[ -n "$microphone_usage" ]] || {
+    echo "NSMicrophoneUsageDescription is empty" >&2
+    exit 1
+}
 installed_version="$(plutil -extract CFBundleShortVersionString raw \
     "$app/Contents/Info.plist")"
 [[ "$installed_version" == "$version" ]] || {

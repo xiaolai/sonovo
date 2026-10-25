@@ -58,8 +58,12 @@ struct EditorContentView: View {
             CodeWorkspaceView(workspace: project.code, project: project)
         case .audio, .video:
             if let asset = project.selectedAsset {
-                MediaAssetView(asset: asset)
-                    .id("\(asset.id)-\(asset.revision.token)")
+                MediaAssetView(
+                    asset: asset,
+                    project: project,
+                    appState: state
+                )
+                    .id(asset.id)
             } else {
                 ProjectNoFileView()
             }

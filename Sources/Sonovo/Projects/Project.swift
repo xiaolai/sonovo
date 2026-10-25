@@ -24,6 +24,10 @@ final class Project: Identifiable {
     let models: Model3DWorkspace
     let code: CodeWorkspace
     let terminalSessions: TerminalSessionsStore
+    let mediaEdits: MediaEditWorkspace
+    /// The Sample project's files live in Application Support and have no
+    /// folder scan; this registry supplies its recorded takes and exports.
+    let sampleMedia: SampleMediaRegistry?
 
     private(set) var assets: [ProjectAsset] = []
     private(set) var groups: [ProjectAssetGroup] = []
@@ -32,6 +36,11 @@ final class Project: Identifiable {
     private(set) var availability: Availability
     private(set) var truncated = false
     private(set) var visitedEntries = 0
+    /// The last recording or export error, shown in the media edit surface.
+    private(set) var mediaError: String?
+    /// Bumped when a media file is created or replaced. Demo assets are not
+    /// scanned, so this is what makes their views re-read the file revision.
+    private(set) var mediaGeneration: UInt64 = 0
 
     var openTabs: [EditorTab]
     var selectedTabID: String
@@ -72,6 +81,7 @@ final class Project: Identifiable {
     private(set) var watcher: ProjectWatching?
     private var refreshTask: Task<Void, Never>?
     private var watcherRetryTask: Task<Void, Never>?
+    private var recordingDestinationDirectory: URL?
     /// Save As destinations reserved for the duration of a write, keyed by
     /// path and owned by the document doing the write. A destination is
     /// reserved before the await, so any workspace's `open` during the write
@@ -152,6 +162,14 @@ final class Project: Identifiable {
         self.scanner = scanner
         self.watchFactory = watchFactory
         self.sampleDocuments = sampleDocuments
+        self.mediaEdits = MediaEditWorkspace()
+        if isDemo, let sampleDocuments {
+            self.sampleMedia = SampleMediaRegistry(
+                directory: sampleDocuments.destinationDirectory
+            )
+        } else {
+            self.sampleMedia = nil
+        }
         self.markdown.onDocumentClosed = { [weak self] document in
             guard let self else { return }
             if let url = document.fileURL {
@@ -801,11 +819,55 @@ final class Project: Identifiable {
         }
     }
 
-    var filteredStages: [ProductionStage] {
+    var sampleStages: [ProductionStage] {
         guard let demoProduction else { return [] }
+        // Demo files are not scanned. Reading the generation makes the
+        // sample rows re-read their durations after a replace.
+        _ = mediaGeneration
+        var stages = demoProduction.stages.map { stage in
+            ProductionStage(
+                id: stage.id,
+                title: stage.title,
+                assets: stage.assets.map(resolvedSampleAsset)
+            )
+        }
+        if let recordings = sampleMedia?.productionStage() {
+            if let voiceIndex = stages.firstIndex(where: { $0.id == "voice" }) {
+                stages.insert(recordings, at: voiceIndex + 1)
+            } else {
+                stages.append(recordings)
+            }
+        }
+        return stages
+    }
+
+    private func resolvedSampleAsset(
+        _ asset: ProductionAsset
+    ) -> ProductionAsset {
+        guard asset.kind == .audio,
+              let media = sampleMediaAsset(for: asset.id),
+              let audio = MediaAudioMetadata.describe(url: media.url) else {
+            return asset
+        }
+        return ProductionAsset(
+            id: asset.id,
+            name: asset.name,
+            detail: audio.detail,
+            kind: asset.kind
+        )
+    }
+
+    func sampleStage(for assetID: String) -> ProductionStage? {
+        sampleStages.first { stage in
+            stage.assets.contains { $0.id == assetID }
+        }
+    }
+
+    var filteredStages: [ProductionStage] {
+        let stages = sampleStages
         let query = trimmedFilterText
-        guard !query.isEmpty else { return demoProduction.stages }
-        return demoProduction.stages.compactMap { stage in
+        guard !query.isEmpty else { return stages }
+        return stages.compactMap { stage in
             let matches = stage.assets.filter {
                 $0.name.localizedCaseInsensitiveContains(query)
                     || $0.detail.localizedCaseInsensitiveContains(query)
@@ -953,7 +1015,7 @@ final class Project: Identifiable {
     func openAsset(id: String?) {
         guard let id else { return }
         if isDemo {
-            guard let asset = demoProduction?.asset(id: id) else { return }
+            guard let asset = sampleProductionAsset(id: id) else { return }
             openSampleAsset(asset)
         } else if let asset = assets.first(where: { $0.id == id }) {
             openAsset(asset)
@@ -1249,6 +1311,16 @@ final class Project: Identifiable {
         if let kind = tab.workspaceKind {
             return await closeWorkspaceDocuments(kind: kind)
         }
+        if tab.kind == .audio || tab.kind == .video {
+            if mediaEdits.recorder.isRecording {
+                _ = stopAudioRecording(openWhenFinished: false)
+            }
+            if let url = tab.url
+                ?? (isDemo ? sampleMediaAsset(for: tab.assetID)?.url : nil) {
+                mediaEdits.close(url: url)
+            }
+            return .closed
+        }
         let url = tab.url ?? sampleDocumentURL(for: tab)
         guard let url else { return .closed }
         let stillReferenced = openTabs.contains { other in
@@ -1467,6 +1539,216 @@ final class Project: Identifiable {
                 modified: modified
             )
         )
+    }
+
+    /// A Sample media row, whether bundled or created by recording/export.
+    func sampleMediaAsset(for id: String) -> ProjectAsset? {
+        if let registered = sampleMedia?.asset(id: id) {
+            return registered
+        }
+        return sampleAudioAsset(for: id)
+    }
+
+    /// The production row for a Sample tab. New recordings and exports are
+    /// not in the static production, so the registry supplies them.
+    func sampleProductionAsset(id: String) -> ProductionAsset? {
+        if let asset = sampleStages.first(where: {
+            $0.assets.contains { $0.id == id }
+        })?.assets.first(where: { $0.id == id }) {
+            return asset
+        }
+        return demoProduction?.asset(id: id)
+    }
+
+    var mediaDestinationDirectory: URL? {
+        if isDemo { return sampleDocuments?.destinationDirectory }
+        return root
+    }
+
+    var canRecordAudio: Bool {
+        guard mediaDestinationDirectory != nil else { return false }
+        if case .offline = availability { return false }
+        return true
+    }
+
+    var isRecordingAudio: Bool {
+        mediaEdits.recorder.isRecording
+    }
+
+    func clearMediaError() {
+        mediaError = nil
+    }
+
+    func startAudioRecording() async -> Bool {
+        mediaError = nil
+        guard canRecordAudio,
+              let destination = mediaDestinationDirectory else {
+            mediaError = "This project has no writable folder for recordings."
+            return false
+        }
+        if mediaEdits.recorder.isRecording { return true }
+        do {
+            let temporary = try MediaStorage.makeTemporaryURL(
+                pathExtension: "wav"
+            )
+            try await mediaEdits.recorder.start(to: temporary)
+            recordingDestinationDirectory = destination
+            return true
+        } catch {
+            mediaError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func stopAudioRecording(openWhenFinished: Bool = true) -> ProjectAsset? {
+        guard let temporary = mediaEdits.recorder.stop() else { return nil }
+        guard let destination = recordingDestinationDirectory
+                ?? mediaDestinationDirectory else {
+            mediaError = "This project has no writable folder for recordings."
+            MediaStorage.removeIfPresent(temporary)
+            return nil
+        }
+        recordingDestinationDirectory = nil
+        let name = "Recording-\(MediaStorage.timestamp()).wav"
+        let target = MediaStorage.uniqueURL(
+            in: destination,
+            preferredName: name
+        )
+        do {
+            try MediaStorage.installAtomically(
+                from: temporary,
+                to: target,
+                replacing: false
+            )
+        } catch {
+            mediaError = "The recording could not be saved: "
+                + error.localizedDescription
+            return nil
+        }
+        MediaStorage.removeIfPresent(temporary)
+        let asset = registerCreatedMedia(
+            at: target,
+            kind: .audio,
+            openWhenFinished: openWhenFinished
+        )
+        if asset != nil {
+            mediaGeneration &+= 1
+        }
+        return asset
+    }
+
+    func cancelAudioRecording() {
+        mediaEdits.recorder.cancel()
+        recordingDestinationDirectory = nil
+        mediaError = nil
+    }
+
+    /// Exports the document's current decision as a new take or replaces the
+    /// source after keeping a backup. The source is never touched until the
+    /// exporter has produced and verified a complete file.
+    func exportMedia(
+        _ document: MediaEditDocument,
+        mode: MediaExportMode
+    ) async throws -> ProjectAsset {
+        guard let destination = mediaDestinationDirectory else {
+            throw MediaExportError.exportFailed(
+                "This project has no writable folder for exports."
+            )
+        }
+        guard !document.isStale, let state = document.editState else {
+            throw MediaStorageError.sourceChanged(document.asset.name)
+        }
+        mediaError = nil
+        do {
+            let outcome = try await mediaEdits.exportService.export(
+                source: document.asset,
+                state: state,
+                destinationDirectory: destination,
+                projectName: name,
+                mode: mode
+            )
+            switch mode {
+            case .newTake:
+                let kind = Self.mediaKind(for: outcome.url)
+                guard let asset = registerCreatedMedia(
+                    at: outcome.url,
+                    kind: kind,
+                    openWhenFinished: true
+                ) else {
+                    throw MediaExportError.missingOutput
+                }
+                mediaGeneration &+= 1
+                return asset
+            case .replaceOriginal:
+                mediaEdits.discardDocument(for: document.asset.url)
+                if isDemo {
+                    sampleMedia?.refresh()
+                    guard let asset = sampleMediaAsset(for: document.asset.id) else {
+                        throw MediaExportError.missingOutput
+                    }
+                    openAsset(id: asset.id)
+                    mediaGeneration &+= 1
+                    return asset
+                }
+                await refreshNow()
+                let canonical = MarkdownSecurity.canonical(outcome.url)
+                if let asset = assets.first(where: {
+                    MarkdownSecurity.canonical($0.url) == canonical
+                }) {
+                    openAsset(asset)
+                    mediaGeneration &+= 1
+                    return asset
+                }
+                let asset = syntheticAsset(
+                    for: canonical,
+                    kind: document.asset.kind
+                )
+                openAsset(asset)
+                mediaGeneration &+= 1
+                return asset
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            mediaError = error.localizedDescription
+            throw error
+        }
+    }
+
+    private func registerCreatedMedia(
+        at url: URL,
+        kind: AssetKind,
+        openWhenFinished: Bool
+    ) -> ProjectAsset? {
+        if isDemo {
+            guard let asset = sampleMedia?.register(url: url) else {
+                return nil
+            }
+            if openWhenFinished {
+                openAsset(id: asset.id)
+            }
+            return asset
+        }
+        let asset = syntheticAsset(
+            for: MarkdownSecurity.canonical(url),
+            kind: kind
+        )
+        if openWhenFinished {
+            openAsset(asset)
+        }
+        // The watcher would discover the file on its own; an immediate scan
+        // makes the new asset authoritative before the next user action.
+        Task { @MainActor [weak self] in
+            await self?.refreshNow()
+        }
+        return asset
+    }
+
+    private static func mediaKind(for url: URL) -> AssetKind {
+        ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
+            ? .video
+            : .audio
     }
 
     private func sampleDocumentURL(for tab: EditorTab) -> URL? {
@@ -1879,6 +2161,9 @@ final class Project: Identifiable {
     func activate(loadIfOffline: Bool = true) {
         isActive = true
         hasActivity = false
+        if isDemo {
+            sampleMedia?.refresh()
+        }
         if loadIfOffline, case .offline = availability {
             Task { @MainActor [weak self] in
                 await self?.load()
@@ -1897,6 +2182,11 @@ final class Project: Identifiable {
         watcherRetryTask = nil
         watcher?.stop()
         watcher = nil
+        if mediaEdits.recorder.isRecording {
+            _ = stopAudioRecording(openWhenFinished: false)
+        }
+        mediaEdits.cancelJobs()
+        mediaEdits.closeAll()
         onSelectionChanged = nil
     }
 
@@ -1905,6 +2195,10 @@ final class Project: Identifiable {
         // Subtitle media is owned by the workspace, not by a removable view,
         // so it must be paused explicitly when the project stops being shown.
         subtitles.pauseForDeactivation()
+        if mediaEdits.recorder.isRecording {
+            _ = stopAudioRecording(openWhenFinished: false)
+        }
+        mediaEdits.cancelJobs()
     }
 
     var isOffline: Bool {
@@ -1926,6 +2220,11 @@ final class Project: Identifiable {
         refreshTask?.cancel()
         watcher?.stop()
         watcher = nil
+        if mediaEdits.recorder.isRecording {
+            _ = stopAudioRecording(openWhenFinished: false)
+        }
+        mediaEdits.cancelJobs()
+        mediaEdits.closeAll()
         markdown.shutdown()
         models.prepareForTermination()
         code.prepareForTermination()

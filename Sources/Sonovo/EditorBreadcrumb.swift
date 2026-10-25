@@ -145,11 +145,11 @@ struct EditorBreadcrumb: View {
         }
         if project.isDemo,
            let tab = project.selectedTab,
-           let asset = state.production.asset(id: tab.assetID) {
+           let asset = project.sampleProductionAsset(id: tab.assetID) {
             return BreadcrumbContent(
                 icon: tab.kind.icon,
                 rootTitle: state.production.title,
-                groupTitle: state.production.stage(for: asset.id)?.title
+                groupTitle: project.sampleStage(for: asset.id)?.title
                     ?? "Production",
                 name: state.displayName(for: asset),
                 detail: asset.detail

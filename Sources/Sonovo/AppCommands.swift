@@ -31,10 +31,78 @@ struct DocumentCommands: Commands {
     }
 }
 
+/// Media editing commands. Undo and redo deliberately use separate shortcuts
+/// from the text editors so a media command can never consume a text undo.
+@MainActor
+struct MediaCommands: Commands {
+    @Bindable var state: AppState
+
+    var body: some Commands {
+        CommandMenu("Media") {
+            if state.isRecordingAudio {
+                Button("Stop Recording") {
+                    state.stopAudioRecording()
+                }
+            } else {
+                Button("Record Audio…") {
+                    Task { await state.startAudioRecording() }
+                }
+                .disabled(!state.canStartAudioRecording)
+            }
+
+            Divider()
+
+            Button("Trim to Selection") {
+                state.trimMediaSelection()
+            }
+            .disabled(!state.canTrimMediaSelection)
+
+            Button("Delete Selection") {
+                state.deleteMediaSelection()
+            }
+            .disabled(!state.canDeleteMediaSelection)
+
+            Button("Reset Edit") {
+                state.resetMediaEdit()
+            }
+            .disabled(state.activeMediaEditDocument?.canReset != true)
+
+            Divider()
+
+            Button("Undo Media Edit") {
+                state.undoMediaEdit()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .option])
+            .disabled(!state.canUndoMediaEdit)
+
+            Button("Redo Media Edit") {
+                state.redoMediaEdit()
+            }
+            .keyboardShortcut(
+                "z",
+                modifiers: [.command, .option, .shift]
+            )
+            .disabled(!state.canRedoMediaEdit)
+
+            Divider()
+
+            Button("Save Take") {
+                Task { await state.saveMediaTake() }
+            }
+            .keyboardShortcut("s", modifiers: [.command, .option])
+            .disabled(!state.canSaveMediaTake)
+
+            Button("Replace Original…") {
+                state.requestReplaceMediaOriginal()
+            }
+            .disabled(!state.canReplaceMediaOriginal)
+        }
+    }
+}
+
 /// Markdown document and formatting commands.
 @MainActor
-struct MarkdownCommands: Commands {
-    @Bindable var state: AppState
+struct MarkdownCommands: Commands {    @Bindable var state: AppState
 
     var body: some Commands {
         CommandMenu("Markdown") {

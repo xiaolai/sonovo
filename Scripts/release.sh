@@ -20,6 +20,7 @@ cd "$(dirname "$0")/.."
 readonly ROOT=$PWD
 readonly APP=$ROOT/.build/release/Sonovo.app
 readonly OUT=$ROOT/.build/release
+readonly ENTITLEMENTS=$ROOT/Scripts/Sonovo.entitlements
 VERSION=$(tr -d '[:space:]' < Sources/Sonovo/Resources/version.txt)
 readonly VERSION
 readonly TRIES=5
@@ -38,6 +39,7 @@ note() { echo "$*"; }
 
 [[ -n "$VERSION" ]] || fail "version.txt is empty"
 [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version.txt is not x.y.z: $VERSION"
+[[ -f "$ENTITLEMENTS" ]] || fail "missing entitlements: $ENTITLEMENTS"
 
 # The tree that is released must be the tree that was tested and named.
 if [ "$mode" = release ]; then
@@ -100,21 +102,33 @@ upstream=$(grep -a -r -o -E '/Users/[A-Za-z0-9._-]+' "$APP/Contents/MacOS/Sonovo
     | sort -u | grep -v -F -- "$HOME" || true)
 [ -z "$upstream" ] || note "release: known third-party build path in the binary: $(echo "$upstream" | tr '\n' ' ')"
 
-# Developer ID and a secure timestamp. Only the app gets the hardened runtime; a DMG is
-# not an executable. No entitlements: Sonovo is not sandboxed.
+# Developer ID and a secure timestamp. Only the app gets the hardened runtime and the
+# microphone entitlement; a DMG is not an executable and needs neither.
 sign_with_timestamp() {
-    local artifact=$1 attempt runtime=$2 opts=""
-    [ "$runtime" = runtime ] && opts="--options runtime"
-    # shellcheck disable=SC2086 # an option pair, empty for the DMG
+    local artifact=$1 attempt runtime=$2
+    local -a opts=()
+    if [ "$runtime" = runtime ]; then
+        opts=(--options runtime --entitlements "$ENTITLEMENTS")
+    fi
 
     for (( attempt = 1; attempt <= TRIES; attempt++ )); do
-        if (( attempt == TRIES )); then
-            codesign --force $opts --timestamp --sign "$identity" "$artifact" \
-                || fail "could not sign $artifact"
-            return
+        if [ "${#opts[@]}" -gt 0 ]; then
+            if (( attempt == TRIES )); then
+                codesign --force "${opts[@]}" --timestamp --sign "$identity" "$artifact" \
+                    || fail "could not sign $artifact"
+                return
+            fi
+            codesign --force "${opts[@]}" --timestamp --sign "$identity" "$artifact" >/dev/null 2>&1 \
+                && return
+        else
+            if (( attempt == TRIES )); then
+                codesign --force --timestamp --sign "$identity" "$artifact" \
+                    || fail "could not sign $artifact"
+                return
+            fi
+            codesign --force --timestamp --sign "$identity" "$artifact" >/dev/null 2>&1 \
+                && return
         fi
-        codesign --force $opts --timestamp --sign "$identity" "$artifact" >/dev/null 2>&1 \
-            && return
         note "signing $(basename "$artifact") failed on attempt $attempt of $TRIES; retrying"
         sleep $(( attempt * 2 ))
     done
@@ -128,6 +142,10 @@ grep -q '^TeamIdentifier=' <<<"$described" || fail "the app has no team identifi
 ! grep -q '^TeamIdentifier=not set$' <<<"$described" || fail "the app has an ad-hoc signature, not a Developer ID"
 grep -q 'flags=0x10000(runtime)' <<<"$described" || fail "the app is not signed with the hardened runtime"
 grep -q '^Timestamp=' <<<"$described" || fail "the app is not signed with a secure timestamp"
+if ! codesign -d --entitlements - --xml "$APP" 2>/dev/null \
+    | grep -q 'com.apple.security.device.audio-input'; then
+    fail "the app is missing the audio-input entitlement"
+fi
 ! grep -q 'get-task-allow' <<<"$(codesign -d --entitlements - --xml "$APP" 2>/dev/null || true)" \
     || fail "get-task-allow is set; the notary would refuse it"
 
