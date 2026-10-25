@@ -51,6 +51,8 @@ struct MediaAssetView: View {
     @State private var silenceCandidates: [MediaTimeRange] = []
     @State private var silenceSettings = MediaSilenceSettings()
     @State private var showSilencePopover = false
+    @State private var transcriptVisible = false
+    @State private var transcriptSession: TranscriptSession?
     @Environment(\.projectIsVisible) private var projectIsVisible
     @Environment(\.scenePhase) private var scenePhase
 
@@ -256,6 +258,7 @@ struct MediaAssetView: View {
         .onDisappear {
             previewGeneration &+= 1
             isPreviewPending = false
+            transcriptSession?.cancel()
             playback.stopAudition()
             playback.unload()
             waveform.cancel()
@@ -433,6 +436,10 @@ struct MediaAssetView: View {
                     findPausesHelp: findPausesHelp,
                     onFindPauses: {
                         showSilencePopover.toggle()
+                    },
+                    isTranscriptVisible: transcriptVisible,
+                    onToggleTranscript: {
+                        toggleTranscript()
                     }
                 )
                 .popover(
@@ -471,27 +478,45 @@ struct MediaAssetView: View {
         } else {
             GeometryReader { geometry in
                 let compact = geometry.size.height < 520
-                VStack(spacing: AppTheme.Spacing.zero) {
-                    if showsVideoInEdit {
-                        if playback.state == .ready {
-                            MediaPlayerView(player: playback.player)
-                                .frame(
-                                    maxWidth: .infinity,
-                                    maxHeight: .infinity
-                                )
-                                .background(AppTheme.Palette.black)
+                HStack(spacing: AppTheme.Spacing.zero) {
+                    VStack(spacing: AppTheme.Spacing.zero) {
+                        if showsVideoInEdit {
+                            if playback.state == .ready {
+                                MediaPlayerView(player: playback.player)
+                                    .frame(
+                                        maxWidth: .infinity,
+                                        maxHeight: .infinity
+                                    )
+                                    .background(AppTheme.Palette.black)
+                            } else {
+                                loadingState
+                            }
                         } else {
-                            loadingState
+                            Spacer(minLength: AppTheme.Spacing.zero)
                         }
-                    } else {
-                        Spacer(minLength: AppTheme.Spacing.zero)
+                        timeline(document, compact: compact)
+                            .padding(.horizontal, AppTheme.Spacing.md)
+                            .padding(.vertical, AppTheme.Spacing.sm)
+                            .background(Color.appCard)
+                        if !showsVideoInEdit {
+                            Spacer(minLength: AppTheme.Spacing.zero)
+                        }
                     }
-                    timeline(document, compact: compact)
-                        .padding(.horizontal, AppTheme.Spacing.md)
-                        .padding(.vertical, AppTheme.Spacing.sm)
-                        .background(Color.appCard)
-                    if !showsVideoInEdit {
-                        Spacer(minLength: AppTheme.Spacing.zero)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if transcriptVisible, let transcriptSession {
+                        Divider()
+                        MediaTranscriptView(
+                            session: transcriptSession,
+                            document: document,
+                            playhead: sourcePlayhead,
+                            onSeek: { sourceTime in
+                                seekSource(sourceTime, document: document)
+                            }
+                        )
+                        .frame(
+                            width: AppTheme.Size.mediaTranscriptPaneWidth
+                        )
                     }
                 }
             }
@@ -618,6 +643,7 @@ struct MediaAssetView: View {
         let document = project.mediaEdits.document(for: asset)
         editDocument = document
         project.mediaEdits.activate(document)
+        ensureTranscriptSession()
         if asset.kind == .video {
             waveform.load(url: asset.url, revision: asset.revision)
         }
@@ -645,6 +671,8 @@ struct MediaAssetView: View {
         previewedRanges = []
         isTimelineInteracting = false
         silenceCandidates = []
+        transcriptSession?.cancel()
+        transcriptSession = nil
         if let project, let editDocument {
             project.mediaEdits.deactivate(editDocument)
         }
@@ -704,6 +732,11 @@ struct MediaAssetView: View {
             guard let project else { return }
             let document = project.mediaEdits.document(for: asset)
             editDocument = document
+            transcriptSession?.cancel()
+            transcriptSession = TranscriptSession(asset: asset)
+            if transcriptVisible, let transcriptSession {
+                Task { await transcriptSession.loadCached() }
+            }
             if document.editState == nil {
                 // A successful replace discards the old document; the
                 // replaced source has no edit decision yet. Return to the
@@ -796,6 +829,24 @@ struct MediaAssetView: View {
                 isPreviewPending = false
                 operationError = error.localizedDescription
             }
+        }
+    }
+
+    private func ensureTranscriptSession() {
+        guard transcriptSession == nil else { return }
+        let session = TranscriptSession(asset: asset)
+        transcriptSession = session
+        if transcriptVisible {
+            Task { await session.loadCached() }
+        }
+    }
+
+    private func toggleTranscript() {
+        transcriptVisible.toggle()
+        guard transcriptVisible else { return }
+        ensureTranscriptSession()
+        if let transcriptSession {
+            Task { await transcriptSession.loadCached() }
         }
     }
 

@@ -24,6 +24,8 @@ struct MediaEditorToolbar: View {
     let canFindPauses: Bool
     let findPausesHelp: String
     let onFindPauses: () -> Void
+    let isTranscriptVisible: Bool
+    let onToggleTranscript: () -> Void
 
     private var recorder: AudioRecorder { project.mediaEdits.recorder }
     private var exporter: MediaExportService { project.mediaEdits.exportService }
@@ -174,6 +176,17 @@ struct MediaEditorToolbar: View {
                 isEnabled: canFindPauses && !isBusy
             ) {
                 onFindPauses()
+            }
+
+            mediaButton(
+                "captions.bubble",
+                help: isTranscriptVisible
+                    ? "Hide Transcript"
+                    : "Show Transcript",
+                isSelected: isTranscriptVisible,
+                isEnabled: document.editState != nil && !isBusy
+            ) {
+                onToggleTranscript()
             }
 
             recordingControls

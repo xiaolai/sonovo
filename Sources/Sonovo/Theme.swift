@@ -512,6 +512,7 @@ enum AppTheme {
         static let mediaTimelineThumbnailHeight: CGFloat = 56
         static let mediaTimelineThumbnailTileWidth: CGFloat = 72
         static let mediaSilencePopoverWidth: CGFloat = 320
+        static let mediaTranscriptPaneWidth: CGFloat = 360
         static let letterBadge: CGFloat = 17
         static let thumbnailWidth: CGFloat = 116
         static let thumbnailHeight: CGFloat = 65
