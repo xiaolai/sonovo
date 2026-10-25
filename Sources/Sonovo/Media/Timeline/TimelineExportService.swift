@@ -219,7 +219,6 @@ enum TimelineExportService {
                 try await exportTask.value
             } onCancel: {
                 exportTask.cancel()
-                box.session.cancelExport()
             }
         } catch {
             progressTask.cancel()

@@ -42,7 +42,7 @@ enum TimelineCompositionError: LocalizedError, Equatable {
 enum ProjectTimelineCompositionBuilder {
     private struct VideoSegment {
         let range: CMTimeRange
-        let instruction: AVMutableVideoCompositionLayerInstruction
+        let instruction: AVVideoCompositionLayerInstruction
     }
 
     static func build(
@@ -123,16 +123,15 @@ enum ProjectTimelineCompositionBuilder {
                         of: sourceVideo,
                         at: clip.timelineStart.cmTime
                     )
-                    compositionVideoTrack.preferredTransform =
-                        sourceVideo.preferredTransform
                     let naturalSize = try await sourceVideo.load(.naturalSize)
                     let preferredTransform = try await sourceVideo.load(
                         .preferredTransform
                     )
-                    let layer = AVMutableVideoCompositionLayerInstruction(
-                        assetTrack: compositionVideoTrack
-                    )
-                    layer.setTransform(
+                    var layerConfiguration =
+                        AVVideoCompositionLayerInstruction.Configuration(
+                            trackID: compositionVideoTrack.trackID
+                        )
+                    layerConfiguration.setTransform(
                         aspectFitTransform(
                             naturalSize: naturalSize,
                             preferredTransform: preferredTransform,
@@ -142,6 +141,9 @@ enum ProjectTimelineCompositionBuilder {
                             )
                         ),
                         at: clip.timelineStart.cmTime
+                    )
+                    let layer = AVVideoCompositionLayerInstruction(
+                        configuration: layerConfiguration
                     )
                     videoSegments.append(
                         VideoSegment(
@@ -204,7 +206,7 @@ enum ProjectTimelineCompositionBuilder {
             }
         }
 
-        guard let videoTrack, let voiceTrack, let musicTrack else {
+        guard let videoTrack else {
             throw TimelineCompositionError.emptyTimeline
         }
         videoTrack.preferredTransform = .identity
@@ -223,6 +225,7 @@ enum ProjectTimelineCompositionBuilder {
 
         let videoComposition = makeVideoComposition(
             timeline: timeline,
+            trackID: videoTrack.trackID,
             segments: videoSegments
         )
         return TimelineComposition(
@@ -266,47 +269,81 @@ enum ProjectTimelineCompositionBuilder {
 
     private static func makeVideoComposition(
         timeline: ProjectTimeline,
+        trackID: CMPersistentTrackID,
         segments: [VideoSegment]
-    ) -> AVMutableVideoComposition? {
+    ) -> AVVideoComposition? {
         guard !segments.isEmpty else { return nil }
-        let videoComposition = AVMutableVideoComposition()
-        videoComposition.renderSize = CGSize(
-            width: timeline.canvasWidth,
-            height: timeline.canvasHeight
-        )
-        videoComposition.frameDuration = CMTime(
-            value: Int64(timeline.frameRateDenominator),
-            timescale: timeline.frameRateNumerator
-        )
-        var instructions: [AVMutableVideoCompositionInstruction] = []
+        var instructions: [any AVVideoCompositionInstructionProtocol] = []
         var cursor = CMTime.zero
         for segment in segments.sorted(by: {
             $0.range.start < $1.range.start
         }) {
             if segment.range.start > cursor {
-                let gap = AVMutableVideoCompositionInstruction()
-                gap.timeRange = CMTimeRange(
-                    start: cursor,
-                    duration: segment.range.start - cursor
+                instructions.append(
+                    instruction(
+                        timeRange: CMTimeRange(
+                            start: cursor,
+                            duration: segment.range.start - cursor
+                        ),
+                        layers: []
+                    )
                 )
-                instructions.append(gap)
             }
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = segment.range
-            instruction.layerInstructions = [segment.instruction]
-            instructions.append(instruction)
+            instructions.append(
+                instruction(
+                    timeRange: segment.range,
+                    layers: [segment.instruction]
+                )
+            )
             cursor = segment.range.end
         }
         if cursor < timeline.duration {
-            let tail = AVMutableVideoCompositionInstruction()
-            tail.timeRange = CMTimeRange(
-                start: cursor,
-                duration: timeline.duration - cursor
+            instructions.append(
+                instruction(
+                    timeRange: CMTimeRange(
+                        start: cursor,
+                        duration: timeline.duration - cursor
+                    ),
+                    layers: []
+                )
             )
-            instructions.append(tail)
         }
-        videoComposition.instructions = instructions
-        return videoComposition
+        let configuration = AVVideoComposition.Configuration(
+            animationTool: nil,
+            colorPrimaries: nil,
+            colorTransferFunction: nil,
+            colorYCbCrMatrix: nil,
+            customVideoCompositorClass: nil,
+            frameDuration: CMTime(
+                value: Int64(timeline.frameRateDenominator),
+                timescale: timeline.frameRateNumerator
+            ),
+            instructions: instructions,
+            outputBufferDescription: nil,
+            renderScale: 1,
+            renderSize: CGSize(
+                width: timeline.canvasWidth,
+                height: timeline.canvasHeight
+            ),
+            sourceSampleDataTrackIDs: [],
+            sourceTrackIDForFrameTiming: trackID,
+            spatialVideoConfigurations: []
+        )
+        return AVVideoComposition(configuration: configuration)
+    }
+
+    private static func instruction(
+        timeRange: CMTimeRange,
+        layers: [AVVideoCompositionLayerInstruction]
+    ) -> AVVideoCompositionInstruction {
+        let configuration = AVVideoCompositionInstruction.Configuration(
+            backgroundColor: nil,
+            enablePostProcessing: false,
+            layerInstructions: layers,
+            requiredSourceSampleDataTrackIDs: [],
+            timeRange: timeRange
+        )
+        return AVVideoCompositionInstruction(configuration: configuration)
     }
 
     static func aspectFitTransform(

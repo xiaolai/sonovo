@@ -7,4 +7,3 @@ import AVFoundation
 // claim that AVFoundation mutation is thread-safe.
 extension AVMutableComposition: @unchecked @retroactive Sendable {}
 extension AVAudioMix: @unchecked @retroactive Sendable {}
-extension AVMutableVideoComposition: @unchecked @retroactive Sendable {}

@@ -39,47 +39,38 @@ enum TimelineAudioPeak {
             ]
         )
         output.audioMix = audioMix
-        guard reader.canAdd(output) else {
-            throw TimelineAudioPeakError.readerUnavailable
-        }
-        reader.add(output)
-        guard reader.startReading() else {
-            throw reader.error ?? TimelineAudioPeakError.readerUnavailable
-        }
+        let provider = reader.outputProvider(for: output)
+        try reader.start()
 
         var peak: Float = 0
-        while reader.status == .reading {
+        while let ready = try await provider.next() {
             try Task.checkCancellation()
-            guard let sample = output.copyNextSampleBuffer() else {
-                break
-            }
-            guard let block = CMSampleBufferGetDataBuffer(sample) else {
-                continue
-            }
-            var length = 0
-            var pointer: UnsafeMutablePointer<Int8>?
-            let status = CMBlockBufferGetDataPointer(
-                block,
-                atOffset: 0,
-                lengthAtOffsetOut: nil,
-                totalLengthOut: &length,
-                dataPointerOut: &pointer
-            )
-            guard status == kCMBlockBufferNoErr, let pointer else {
-                continue
-            }
-            let count = length / MemoryLayout<Float>.size
-            pointer.withMemoryRebound(
-                to: Float.self,
-                capacity: count
-            ) { samples in
-                for index in 0..<count {
-                    peak = max(peak, abs(samples[index]))
+            ready.withUnsafeSampleBuffer { sample in
+                guard let block = CMSampleBufferGetDataBuffer(sample) else {
+                    return
+                }
+                var length = 0
+                var pointer: UnsafeMutablePointer<Int8>?
+                let status = CMBlockBufferGetDataPointer(
+                    block,
+                    atOffset: 0,
+                    lengthAtOffsetOut: nil,
+                    totalLengthOut: &length,
+                    dataPointerOut: &pointer
+                )
+                guard status == kCMBlockBufferNoErr, let pointer else {
+                    return
+                }
+                let count = length / MemoryLayout<Float>.size
+                pointer.withMemoryRebound(
+                    to: Float.self,
+                    capacity: count
+                ) { samples in
+                    for index in 0..<count {
+                        peak = max(peak, abs(samples[index]))
+                    }
                 }
             }
-        }
-        if reader.status == .failed {
-            throw reader.error ?? TimelineAudioPeakError.readerUnavailable
         }
         return peak
     }
