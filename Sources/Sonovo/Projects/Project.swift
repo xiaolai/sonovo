@@ -25,6 +25,7 @@ final class Project: Identifiable {
     let code: CodeWorkspace
     let terminalSessions: TerminalSessionsStore
     let mediaEdits: MediaEditWorkspace
+    let timelines: TimelineWorkspace
     /// The Sample project's files live in Application Support and have no
     /// folder scan; this registry supplies its recorded takes and exports.
     let sampleMedia: SampleMediaRegistry?
@@ -163,6 +164,7 @@ final class Project: Identifiable {
         self.watchFactory = watchFactory
         self.sampleDocuments = sampleDocuments
         self.mediaEdits = MediaEditWorkspace()
+        self.timelines = TimelineWorkspace()
         if isDemo, let sampleDocuments {
             self.sampleMedia = SampleMediaRegistry(
                 directory: sampleDocuments.destinationDirectory
@@ -746,6 +748,11 @@ final class Project: Identifiable {
             return code.documents.first {
                 MarkdownSecurity.canonical($0.fileURL) == url
             }?.isDirty == true
+        case .timeline:
+            guard let document = timelines.document else { return false }
+            return MarkdownSecurity.canonical(document.url)
+                == MarkdownSecurity.canonical(url)
+                && document.hasUnsavedChanges
         default:
             return false
         }
@@ -956,6 +963,8 @@ final class Project: Identifiable {
             }) {
                 code.select(document)
             }
+        case .timeline:
+            break
         default:
             break
         }
@@ -983,6 +992,10 @@ final class Project: Identifiable {
             MarkdownSecurity.canonical($0.fileURL).path == path
         }) {
             return .code
+        }
+        if let document = timelines.document,
+           MarkdownSecurity.canonical(document.url).path == path {
+            return .timeline
         }
         return nil
     }
@@ -1102,6 +1115,8 @@ final class Project: Identifiable {
             models.open(url: url)
         case .code:
             code.open(url: url)
+        case .timeline:
+            timelines.open(url: url)
         default:
             break
         }
@@ -1294,6 +1309,8 @@ final class Project: Identifiable {
                 if let outcome { return outcome }
             }
             return .closed
+        case .timeline:
+            return await timelines.close() ? .closed : .failed
         default:
             return .closed
         }
@@ -1365,6 +1382,8 @@ final class Project: Identifiable {
             } else {
                 closed = true
             }
+        case .timeline:
+            closed = await timelines.close(url: url)
         default:
             closed = true
         }
@@ -2155,6 +2174,10 @@ final class Project: Identifiable {
                 return true
             }
         }
+        if let document = timelines.document,
+           MarkdownSecurity.canonical(document.url).path == path {
+            return true
+        }
         return false
     }
 
@@ -2239,7 +2262,7 @@ final class Project: Identifiable {
 
     var hasDirtyDocuments: Bool {
         markdown.hasDirtyDocuments || subtitles.hasDirtyDocuments
-            || code.hasDirtyDocuments
+            || code.hasDirtyDocuments || timelines.hasDirtyDocuments
     }
 
     func prepareForTermination() {
@@ -2252,6 +2275,7 @@ final class Project: Identifiable {
         markdown.shutdown()
         models.prepareForTermination()
         code.prepareForTermination()
+        timelines.prepareForTermination()
         terminalSessions.shutdownAll(force: true)
     }
 }

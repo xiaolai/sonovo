@@ -1,0 +1,125 @@
+import Foundation
+import Observation
+import SonovoCore
+
+/// Project-owned timeline documents. v1 keeps one named timeline open per
+/// project; the workspace survives tab switches and owns save/close.
+@MainActor
+@Observable
+final class TimelineWorkspace {
+    private(set) var document: TimelineDocument?
+    private(set) var lastError: String?
+
+    var hasDirtyDocuments: Bool {
+        document?.hasUnsavedChanges == true
+    }
+
+    func open(url: URL) {
+        let target = MarkdownSecurity.canonical(url)
+        if let document,
+           MarkdownSecurity.canonical(document.url) == target {
+            return
+        }
+        document?.close()
+        let next = TimelineDocument(url: target)
+        do {
+            try next.load()
+            document = next
+            lastError = nil
+        } catch {
+            // Keep the failed document visible so the editor can report the
+            // malformed file instead of silently presenting an empty one.
+            document = next
+            lastError = error.localizedDescription
+        }
+    }
+
+    func create(url: URL, timeline: ProjectTimeline) throws {
+        let target = MarkdownSecurity.canonical(url)
+        document?.close()
+        let next = TimelineDocument(url: target)
+        try next.create(timeline)
+        document = next
+        lastError = nil
+    }
+
+    @discardableResult
+    func save() -> Bool {
+        do {
+            try document?.save()
+            lastError = nil
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func reload() -> Bool {
+        do {
+            try document?.reload()
+            lastError = nil
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Flushes before closing. A failed write keeps the document and its tab.
+    @discardableResult
+    func close(url: URL? = nil) async -> Bool {
+        guard let document else { return true }
+        if let url,
+           MarkdownSecurity.canonical(document.url)
+            != MarkdownSecurity.canonical(url) {
+            return true
+        }
+        do {
+            try await document.flush()
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+        // A different timeline may have been opened while the flush awaited.
+        guard self.document === document else { return true }
+        document.close()
+        self.document = nil
+        lastError = nil
+        return true
+    }
+
+    func flushAllForTermination() async -> Bool {
+        guard let document else { return true }
+        do {
+            try await document.flush()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    func prepareForTermination() {
+        document?.close()
+    }
+
+    func handleExternalChange(url: URL) {
+        guard let document,
+              MarkdownSecurity.canonical(document.url)
+                == MarkdownSecurity.canonical(url) else {
+            return
+        }
+        // A dirty document keeps its edits and its failure state; the next
+        // save refuses. A clean document simply adopts the new bytes.
+        if !document.hasUnsavedChanges {
+            do {
+                try document.reload()
+                lastError = nil
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+    }
+}

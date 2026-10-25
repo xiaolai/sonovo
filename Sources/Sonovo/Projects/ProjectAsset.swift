@@ -71,7 +71,7 @@ struct ProjectAssetGroup: Identifiable, Hashable, Sendable {
 extension AssetKind {
     var projectGroup: ProjectGroupDescriptor {
         switch self {
-        case .script, .document:
+        case .script, .document, .timeline:
             ProjectGroupDescriptor(
                 id: "documents",
                 title: "Documents",

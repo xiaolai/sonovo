@@ -27,6 +27,7 @@ final class ProjectScannerTests: XCTestCase {
 
     func testMapsViewableExtensionsAndGroups() throws {
         try write("script.md", "text")
+        try write("Episode.timeline.json", "{}")
         try write("brief.pdf", "pdf")
         try write("captions.srt", "srt")
         try write("voice.wav", "wav")
@@ -42,6 +43,7 @@ final class ProjectScannerTests: XCTestCase {
             uniqueKeysWithValues: result.assets.map { ($0.name, $0.kind) }
         )
         XCTAssertEqual(byName["script.md"], .script)
+        XCTAssertEqual(byName["Episode.timeline.json"], .timeline)
         XCTAssertEqual(byName["brief.pdf"], .document)
         XCTAssertEqual(byName["captions.srt"], .subtitle)
         XCTAssertEqual(byName["voice.wav"], .audio)

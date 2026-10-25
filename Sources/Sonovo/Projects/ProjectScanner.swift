@@ -239,6 +239,11 @@ struct ProjectScanner: ProjectScanning {
     /// Classification for one visible filename. Special names such as
     /// `Makefile` and `Dockerfile` are code without an extension.
     static func kind(forFilename name: String) -> AssetKind? {
+        // A timeline is a project document, not generic JSON. Classify it
+        // before `CodeLanguage`, which claims the `.json` extension.
+        if name.lowercased().hasSuffix(".timeline.json") {
+            return .timeline
+        }
         if CodeLanguage.language(forFilename: name) != nil {
             // The Markdown, subtitle, model, and web families keep their own
             // dedicated viewers; `CodeLanguage` never claims those

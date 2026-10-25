@@ -40,6 +40,11 @@ struct EditorContentView: View {
             DeliveryView(state: state, project: project)
         case .code:
             EmptyEditorView()
+        case .timeline:
+            TimelineDocumentView(
+                workspace: project.timelines,
+                assets: project.assets
+            )
         case .document, .image, .archive, .other:
             EmptyEditorView()
         }
@@ -56,6 +61,11 @@ struct EditorContentView: View {
             Model3DWorkspaceView(project: project)
         case .code:
             CodeWorkspaceView(workspace: project.code, project: project)
+        case .timeline:
+            TimelineDocumentView(
+                workspace: project.timelines,
+                assets: project.assets
+            )
         case .audio, .video:
             if let asset = project.selectedAsset {
                 MediaAssetView(

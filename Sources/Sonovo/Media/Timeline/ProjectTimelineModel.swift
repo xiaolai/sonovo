@@ -40,6 +40,10 @@ struct TimelineClip: Codable, Identifiable, Hashable, Sendable, Equatable {
     var gain: Double
     let fadeIn: TimelineTimeDTO
     let fadeOut: TimelineTimeDTO
+    /// The source revision the clip was placed against. Optional so early
+    /// timeline files remain readable; a present value that no longer
+    /// matches the project scan marks the clip stale.
+    var sourceRevision: String? = nil
 
     var sourceRange: MediaTimeRange {
         MediaTimeRange(

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 import SonovoCore
@@ -54,6 +55,20 @@ final class TimelineDocument {
         case failed(String)
     }
 
+    enum DocumentError: LocalizedError, Equatable {
+        case externalChange
+        case alreadyExists
+
+        var errorDescription: String? {
+            switch self {
+            case .externalChange:
+                "The timeline changed on disk. Reload it before saving."
+            case .alreadyExists:
+                "A timeline file already exists at this path."
+            }
+        }
+    }
+
     let url: URL
     private let store: TimelineFileStore
     private(set) var timeline: ProjectTimeline?
@@ -64,6 +79,10 @@ final class TimelineDocument {
     private var redoStack: [ProjectTimeline] = []
     private var autosaveTask: Task<Void, Never>?
     private var saveGeneration: UInt64 = 0
+    /// The content hash this document last read or wrote. A save refuses to
+    /// overwrite bytes that another writer changed, even when size and
+    /// modification time would look identical.
+    private var diskChecksum: String?
 
     init(url: URL, store: TimelineFileStore? = nil) {
         self.url = url
@@ -81,6 +100,7 @@ final class TimelineDocument {
         status = .loading
         do {
             timeline = try store.load()
+            diskChecksum = checksum()
             status = .saved
             hasUnsavedChanges = false
             undoStack.removeAll()
@@ -92,8 +112,12 @@ final class TimelineDocument {
     }
 
     func create(_ timeline: ProjectTimeline) throws {
+        guard !FileManager.default.fileExists(atPath: url.path) else {
+            throw DocumentError.alreadyExists
+        }
         try timeline.validate()
         self.timeline = timeline
+        diskChecksum = nil
         hasUnsavedChanges = true
         status = .idle
         undoStack.removeAll()
@@ -155,8 +179,19 @@ final class TimelineDocument {
         autosaveTask = nil
         saveGeneration &+= 1
         status = .saving
+        // A save is the only path that may overwrite the canonical file. If
+        // the bytes changed since this document read or wrote them, surface
+        // the conflict and leave the dirty document in place.
+        if let expected = diskChecksum {
+            guard checksum() == expected else {
+                status = .failed(TimelineDocument.DocumentError.externalChange.localizedDescription)
+                hasUnsavedChanges = true
+                throw TimelineDocument.DocumentError.externalChange
+            }
+        }
         do {
             try store.save(timeline)
+            diskChecksum = checksum()
             status = .saved
             hasUnsavedChanges = false
         } catch {
@@ -173,6 +208,14 @@ final class TimelineDocument {
         if hasUnsavedChanges {
             try save()
         }
+    }
+
+    /// Discards the in-memory timeline and reads the canonical file again.
+    /// Used after a conflict, where saving over the new bytes is forbidden.
+    func reload() throws {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        try load()
     }
 
     func close() {
@@ -200,5 +243,12 @@ final class TimelineDocument {
         if history.count > limit {
             history.removeFirst(history.count - limit)
         }
+    }
+
+    private func checksum() -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

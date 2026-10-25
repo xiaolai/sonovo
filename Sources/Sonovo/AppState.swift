@@ -937,6 +937,16 @@ final class AppState {
                         return false
                     }
                 }
+                if project.timelines.hasDirtyDocuments {
+                    let saved = await project.timelines.flushAllForTermination()
+                    guard saved else {
+                        activateProject(project)
+                        revealTimelineDocument(
+                            url: project.timelines.document?.url
+                        )
+                        return false
+                    }
+                }
             }
             if !workspace.hasDirtyDocuments {
                 return true
@@ -1046,6 +1056,20 @@ final class AppState {
         ) { project in
             project.code.select(document)
         }
+    }
+
+    /// Brings a failed timeline save back into view so its error is visible
+    /// and the close can be retried.
+    func revealTimelineDocument(url: URL?) {
+        guard let url else { return }
+        let owner = workspace.allProjects.first { project in
+            guard let document = project.timelines.document else {
+                return false
+            }
+            return MarkdownSecurity.canonical(document.url)
+                == MarkdownSecurity.canonical(url)
+        }
+        revealDocument(kind: .timeline, url: url, owner: owner) { _ in }
     }
 
     /// The production sink for a code reference. The active project and the

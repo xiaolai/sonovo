@@ -411,7 +411,7 @@ struct InspectorView: View {
                 MetadataItem(label: "Codec", value: "H.264"),
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
-        case .document, .image, .archive, .other, .code:
+        case .document, .image, .archive, .other, .code, .timeline:
             []
         }
     }
@@ -502,7 +502,7 @@ struct InspectorView: View {
                 MetadataItem(label: "Preset", value: "1080p · H.264"),
                 MetadataItem(label: "Status", value: "Not rendered")
             ]
-        case .document, .image, .archive, .other, .code:
+        case .document, .image, .archive, .other, .code, .timeline:
             return []
         }
     }

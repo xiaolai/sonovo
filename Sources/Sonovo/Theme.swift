@@ -636,6 +636,7 @@ enum AppTheme {
         static let selection = Color(nsColor: .selectedContentBackgroundColor)
         static let success = Color(nsColor: .systemGreen)
         static let warning = Color(nsColor: .systemOrange)
+        static let error = Color(nsColor: .systemRed)
         static let info = Color(nsColor: .systemBlue)
         static let white = Color.white
         static let black = Color.black
