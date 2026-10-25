@@ -234,7 +234,7 @@ struct AudioCompareView: View {
                 letter: "A",
                 name: "vo-take-02.wav",
                 detail: "00:12.8 · Warmer read",
-                duration: 12.8,
+                duration: 12.8, // token-exempt: sample take metadata
                 selectedID: nil,
                 tint: Color.accentColor
             )

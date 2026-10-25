@@ -39,11 +39,14 @@ final class ComparisonModel {
         }
     }
 
-    nonisolated static let minimumWipeFraction: Double = 0.02
-    nonisolated static let maximumWipeFraction: Double = 0.98
-    nonisolated static let defaultWipeFraction: Double = 0.5
-    nonisolated static let minimumZoom: CGFloat = 0.001
-    nonisolated static let maximumZoom: CGFloat = 16
+    nonisolated static let minimumWipeFraction =
+        AppTheme.Comparison.minimumWipeFraction
+    nonisolated static let maximumWipeFraction =
+        AppTheme.Comparison.maximumWipeFraction
+    nonisolated static let defaultWipeFraction =
+        AppTheme.Comparison.defaultWipeFraction
+    nonisolated static let minimumZoom = AppTheme.Viewer.minimumZoom
+    nonisolated static let maximumZoom = AppTheme.Viewer.maximumZoom
 
     let leadingAsset: ProjectAsset
     let trailingAsset: ProjectAsset

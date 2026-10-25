@@ -78,7 +78,7 @@ struct ReadingSettingsPane: View {
                         valueText: bodySizeText,
                         value: bodySizeBinding,
                         range: MarkdownThemeLimits.bodySize,
-                        step: 0.5,
+                        step: AppTheme.Reading.bodySizeStep,
                         reset: { readingBodySize = 0 }
                     )
                 }
@@ -88,7 +88,7 @@ struct ReadingSettingsPane: View {
                         valueText: measureText,
                         value: measureBinding,
                         range: MarkdownThemeLimits.measure,
-                        step: 10,
+                        step: AppTheme.Reading.measureStep,
                         reset: { readingMeasure = 0 }
                     )
                 }
@@ -258,6 +258,7 @@ struct ReadingSettingsPane: View {
 
     private func pointsLabel(_ value: Double) -> String {
         let rounded = value.rounded()
+        // token-exempt: display rounding tolerance
         if abs(value - rounded) < 0.05 {
             return "\(Int(rounded)) pt"
         }

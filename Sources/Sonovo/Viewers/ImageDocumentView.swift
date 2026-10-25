@@ -241,7 +241,11 @@ struct ImageDocumentView: View {
                     // Compare against the calculated 1:1 zoom. Fit can
                     // enlarge a small image, so the old `zoom > 1` test
                     // never returned to fit.
-                    let tolerance = max(0.001, abs(actualSizeZoom) * 0.01)
+                    let tolerance = max(
+                        AppTheme.Viewer.doubleTapToleranceFloor,
+                        abs(actualSizeZoom)
+                            * AppTheme.Viewer.doubleTapToleranceFraction
+                    )
                     if abs(zoom - actualSizeZoom) <= tolerance {
                         resetView()
                     } else {
@@ -303,26 +307,38 @@ struct ImageDocumentView: View {
         // points back to device pixels. Do not clamp this to the gesture
         // range: a small image fitted large needs a zoom below the ordinary
         // minimum to be genuinely 1:1.
-        zoom = 1 / max(currentFit * displayScale, 0.0001)
+        zoom = 1 / max(
+            currentFit * displayScale,
+            AppTheme.Viewer.actualSizeFloor
+        )
         lastZoom = zoom
         offset = .zero
         lastOffset = .zero
     }
 
     private var actualSizeZoom: CGFloat {
-        1 / max(currentFit * displayScale, 0.0001)
+        1 / max(
+            currentFit * displayScale,
+            AppTheme.Viewer.actualSizeFloor
+        )
     }
 
     /// A tiny image fitted large can need a 1:1 zoom far below any fixed
     /// floor. Keep the gesture range below it so a pinch does not jump.
     private var zoomFloor: CGFloat {
-        min(0.001, actualSizeZoom * 0.5)
+        min(
+            AppTheme.Viewer.minimumZoom,
+            actualSizeZoom * AppTheme.Viewer.zoomFloorFactor
+        )
     }
 
     /// A very large image's true 1:1 zoom can exceed the ordinary maximum.
     /// Keep the gesture range around it instead of snapping down on a pinch.
     private var zoomCeiling: CGFloat {
-        max(16, actualSizeZoom * 1.5)
+        max(
+            AppTheme.Viewer.maximumZoom,
+            actualSizeZoom * AppTheme.Viewer.zoomCeilingFactor
+        )
     }
 
     private func clampZoom(_ value: CGFloat) -> CGFloat {

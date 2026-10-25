@@ -234,10 +234,11 @@ private func hideHairlineLayers(
     guard let layer, minimumWidth > 0 else { return }
     // Only a layer spanning at least half the titlebar can be the separator.
     // Button and control borders are narrow and must not be hidden.
+    // token-exempt: titlebar layer threshold
     if layer.frame.height > 0,
        layer.frame.height <= 1,
        layer.backgroundColor != nil,
-       layer.frame.width >= minimumWidth * 0.5 {
+       layer.frame.width >= minimumWidth * 0.5 { // token-exempt: titlebar layer threshold
         layer.isHidden = true
     }
     for sublayer in layer.sublayers ?? [] {

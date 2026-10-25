@@ -423,8 +423,8 @@ private struct MarkdownRenderedDocumentView: View {
             while !Task.isCancelled {
                 if attempt > 0 {
                     let delay = min(
-                        2.0,
-                        0.05 * pow(2, Double(min(attempt, 6)))
+                        2.0, // token-exempt: retry backoff
+                        0.05 * pow(2, Double(min(attempt, 6))) // token-exempt: retry backoff
                     )
                     try? await Task.sleep(for: .seconds(delay))
                     if Task.isCancelled { return }

@@ -150,6 +150,49 @@ LINE_PATTERNS = (
 
 NUMBER = re.compile(r"(?<![A-Za-z0-9_])[0-9]+(?:\.[0-9]+)?")
 
+# Floats are where design ratios live: zoom factors, opacity fallbacks,
+# tolerances. Integers are usually semantic counts or time units, so the
+# scalar rule deliberately stops at the decimal point. `$0.1` is tuple
+# access, not a float.
+FLOAT_NUMBER = re.compile(r"(?<![\w$.])[0-9]+\.[0-9]+(?![\w])")
+
+UI_TYPE_MARKERS = (
+    ": View",
+    ": App",
+    "NSViewRepresentable",
+    ": NSView",
+    ": NSViewController",
+)
+
+VISUAL_CONSTANT_NAME = re.compile(
+    r"(?i)(zoom|wipe|scale|opacity|radius|corner|tolerance|fraction"
+    r"|spacing|padding|width|height|duration|font|size|inset|offset"
+    r"|shadow|border|stroke|blur|tracking|lineheight|linewidth|step)"
+)
+
+CONSTANT_DECLARATION = re.compile(
+    r"(?m)^[ \t]*(?:nonisolated[ \t]+)?(?:private[ \t]+)?"
+    r"(?:static[ \t]+)?(?:let|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+    r"[^=\n]*=[ \t]*(-?[0-9]+(?:\.[0-9]+)?)\b"
+)
+
+
+def is_ui_source(text: str) -> bool:
+    return any(marker in text for marker in UI_TYPE_MARKERS)
+
+
+def line_exempt(text: str, line: int) -> bool:
+    """A literal may be exempted on its line or the line above it.
+
+    The annotation is `// token-exempt: reason`. It is deliberately local:
+    a file-wide exemption would recreate the blind spot this rule closes.
+    """
+    lines = text.splitlines()
+    for index in (line - 1, line - 2):
+        if 0 <= index < len(lines) and "token-exempt:" in lines[index]:
+            return True
+    return False
+
 SELF_TEST_FIXTURES = (
     ("TextView.swift", "let font = NSFont.systemFont(ofSize: 13)", True),
     (
@@ -297,6 +340,30 @@ SELF_TEST_FIXTURES = (
         True,
     ),
     ("TextView.swift", ".minimumScaleFactor(0.8)", True),
+    (
+        "SampleView.swift",
+        "struct SampleView: View { let tolerance = max(0.001, value * 0.01) }",
+        True,
+    ),
+    (
+        "SampleView.swift",
+        "struct SampleView: View {\n"
+        "// token-exempt: retry backoff\n"
+        "let delay = 2.0\n"
+        "}",
+        False,
+    ),
+    (
+        "Model.swift",
+        "nonisolated static let maximumZoom: CGFloat = 16",
+        True,
+    ),
+    (
+        "Model.swift",
+        "nonisolated static let maximumZoom = AppTheme.Viewer.maximumZoom",
+        False,
+    ),
+    ("SampleView.swift", "struct SampleView: View { let count = 2 }", False),
 )
 
 
@@ -733,6 +800,35 @@ def scan_text(name: str, text: str) -> list[str]:
             end, _ = call_at(masked, open_index)
             if has_nonzero_number(masked[start:end]):
                 record(start, text[start:end])
+
+    if is_ui_source(text):
+        for match in FLOAT_NUMBER.finditer(masked):
+            if float(match.group()) in (0.0, 1.0):
+                continue
+            line = line_of(masked, match.start())
+            if line_exempt(text, line):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            record(match.start(), text[line_start:line_end].strip())
+
+    for match in CONSTANT_DECLARATION.finditer(masked):
+        declaration = match.group(0)
+        name = match.group(1)
+        value = float(match.group(2))
+        if value in (0.0, 1.0):
+            continue
+        # A closed range is a validation bound, not a rendered value.
+        if "ClosedRange" in declaration:
+            continue
+        if not VISUAL_CONSTANT_NAME.search(name):
+            continue
+        line = line_of(masked, match.start())
+        if line_exempt(text, line):
+            continue
+        record(match.start(), text[match.start() : match.end()])
 
     for regex in (
         NAMED_COLOR,

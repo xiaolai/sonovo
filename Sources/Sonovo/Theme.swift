@@ -291,8 +291,24 @@ enum AppTheme {
         static let overviewRowMinHeight: CGFloat = 52
     }
 
+    /// Shared zoom behavior for image viewers.
+    enum Viewer {
+        static let minimumZoom: CGFloat = 0.001
+        static let maximumZoom: CGFloat = 16
+        /// A tiny image fitted large can need a 1:1 zoom below the normal
+        /// floor; this keeps the actual-size calculation finite.
+        static let actualSizeFloor: CGFloat = 0.0001
+        static let zoomFloorFactor: CGFloat = 0.5
+        static let zoomCeilingFactor: CGFloat = 1.5
+        static let doubleTapToleranceFloor: CGFloat = 0.001
+        static let doubleTapToleranceFraction: CGFloat = 0.01
+    }
+
     /// Side-by-side and wipe comparison chrome.
     enum Comparison {
+        static let minimumWipeFraction: Double = 0.02
+        static let maximumWipeFraction: Double = 0.98
+        static let defaultWipeFraction: Double = 0.5
         static let modePickerWidth: CGFloat = 180
         static let zoomLabelWidth: CGFloat = 52
         static let dividerHitWidth: CGFloat = 24
@@ -335,6 +351,8 @@ enum AppTheme {
         /// Shared with subtitle cue rows. Rendered Markdown values live in
         /// the selected `MarkdownTheme`, not here.
         static let bodySize: CGFloat = 16.5
+        static let bodySizeStep: Double = 0.5
+        static let measureStep: Double = 10
         static let bodyLineSpacing: CGFloat = 7
 
         // Source editor

@@ -582,8 +582,14 @@ struct ComparisonView: View {
                     fit: currentFit,
                     displayScale: displayScale
                 )
-                let floor = min(ComparisonModel.minimumZoom, target * 0.5)
-                let ceiling = max(ComparisonModel.maximumZoom, target * 1.5)
+                let floor = min(
+                    ComparisonModel.minimumZoom,
+                    target * AppTheme.Viewer.zoomFloorFactor
+                )
+                let ceiling = max(
+                    ComparisonModel.maximumZoom,
+                    target * AppTheme.Viewer.zoomCeilingFactor
+                )
                 model.zoom = min(
                     max(zoomStart * value, floor),
                     ceiling
@@ -673,7 +679,10 @@ struct ComparisonView: View {
             fit: fit,
             displayScale: displayScale
         )
-        let tolerance = max(0.001, abs(target) * 0.01)
+        let tolerance = max(
+            AppTheme.Viewer.doubleTapToleranceFloor,
+            abs(target) * AppTheme.Viewer.doubleTapToleranceFraction
+        )
         if abs(model.zoom - target) <= tolerance {
             resetView()
         } else {

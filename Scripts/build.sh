@@ -4,6 +4,13 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+python3 Scripts/check_design_tokens.py
+token_status=$?
+if [ "$token_status" -ne 0 ]; then
+    python3 Scripts/clean_build_cache.py --quiet
+    exit "$token_status"
+fi
+
 swift build "$@"
 status=$?
 

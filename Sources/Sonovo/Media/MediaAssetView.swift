@@ -272,7 +272,7 @@ struct MediaAssetView: View {
                         get: { scrubValue ?? playback.elapsed },
                         set: { scrubValue = $0 }
                     ),
-                    in: 0...max(playback.duration, 0.001),
+                    in: 0...max(playback.duration, 0.001), // token-exempt: zero-duration guard
                     onEditingChanged: { editing in
                         guard !editing, let value = scrubValue else { return }
                         scrubValue = nil

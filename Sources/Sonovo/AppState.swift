@@ -96,9 +96,9 @@ final class AppState {
     var terminalFraction: CGFloat = AppTheme.Layout.terminalDefaultFraction
 
     var isPlaying = false
-    var playhead: Double = 4.6
-    let duration: Double = 12.4
-    var volume: Double = 0.8
+    var playhead: Double = 4.6 // token-exempt: demo playback state
+    let duration: Double = 12.4 // token-exempt: demo playback state
+    var volume: Double = 0.8 // token-exempt: demo playback state
     var isLooping = false
     var showCaptions = Preferences.captionsDefault {
         didSet {
