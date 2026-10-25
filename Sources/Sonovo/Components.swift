@@ -5,6 +5,11 @@ struct BarIconButton: View {
     let help: String
     var isSelected = false
     var tint: Color?
+    var iconSize: CGFloat = AppTheme.TypeScale.sm
+    var width: CGFloat = AppTheme.ControlSize.medium
+    var height: CGFloat = AppTheme.ControlSize.regular
+    var hasRestingBackground = false
+    var isEnabled = true
     let action: () -> Void
 
     @State private var isHovering = false
@@ -12,8 +17,8 @@ struct BarIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
-                .frame(width: AppTheme.ControlSize.medium, height: AppTheme.ControlSize.regular)
+                .font(.system(size: iconSize, weight: .medium))
+                .frame(width: width, height: height)
                 .background(
                     RoundedRectangle(cornerRadius: AppTheme.Radius.control, style: .continuous)
                         .fill(backgroundColor)
@@ -22,8 +27,12 @@ struct BarIconButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(
+            isEnabled ? AppTheme.Opacity.full : AppTheme.Opacity.half
+        )
         .onHover { hovering in
-            isHovering = hovering
+            isHovering = isEnabled && hovering
         }
         .help(help)
         .accessibilityLabel(help)
@@ -33,7 +42,16 @@ struct BarIconButton: View {
         if isSelected {
             return Color.accentColor.opacity(AppTheme.Opacity.muted)
         }
-        return isHovering ? Color.primary.opacity(AppTheme.Opacity.ghostSoft) : Color.clear
+        if isHovering {
+            return Color.primary.opacity(
+                hasRestingBackground
+                    ? AppTheme.Opacity.soft
+                    : AppTheme.Opacity.ghostSoft
+            )
+        }
+        return hasRestingBackground
+            ? Color.primary.opacity(AppTheme.Opacity.ghost)
+            : Color.clear
     }
 }
 

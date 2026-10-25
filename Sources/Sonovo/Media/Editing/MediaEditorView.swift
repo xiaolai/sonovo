@@ -26,8 +26,7 @@ struct MediaEditorToolbar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
             statusRow
-            operationRow
-            actionRow
+            controlRow
         }
         .padding(.horizontal, AppTheme.Spacing.md)
         .padding(.vertical, AppTheme.Spacing.sm)
@@ -80,75 +79,199 @@ struct MediaEditorToolbar: View {
         }
     }
 
-    private var operationRow: some View {
+    /// Icon-only controls keep the waveform dominant. Every control carries a
+    /// tooltip, and the destructive replace action keeps a warning tint.
+    private var controlRow: some View {
         HStack(spacing: AppTheme.Spacing.sm) {
-            Button("Set In") { onSetIn() }
-                .disabled(document.editState == nil || isBusy)
-            Button("Set Out") { onSetOut() }
-                .disabled(document.editState == nil || isBusy)
-            Button("Trim to Selection") { onTrim() }
-                .disabled(!document.canTrimToSelection || isBusy)
-            Button("Delete Selection") { onDelete() }
-                .disabled(!document.canDeleteSelection || isBusy)
-            Button("Clear Selection") { onClearSelection() }
-                .disabled(document.selection == nil || isBusy)
-            Button("Reset") { onReset() }
-                .disabled(!document.canReset || isBusy)
+            mediaButton(
+                "rectangle.leadinghalf.inset.filled",
+                help: "Set In",
+                isEnabled: document.editState != nil && !isBusy
+            ) {
+                onSetIn()
+            }
+
+            mediaButton(
+                "rectangle.trailinghalf.inset.filled",
+                help: "Set Out",
+                isEnabled: document.editState != nil && !isBusy
+            ) {
+                onSetOut()
+            }
+
+            controlDivider
+
+            mediaButton(
+                "crop",
+                help: "Trim to Selection",
+                isEnabled: document.canTrimToSelection && !isBusy
+            ) {
+                onTrim()
+            }
+
+            mediaButton(
+                "trash",
+                help: "Delete Selection",
+                isEnabled: document.canDeleteSelection && !isBusy
+            ) {
+                onDelete()
+            }
+
+            mediaButton(
+                "xmark.circle",
+                help: "Clear Selection",
+                isEnabled: document.selection != nil && !isBusy
+            ) {
+                onClearSelection()
+            }
+
+            mediaButton(
+                "arrow.counterclockwise",
+                help: "Reset Edit",
+                isEnabled: document.canReset && !isBusy
+            ) {
+                onReset()
+            }
+
+            controlDivider
+
+            mediaButton(
+                "arrow.uturn.backward",
+                help: "Undo Media Edit",
+                isEnabled: document.canUndo && !isBusy
+            ) {
+                onUndo()
+            }
+
+            mediaButton(
+                "arrow.uturn.forward",
+                help: "Redo Media Edit",
+                isEnabled: document.canRedo && !isBusy
+            ) {
+                onRedo()
+            }
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
-            Button("Undo") { onUndo() }
-                .disabled(!document.canUndo || isBusy)
-            Button("Redo") { onRedo() }
-                .disabled(!document.canRedo || isBusy)
+            recordingControls
+            exportControls
+
+            mediaButton(
+                "square.and.arrow.down",
+                help: "Save Take",
+                isEnabled: document.canExport && !isBusy
+            ) {
+                onSaveTake()
+            }
+
+            mediaButton(
+                "arrow.triangle.2.circlepath",
+                help: "Replace Original…",
+                tint: AppTheme.Palette.warning,
+                isEnabled: document.canReplaceOriginal && !isBusy
+            ) {
+                onReplace()
+            }
         }
-        .font(.system(size: AppTheme.TypeScale.sm))
-        .controlSize(.small)
     }
 
-    private var actionRow: some View {
-        HStack(spacing: AppTheme.Spacing.sm) {
-            if recorder.isRecording {
-                Image(systemName: "record.circle.fill")
-                    .foregroundStyle(AppTheme.Palette.warning)
-                Text("Recording \(MediaTimecodeFormatter.elapsed(recorder.elapsed))")
-                    .font(.system(size: AppTheme.TypeScale.xs, design: .monospaced))
-                ProgressView(value: recorder.level)
-                    .frame(width: AppTheme.Size.mediaRecordLevelWidth)
-                Button("Stop Recording") {
-                    _ = project.stopAudioRecording()
-                }
-            } else {
-                Button("Record Audio") {
-                    Task { _ = await project.startAudioRecording() }
-                }
-                .disabled(!project.canRecordAudio || isBusy)
+    @ViewBuilder
+    private var recordingControls: some View {
+        if recorder.isRecording {
+            Image(systemName: "record.circle.fill")
+                .font(
+                    .system(
+                        size: AppTheme.IconSize.medium,
+                        weight: .medium
+                    )
+                )
+                .foregroundStyle(AppTheme.Palette.warning)
+                .frame(
+                    width: AppTheme.ControlSize.large,
+                    height: AppTheme.ControlSize.medium
+                )
+                .help("Recording in progress")
+                .accessibilityLabel("Recording in progress")
+
+            Text(MediaTimecodeFormatter.elapsed(recorder.elapsed))
+                .font(.system(size: AppTheme.TypeScale.xs, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            ProgressView(value: recorder.level)
+                .frame(width: AppTheme.Size.mediaRecordLevelWidth)
+                .controlSize(.small)
+                .accessibilityLabel("Input level")
+
+            mediaButton(
+                "stop.circle.fill",
+                help: "Stop Recording",
+                tint: AppTheme.Palette.warning
+            ) {
+                _ = project.stopAudioRecording()
             }
-
-            Spacer(minLength: AppTheme.Spacing.sm)
-
-            if let progress = exporter.progress {
-                ProgressView(value: progress)
-                    .frame(width: AppTheme.Size.mediaRecordLevelWidth)
-                Text("\(Int(progress * 100))%") // token-exempt: percent readout
-                    .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Button("Cancel") { exporter.cancel() }
-            } else if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-                if exporter.isBusy {
-                    Button("Cancel") { exporter.cancel() }
-                }
+        } else {
+            mediaButton(
+                "record.circle",
+                help: "Record Audio",
+                tint: AppTheme.Palette.warning,
+                isEnabled: project.canRecordAudio && !isBusy
+            ) {
+                Task { _ = await project.startAudioRecording() }
             }
-
-            Button("Save Take") { onSaveTake() }
-                .disabled(!document.canExport || isBusy)
-            Button("Replace Original…") { onReplace() }
-                .disabled(!document.canReplaceOriginal || isBusy)
         }
-        .font(.system(size: AppTheme.TypeScale.sm))
-        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private var exportControls: some View {
+        if let progress = exporter.progress {
+            ProgressView(value: progress)
+                .frame(width: AppTheme.Size.mediaRecordLevelWidth)
+                .controlSize(.small)
+                .accessibilityLabel("Export progress")
+
+            Text("\(Int(progress * 100))%") // token-exempt: percent readout
+                .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            mediaButton("xmark", help: "Cancel Export") {
+                exporter.cancel()
+            }
+        } else if isBusy {
+            ProgressView()
+                .controlSize(.small)
+            if exporter.isBusy {
+                mediaButton("xmark", help: "Cancel Export") {
+                    exporter.cancel()
+                }
+            }
+        }
+    }
+
+    private func mediaButton(
+        _ systemName: String,
+        help: String,
+        tint: Color? = nil,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        BarIconButton(
+            systemName: systemName,
+            help: help,
+            tint: tint,
+            iconSize: AppTheme.IconSize.medium,
+            width: AppTheme.ControlSize.large,
+            height: AppTheme.ControlSize.medium,
+            hasRestingBackground: true,
+            isEnabled: isEnabled,
+            action: action
+        )
+    }
+
+    private var controlDivider: some View {
+        Divider()
+            .frame(height: AppTheme.Size.toolbarDividerHeight)
     }
 }
 
