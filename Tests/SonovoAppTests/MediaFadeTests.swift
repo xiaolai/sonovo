@@ -217,6 +217,74 @@ final class MediaCompositionFadeTests: XCTestCase {
         XCTAssertLessThan(mixedPeak, dryPeak * 0.2)
     }
 
+    func testNewTakeAndReplacePreserveFades() async throws {
+        let source = try makeTone(duration: 2)
+        let revision = try XCTUnwrap(
+            MediaStorage.revision(for: source)
+        )
+        let asset = ProjectAsset(
+            id: source.path,
+            url: source,
+            name: source.lastPathComponent,
+            relativePath: source.lastPathComponent,
+            kind: .audio,
+            size: revision.size,
+            modified: revision.modified,
+            revision: revision
+        )
+        let state = MediaEditState(
+            sourceDuration: 2,
+            keepRanges: [
+                MediaTimeRange(start: 0, duration: 0.6),
+                MediaTimeRange(start: 1, duration: 0.6)
+            ]
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "fade-destination-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: destination,
+            withIntermediateDirectories: true
+        )
+        temporaryItems.append(destination)
+        let projectName = "MediaFadeTests-\(UUID().uuidString)"
+        let service = MediaExportService()
+
+        let take = try await service.export(
+            source: asset,
+            state: state,
+            destinationDirectory: destination,
+            projectName: projectName,
+            mode: .newTake
+        )
+        let join = Int(0.6 * 44_100)
+        let takeSamples = try await readSamples(from: take.url)
+        XCTAssertLessThan(
+            peak(takeSamples, around: join, radius: 44),
+            0.02
+        )
+
+        let replaced = try await service.export(
+            source: asset,
+            state: state,
+            destinationDirectory: destination,
+            projectName: projectName,
+            mode: .replaceOriginal
+        )
+        let backup = try XCTUnwrap(replaced.backupURL)
+        temporaryItems.append(backup.deletingLastPathComponent())
+        let replacedSamples = try await readSamples(from: source)
+        XCTAssertLessThan(
+            peak(replacedSamples, around: join, radius: 44),
+            0.02
+        )
+        let backupAsset = AVURLAsset(url: backup)
+        let backupDuration = try await backupAsset.load(.duration).seconds
+        XCTAssertEqual(backupDuration, 2, accuracy: 0.03)
+    }
+
     func testVideoFadeMuxPreservesTheVideoCodecAndFadesAudio() async throws {
         let source = try await makeVideoWithAudio(duration: 2)
         let state = MediaEditState(
