@@ -429,6 +429,7 @@ struct MediaAssetView: View {
                     },
                     isAuditioning: playback.isAuditioning,
                     canAudition: canAudition,
+                    isPreviewPending: isPreviewPending,
                     onAudition: {
                         toggleAudition(document: editDocument)
                     },

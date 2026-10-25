@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreVideo
+import Darwin
 import Foundation
 import Synchronization
 import XCTest
@@ -1003,4 +1004,181 @@ private actor PermissionGate {
 
 private enum MediaTestError: Error {
     case videoWriter
+}
+
+@MainActor
+final class MediaAcceptanceRegressionTests: XCTestCase {
+    func testKeptAudioTailDropsTheEmptyVideoTrack() async throws {
+        let url = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "video-audio-tail",
+                withExtension: "mov",
+                subdirectory: "Fixtures"
+            )
+        )
+        let state = MediaEditState(
+            sourceDuration: 2,
+            keepRanges: [MediaTimeRange(start: 1.2, duration: 0.8)]
+        )
+        let build = try await MediaCompositionBuilder.build(
+            sourceURL: url,
+            state: state
+        )
+        XCTAssertFalse(build.hasVideo)
+        XCTAssertTrue(build.hasAudio)
+        XCTAssertTrue(
+            build.composition.tracks(withMediaType: .video).isEmpty
+        )
+        XCTAssertFalse(
+            build.composition.tracks(withMediaType: .audio).isEmpty
+        )
+    }
+
+    func testSetInAndOutAtTheMinimumBoundaryDoNotClearTheSelection() {
+        let asset = ProjectAsset(
+            id: "boundary.wav",
+            url: URL(fileURLWithPath: "/tmp/boundary.wav"),
+            name: "boundary.wav",
+            relativePath: "boundary.wav",
+            kind: .audio,
+            size: 1,
+            modified: nil,
+            revision: AssetRevision(
+                fileIdentifier: "boundary",
+                size: 1,
+                modified: nil
+            )
+        )
+        let document = MediaEditDocument(asset: asset)
+        document.prepare(sourceDuration: 10)
+        XCTAssertTrue(document.setSelection(start: 5, end: 6))
+        XCTAssertFalse(document.setSelectionEnd(atSourceTime: 0.5))
+        XCTAssertEqual(document.selection?.start, 5)
+        XCTAssertEqual(document.selection?.end, 6)
+
+        XCTAssertTrue(document.setSelection(start: 1, end: 2))
+        XCTAssertFalse(document.setSelectionStart(atSourceTime: 3))
+        XCTAssertEqual(document.selection?.start, 1)
+        XCTAssertEqual(document.selection?.end, 2)
+
+        XCTAssertTrue(document.setSelection(start: 5, end: 6))
+        XCTAssertTrue(document.setSelectionStart(atSourceTime: 5.98))
+        let selection = try? XCTUnwrap(document.selection)
+        XCTAssertNotNil(selection)
+        XCTAssertEqual(
+            selection?.duration ?? 0,
+            MediaEditLimits.minimumSelectionDuration,
+            accuracy: 0.0001
+        )
+    }
+
+    func testRevisionReadsFreshAfterAnInPlaceOverwrite() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fresh-revision-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data([1, 2, 3]).write(to: url)
+        let before = try XCTUnwrap(MediaStorage.revision(for: url))
+        try Data([1, 2, 3, 4, 5]).write(to: url, options: .atomic)
+        let after = try XCTUnwrap(MediaStorage.revision(for: url))
+        XCTAssertFalse(MediaStorage.matches(before, revision: after))
+    }
+
+    func testReplaceCopiesPermissionsAndExtendedAttributes() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "media-attributes-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("source.wav")
+        let target = directory.appendingPathComponent("target.wav")
+        try Data([1, 2, 3]).write(to: source)
+        try Data([4, 5, 6]).write(to: target)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o640],
+            ofItemAtPath: source.path
+        )
+        let name = "com.sonovo.test"
+        let value = Array("tag-value".utf8)
+        let setResult = value.withUnsafeBytes { bytes in
+            setxattr(
+                source.path,
+                name,
+                bytes.baseAddress,
+                bytes.count,
+                0,
+                0
+            )
+        }
+        XCTAssertEqual(setResult, 0)
+
+        try MediaStorage.copyFileAttributes(from: source, to: target)
+        let attrs = try FileManager.default.attributesOfItem(
+            atPath: target.path
+        )
+        XCTAssertEqual(
+            (attrs[.posixPermissions] as? NSNumber)?.intValue,
+            0o640
+        )
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let read = buffer.withUnsafeMutableBytes { bytes in
+            getxattr(
+                target.path,
+                name,
+                bytes.baseAddress,
+                bytes.count,
+                0,
+                0
+            )
+        }
+        XCTAssertEqual(read, value.count)
+        XCTAssertEqual(
+            String(decoding: buffer.prefix(max(read, 0)), as: UTF8.self),
+            "tag-value"
+        )
+    }
+
+    func testExportCancellationIsCancellationNotFailure() async throws {
+        let source = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "video-audio-tail",
+                withExtension: "mov",
+                subdirectory: "Fixtures"
+            )
+        )
+        let exporter = MediaExportService()
+        let asset = ProjectAsset(
+            id: source.path,
+            url: source,
+            name: source.lastPathComponent,
+            relativePath: source.lastPathComponent,
+            kind: .video,
+            size: 1,
+            modified: nil,
+            revision: try XCTUnwrap(MediaStorage.revision(for: source))
+        )
+        let state = MediaEditState(sourceDuration: 2)
+        let task = Task {
+            try await exporter.export(
+                source: asset,
+                state: state,
+                destinationDirectory: FileManager.default.temporaryDirectory,
+                projectName: "Cancel",
+                mode: .newTake
+            )
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        do {
+            _ = try await task.value
+        } catch is CancellationError {
+            XCTAssertEqual(exporter.status, .idle)
+        } catch {
+            XCTFail("expected cancellation, got \(error)")
+        }
+    }
 }

@@ -20,6 +20,7 @@ struct MediaEditorToolbar: View {
     let onReplace: () -> Void
     let isAuditioning: Bool
     let canAudition: Bool
+    let isPreviewPending: Bool
     let onAudition: () -> Void
     let canFindPauses: Bool
     let findPausesHelp: String
@@ -94,7 +95,9 @@ struct MediaEditorToolbar: View {
             mediaButton(
                 "rectangle.leadinghalf.inset.filled",
                 help: "Set In",
-                isEnabled: document.editState != nil && !isBusy
+                isEnabled: document.editState != nil
+                    && !isBusy
+                    && !isPreviewPending
             ) {
                 onSetIn()
             }
@@ -102,7 +105,9 @@ struct MediaEditorToolbar: View {
             mediaButton(
                 "rectangle.trailinghalf.inset.filled",
                 help: "Set Out",
-                isEnabled: document.editState != nil && !isBusy
+                isEnabled: document.editState != nil
+                    && !isBusy
+                    && !isPreviewPending
             ) {
                 onSetOut()
             }

@@ -132,8 +132,12 @@ final class MediaEditDocument: Identifiable {
         guard let state = editState else { return false }
         let end = state.selection?.end ?? state.sourceDuration
         let minimum = MediaEditLimits.minimumSelectionDuration
-        let start = min(max(time, 0), max(end - minimum, 0))
-        return setSelection(start: start, end: max(end, start + minimum))
+        let proposed = min(max(time, 0), state.sourceDuration)
+        guard proposed <= end - minimum + 1e-9 else {
+            return false
+        }
+        let start = min(proposed, max(end - minimum, 0))
+        return setSelection(start: start, end: end)
     }
 
     @discardableResult
@@ -141,7 +145,11 @@ final class MediaEditDocument: Identifiable {
         guard let state = editState else { return false }
         let start = state.selection?.start ?? 0
         let minimum = MediaEditLimits.minimumSelectionDuration
-        let end = max(min(time, state.sourceDuration), start + minimum)
+        let proposed = min(max(time, 0), state.sourceDuration)
+        guard proposed >= start + minimum - 1e-9 else {
+            return false
+        }
+        let end = max(proposed, start + minimum)
         return setSelection(start: start, end: end)
     }
 

@@ -261,12 +261,18 @@ struct MediaEditState: Equatable, Sendable {
     mutating func setSelection(start: Double, end: Double) -> Bool {
         let lower = min(max(min(start, end), 0), sourceDuration)
         let upper = min(max(max(start, end), 0), sourceDuration)
-        guard upper - lower > MediaEditLimits.minimumSelectionDuration else {
+        let rawDuration = upper - lower
+        guard rawDuration + 1e-9 >= MediaEditLimits.minimumSelectionDuration
+        else {
             let changed = selection != nil
             selection = nil
             return changed
         }
-        let next = MediaTimeRange(start: lower, duration: upper - lower)
+        let duration = min(
+            max(rawDuration, MediaEditLimits.minimumSelectionDuration),
+            sourceDuration - lower
+        )
+        let next = MediaTimeRange(start: lower, duration: duration)
         guard selection != next else { return false }
         selection = next
         return true

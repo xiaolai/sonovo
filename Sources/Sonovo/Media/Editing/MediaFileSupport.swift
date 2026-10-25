@@ -528,21 +528,19 @@ enum MediaStorage {
     }
 
     static func revision(for url: URL) -> AssetRevision? {
-        guard let values = try? url.resourceValues(
-            forKeys: [
-                .fileSizeKey,
-                .contentModificationDateKey,
-                .fileResourceIdentifierKey
-            ]
-        ) else {
-            return nil
-        }
+        // URL resource values can be cached per URL and reused after a write.
+        // A revision check after an export must read stat() fresh.
+        guard let snapshot = snapshot(for: url) else { return nil }
+        let modified = Date(
+            timeIntervalSince1970: Double(snapshot.modifiedSeconds)
+                + Double(snapshot.modifiedNanoseconds) / 1_000_000_000
+        )
         return AssetRevision(
-            fileIdentifier: values.fileResourceIdentifier.map {
-                String(describing: $0)
-            },
-            size: Int64(values.fileSize ?? 0),
-            modified: values.contentModificationDate
+            fileIdentifier: "\(snapshot.device):\(snapshot.inode):"
+                + "\(snapshot.changedSeconds):"
+                + "\(snapshot.changedNanoseconds)",
+            size: snapshot.size,
+            modified: modified
         )
     }
 
@@ -590,6 +588,75 @@ enum MediaStorage {
             changedSeconds: Int64(info.st_ctimespec.tv_sec),
             changedNanoseconds: Int64(info.st_ctimespec.tv_nsec)
         )
+    }
+
+    /// Copy POSIX permissions, creation date, and every extended attribute
+    /// (Finder tags included) from an original source to its replacement.
+    /// Metadata and auxiliary tracks are handled by the composition/export
+    /// layer; this is the file-system half of Replace Original.
+    static func copyFileAttributes(from source: URL, to target: URL) throws {
+        let manager = FileManager.default
+        let attributes = try manager.attributesOfItem(atPath: source.path)
+        var values: [FileAttributeKey: Any] = [:]
+        if let permissions = attributes[.posixPermissions] {
+            values[.posixPermissions] = permissions
+        }
+        if let created = attributes[.creationDate] {
+            values[.creationDate] = created
+        }
+        if !values.isEmpty {
+            try manager.setAttributes(values, ofItemAtPath: target.path)
+        }
+
+        let namesSize = listxattr(source.path, nil, 0, 0)
+        guard namesSize > 0 else { return }
+        var names = [CChar](repeating: 0, count: namesSize)
+        let readNames = names.withUnsafeMutableBufferPointer { buffer in
+            listxattr(
+                source.path,
+                buffer.baseAddress,
+                buffer.count,
+                0
+            )
+        }
+        guard readNames > 0 else { return }
+        for name in names.split(separator: 0) {
+            let attributeName = String(
+                decoding: name.map { UInt8(bitPattern: $0) },
+                as: UTF8.self
+            )
+            let valueSize = getxattr(
+                source.path,
+                attributeName,
+                nil,
+                0,
+                0,
+                0
+            )
+            guard valueSize >= 0 else { continue }
+            var value = [UInt8](repeating: 0, count: valueSize)
+            let readValue = value.withUnsafeMutableBufferPointer { buffer in
+                getxattr(
+                    source.path,
+                    attributeName,
+                    buffer.baseAddress,
+                    buffer.count,
+                    0,
+                    0
+                )
+            }
+            guard readValue >= 0 else { continue }
+            _ = value.withUnsafeBytes { bytes in
+                setxattr(
+                    target.path,
+                    attributeName,
+                    bytes.baseAddress,
+                    bytes.count,
+                    0,
+                    0
+                )
+            }
+        }
     }
 
     static func fileSize(for url: URL) -> Int64 {

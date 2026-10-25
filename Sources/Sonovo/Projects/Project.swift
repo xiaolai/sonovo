@@ -1646,7 +1646,12 @@ final class Project: Identifiable {
 
     @discardableResult
     func stopAudioRecording(openWhenFinished: Bool = true) -> ProjectAsset? {
-        guard let temporary = mediaEdits.recorder.stop() else { return nil }
+        guard let temporary = mediaEdits.recorder.stop() else {
+            if let error = mediaEdits.recorder.lastError {
+                mediaError = "The recording could not be saved: \(error)"
+            }
+            return nil
+        }
         guard let destination = recordingDestinationDirectory
                 ?? mediaDestinationDirectory else {
             mediaError = "This project has no writable folder for recordings."
@@ -1666,7 +1671,8 @@ final class Project: Identifiable {
                 replacing: false
             )
         } catch {
-            mediaError = "The recording could not be saved: "
+            mediaError = "The recording could not be saved (temporary file "
+                + "remains at \(temporary.path)): "
                 + error.localizedDescription
             return nil
         }

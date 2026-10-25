@@ -98,6 +98,7 @@ enum MediaCompositionBuilder {
             }
 
             var cursor = CMTime.zero
+            var insertedAnyRange = false
             for (rangeIndex, range) in state.keepRanges.enumerated() {
                 // Tracks in one file can differ by a few milliseconds at the
                 // head or tail (encoder priming, last audio frame). Insert the
@@ -107,6 +108,7 @@ enum MediaCompositionBuilder {
                 let effectiveEnd = min(range.end, trackEnd)
                 if effectiveEnd - effectiveStart
                     > MediaEditLimits.minimumRangeDuration {
+                    insertedAnyRange = true
                     let start = CMTime(
                         seconds: effectiveStart,
                         preferredTimescale: MediaEditLimits.timescale
@@ -151,6 +153,18 @@ enum MediaCompositionBuilder {
                     preferredTimescale: MediaEditLimits.timescale
                 )
             }
+            if !insertedAnyRange {
+                // An all-empty track has an invalid time range. Leaving it in
+                // the composition makes a fade mux try to insert that invalid
+                // range and fail with an opaque AVFoundation error.
+                composition.removeTrack(compositionTrack)
+                audioCompositionTracks.removeValue(
+                    forKey: compositionTrack.trackID
+                )
+                if sourceTrack.mediaType == .video {
+                    naturalSize = nil
+                }
+            }
         }
 
         if let naturalSize {
@@ -163,8 +177,8 @@ enum MediaCompositionBuilder {
         let audioMix = makeAudioMix(plan: fadePlan, tracks: audioCompositionTracks)
         return MediaCompositionBuild(
             composition: composition,
-            hasVideo: !(videoTracks ?? []).isEmpty,
-            hasAudio: !(audioTracks ?? []).isEmpty,
+            hasVideo: !composition.tracks(withMediaType: .video).isEmpty,
+            hasAudio: !composition.tracks(withMediaType: .audio).isEmpty,
             duration: composition.duration.seconds,
             audioChannelCount: audioChannelCount,
             audioTrackCount: audioTracks?.count ?? 0,

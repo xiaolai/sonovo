@@ -141,6 +141,18 @@ final class MediaExportService {
         let expectedFingerprint = mode == .replaceOriginal
             ? try await MediaStorage.fingerprint(for: source.url)
             : nil
+        if mode == .replaceOriginal {
+            let sourceAsset = AVURLAsset(url: source.url)
+            let tracks = try await sourceAsset.load(.tracks)
+            guard tracks.allSatisfy({
+                $0.mediaType == .audio || $0.mediaType == .video
+            }) else {
+                throw MediaExportError.unsupportedContainer(
+                    "This source has auxiliary tracks that Replace Original "
+                        + "would drop. Use Save Take instead."
+                )
+            }
+        }
         let build = try await MediaCompositionBuilder.build(
             sourceURL: source.url,
             state: state
@@ -243,6 +255,10 @@ final class MediaExportService {
             guard let expectedFingerprint else {
                 throw MediaStorageError.sourceChanged(source.name)
             }
+            try MediaStorage.copyFileAttributes(
+                from: source.url,
+                to: temporary
+            )
             commitAttempted = true
             do {
                 // The swap moves the exact pre-replacement bytes to `staged`.
@@ -558,6 +574,9 @@ enum MediaVideoExporter {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
                 MediaStorage.removeIfPresent(outputURL)
                 if preset == AVAssetExportPresetHighestQuality {
                     throw MediaExportError.exportFailed(
@@ -591,6 +610,10 @@ enum MediaVideoExporter {
         }
         for track in videoTracks {
             let timeRange = try await track.load(.timeRange)
+            guard timeRange.isValid,
+                  timeRange.duration > .zero else {
+                continue
+            }
             guard let muxTrack = mux.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
@@ -606,6 +629,11 @@ enum MediaVideoExporter {
             )
             muxTrack.preferredTransform = try await track.load(
                 .preferredTransform
+            )
+        }
+        guard !mux.tracks(withMediaType: .video).isEmpty else {
+            throw MediaExportError.exportFailed(
+                "The kept range contains no video frames to export."
             )
         }
 
@@ -713,6 +741,9 @@ enum MediaVideoExporter {
             }
         } catch {
             progressTask.cancel()
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             throw error
         }
         progressTask.cancel()
