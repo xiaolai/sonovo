@@ -160,7 +160,8 @@ final class MediaPlaybackModel {
         asset: AVAsset,
         sourceURL: URL,
         fileSize: Int64,
-        audioMix: AVAudioMix? = nil
+        audioMix: AVAudioMix? = nil,
+        videoComposition: AVVideoComposition? = nil
     ) {
         loadTask?.cancel()
         loadGeneration &+= 1
@@ -173,6 +174,7 @@ final class MediaPlaybackModel {
             timingURL: nil,
             fileSize: fileSize,
             audioMix: audioMix,
+            videoComposition: videoComposition,
             generation: generation
         )
     }
@@ -183,6 +185,7 @@ final class MediaPlaybackModel {
         timingURL: URL?,
         fileSize: Int64,
         audioMix: AVAudioMix? = nil,
+        videoComposition: AVVideoComposition? = nil,
         generation: UInt64
     ) {
         url = displayURL
@@ -193,6 +196,7 @@ final class MediaPlaybackModel {
                 asset: asset,
                 timingURL: timingURL,
                 audioMix: audioMix,
+                videoComposition: videoComposition,
                 generation: generation
             )
         }
@@ -225,6 +229,7 @@ final class MediaPlaybackModel {
         asset: AVAsset,
         timingURL: URL?,
         audioMix: AVAudioMix?,
+        videoComposition: AVVideoComposition?,
         generation: UInt64
     ) async {
         let metadata = await readMetadata(
@@ -243,6 +248,7 @@ final class MediaPlaybackModel {
             apply(value)
             let item = AVPlayerItem(asset: asset)
             item.audioMix = audioMix
+            item.videoComposition = videoComposition
             observe(item: item, generation: generation)
             player.replaceCurrentItem(with: item)
         }
