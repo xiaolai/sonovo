@@ -1310,6 +1310,7 @@ final class Project: Identifiable {
             }
             return .closed
         case .timeline:
+            timelines.cancelJobs()
             return await timelines.close() ? .closed : .failed
         default:
             return .closed
@@ -1383,6 +1384,7 @@ final class Project: Identifiable {
                 closed = true
             }
         case .timeline:
+            timelines.cancelJobs()
             closed = await timelines.close(url: url)
         default:
             closed = true
@@ -2239,6 +2241,7 @@ final class Project: Identifiable {
         subtitles.pauseForDeactivation()
         stopOrCancelRecordingForLifecycle()
         mediaEdits.cancelJobs()
+        timelines.cancelJobs()
     }
 
     private func stopOrCancelRecordingForLifecycle() {
@@ -2272,6 +2275,7 @@ final class Project: Identifiable {
         stopOrCancelRecordingForLifecycle()
         mediaEdits.cancelJobs()
         mediaEdits.closeAll()
+        timelines.cancelJobs()
         markdown.shutdown()
         models.prepareForTermination()
         code.prepareForTermination()

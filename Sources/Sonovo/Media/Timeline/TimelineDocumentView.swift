@@ -1,6 +1,9 @@
+import AppKit
 import CoreMedia
 import Foundation
+import SonovoCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// B2's project timeline surface. The ruler, tracks, clips, and playhead all
 /// read the same document; drag and trim commit one undoable edit.
@@ -8,6 +11,7 @@ struct TimelineDocumentView: View {
     let workspace: TimelineWorkspace
     let assets: [ProjectAsset]
     let selectedAsset: ProjectAsset?
+    let project: Project
 
     @State private var selectedClipID: String?
     @State private var playhead = CMTime.zero
@@ -16,6 +20,9 @@ struct TimelineDocumentView: View {
     @State private var dragClipID: String?
     @State private var dragOrigin = CMTime.zero
     @State private var dragDelta: CGFloat = AppTheme.Spacing.zero
+    @State private var playback = MediaPlaybackModel()
+    @State private var previewTask: Task<Void, Never>?
+    @State private var peak: Float?
 
     private var document: TimelineDocument? { workspace.document }
 
@@ -40,6 +47,21 @@ struct TimelineDocumentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onDeleteCommand {
             deleteSelected()
+        }
+        .onAppear {
+            rebuildPreview()
+        }
+        .onChange(of: currentTimeline) {
+            rebuildPreview()
+        }
+        .onChange(of: playback.elapsed) { _, seconds in
+            if playback.isPlaying {
+                playhead = time(seconds)
+            }
+        }
+        .onDisappear {
+            previewTask?.cancel()
+            playback.pause()
         }
     }
 
@@ -94,6 +116,28 @@ struct TimelineDocumentView: View {
                 .frame(height: AppTheme.Size.toolbarDividerHeight)
 
             Button {
+                exportTimeline()
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .help("Export the timeline as a new movie")
+            .disabled(
+                workspace.isExporting
+                    || currentTimeline?.allClips.isEmpty != false
+                    || project.isDemo
+            )
+
+            if workspace.isExporting {
+                Button("Cancel") {
+                    workspace.cancelExport()
+                }
+                .help("Cancel the timeline export")
+            }
+
+            Divider()
+                .frame(height: AppTheme.Size.toolbarDividerHeight)
+
+            Button {
                 zoom(by: 1 / AppTheme.Size.timelineZoomFactor)
             } label: {
                 Image(systemName: "minus.magnifyingglass")
@@ -107,6 +151,35 @@ struct TimelineDocumentView: View {
             .help("Zoom in")
 
             Spacer()
+
+            if let peak {
+                Text(
+                    peak > 1
+                        ? "Peak over 0 dBFS"
+                        : String(
+                            format: "Peak %.1f dBFS",
+                            TimelineAudioPeak.decibels(peak)
+                        )
+                )
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(
+                    peak > 1
+                        ? AppTheme.Palette.error
+                        : AppTheme.Palette.secondaryLabel
+                )
+            }
+
+            if workspace.isExporting {
+                Text(
+                    "Exporting \(Int(workspace.exportProgress * AppTheme.Size.timelinePercentScale))%"
+                )
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
+            } else if let exportMessage = workspace.exportMessage {
+                Text(exportMessage)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
+            }
 
             if let editError {
                 Text(editError)
@@ -165,45 +238,115 @@ struct TimelineDocumentView: View {
     }
 
     private func timelineContent(_ timeline: ProjectTimeline) -> some View {
-        GeometryReader { proxy in
-            let seconds = max(
-                timeline.duration.seconds,
-                AppTheme.Size.timelineMinimumSeconds
-            )
-            let laneWidth = CGFloat(seconds) * pixelsPerSecond
-            let contentWidth = AppTheme.Size.metadataLabelWidth + laneWidth
-            ScrollView([.horizontal]) {
-                ZStack(alignment: .topLeading) {
-                    VStack(spacing: AppTheme.Spacing.zero) {
-                        ruler(seconds: seconds, laneWidth: laneWidth)
-                        ForEach(TimelineTrackKind.allCases, id: \.self) { kind in
-                            trackRow(
-                                kind: kind,
-                                clips: timeline.clips(for: kind),
-                                laneWidth: laneWidth
-                            )
-                        }
-                    }
-                    Rectangle()
-                        .fill(AppTheme.Palette.selection)
-                        .frame(
-                            width: AppTheme.Size.timelinePlayheadWidth,
-                            height: AppTheme.Size.timelineRulerHeight
-                                + AppTheme.Size.timelineTrackHeight
-                                * CGFloat(TimelineTrackKind.allCases.count)
-                        )
-                        .offset(
-                            x: AppTheme.Size.metadataLabelWidth
-                                + CGFloat(playhead.seconds) * pixelsPerSecond
-                        )
-                        .allowsHitTesting(false)
-                }
-                .frame(
-                    width: max(contentWidth, proxy.size.width),
-                    alignment: .leading
+        VStack(spacing: AppTheme.Spacing.zero) {
+            let issues = timeline.sourceIssues(assets: assets)
+            if !issues.isEmpty {
+                sourceIssues(issues)
+            }
+            if !timeline.videoTrack.clips.isEmpty {
+                previewPane
+            }
+            GeometryReader { proxy in
+                let seconds = max(
+                    timeline.duration.seconds,
+                    AppTheme.Size.timelineMinimumSeconds
                 )
+                let laneWidth = CGFloat(seconds) * pixelsPerSecond
+                let contentWidth = AppTheme.Size.metadataLabelWidth + laneWidth
+                ScrollView([.horizontal]) {
+                    ZStack(alignment: .topLeading) {
+                        VStack(spacing: AppTheme.Spacing.zero) {
+                            ruler(seconds: seconds, laneWidth: laneWidth)
+                            ForEach(
+                                TimelineTrackKind.allCases,
+                                id: \.self
+                            ) { kind in
+                                trackRow(
+                                    kind: kind,
+                                    clips: timeline.clips(for: kind),
+                                    laneWidth: laneWidth
+                                )
+                            }
+                        }
+                        Rectangle()
+                            .fill(AppTheme.Palette.selection)
+                            .frame(
+                                width: AppTheme.Size.timelinePlayheadWidth,
+                                height: AppTheme.Size.timelineRulerHeight
+                                    + AppTheme.Size.timelineTrackHeight
+                                    * CGFloat(TimelineTrackKind.allCases.count)
+                            )
+                            .offset(
+                                x: AppTheme.Size.metadataLabelWidth
+                                    + CGFloat(playhead.seconds) * pixelsPerSecond
+                            )
+                            .allowsHitTesting(false)
+                    }
+                    .frame(
+                        width: max(contentWidth, proxy.size.width),
+                        alignment: .leading
+                    )
+                }
             }
         }
+    }
+
+    private func sourceIssues(
+        _ issues: [TimelineSourceIssue]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+            Text("Source problems block preview and export")
+                .font(.system(size: AppTheme.TypeScale.sm, weight: .semibold))
+                .foregroundStyle(AppTheme.Palette.warning)
+            ForEach(issues) { issue in
+                HStack(spacing: AppTheme.Spacing.sm) {
+                    Text(issue.message)
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Relink…") {
+                        relink(issue)
+                    }
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                }
+            }
+        }
+        .padding(.horizontal, AppTheme.Spacing.md)
+        .padding(.vertical, AppTheme.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.Palette.card)
+    }
+
+    private var previewPane: some View {        ZStack(alignment: .bottomLeading) {
+            MediaPlayerView(player: playback.player)
+                .frame(height: AppTheme.Size.timelinePreviewHeight)
+            HStack(spacing: AppTheme.Spacing.sm) {
+                Button {
+                    playback.togglePlayback()
+                } label: {
+                    Image(
+                        systemName: playback.isPlaying
+                            ? "pause.fill"
+                            : "play.fill"
+                    )
+                }
+                .buttonStyle(.plain)
+                Text(
+                    "\(timeLabel(playback.elapsed))"
+                        + " / \(timeLabel(playback.duration))"
+                )
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .monospacedDigit()
+            }
+            .padding(AppTheme.Spacing.sm)
+            .background(
+                AppTheme.Palette.black.opacity(AppTheme.Opacity.dim),
+                in: RoundedRectangle(cornerRadius: AppTheme.Radius.micro)
+            )
+            .padding(AppTheme.Spacing.sm)
+        }
+        .frame(height: AppTheme.Size.timelinePreviewHeight)
+        .background(AppTheme.Palette.black)
     }
 
     private func ruler(seconds: Double, laneWidth: CGFloat) -> some View {
@@ -234,7 +377,7 @@ struct TimelineDocumentView: View {
             .gesture(
                 SpatialTapGesture()
                     .onEnded { value in
-                        playhead = time(value.location.x / pixelsPerSecond)
+                        seek(to: value.location.x / pixelsPerSecond)
                     }
             )
         }
@@ -263,8 +406,8 @@ struct TimelineDocumentView: View {
                         SpatialTapGesture()
                             .onEnded { value in
                                 selectedClipID = nil
-                                playhead = time(
-                                    value.location.x / pixelsPerSecond
+                                seek(
+                                    to: value.location.x / pixelsPerSecond
                                 )
                             }
                     )
@@ -331,7 +474,7 @@ struct TimelineDocumentView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 selectedClipID = clip.id
-                playhead = clip.timelineStart.cmTime
+                seek(to: clip.timelineStart.seconds)
             }
             .gesture(
                 DragGesture()
@@ -400,9 +543,122 @@ struct TimelineDocumentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private func relink(_ issue: TimelineSourceIssue) {
+        guard let root = project.root, let document else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = root
+        panel.allowedContentTypes = issue.track == .video
+            ? [.movie, .video]
+            : [.audio]
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+        Task { @MainActor in
+            await project.refreshNow()
+            guard MarkdownSecurity.canonical(url).path
+                    .hasPrefix(MarkdownSecurity.canonical(root).path),
+                  let asset = project.assets.first(where: {
+                      MarkdownSecurity.canonical($0.url)
+                          == MarkdownSecurity.canonical(url)
+                  }) else {
+                editError = "Choose a media file inside this project."
+                return
+            }
+            do {
+                let duration = try await TimelineAssetProbe.duration(for: asset)
+                try document.mutate { timeline in
+                    try timeline.relink(
+                        clipID: issue.clipID,
+                        to: asset,
+                        sourceDuration: duration
+                    )
+                }
+                editError = nil
+            } catch {
+                editError = error.localizedDescription
+            }
+        }
+    }
+
     private func addSelectedAsset(to kind: TimelineTrackKind) {
         guard let selectedAsset else { return }
         add(asset: selectedAsset, to: kind, at: playhead)
+    }
+
+    private func seek(to seconds: Double) {
+        let clamped = max(seconds, 0)
+        playhead = time(clamped)
+        Task { @MainActor in
+            await playback.seek(to: clamped)
+        }
+    }
+
+    private func rebuildPreview() {
+        previewTask?.cancel()
+        playback.pause()
+        guard let document,
+              let timeline = document.timeline else {
+            return
+        }
+        let url = document.url
+        let assets = assets
+        previewTask = Task { @MainActor in
+            do {
+                let built = try await ProjectTimelineCompositionBuilder.build(
+                    timeline: timeline,
+                    assets: assets
+                )
+                try Task.checkCancellation()
+                playback.load(
+                    asset: built.composition,
+                    sourceURL: url,
+                    fileSize: 0,
+                    audioMix: built.audioMix,
+                    videoComposition: built.videoComposition
+                )
+                peak = try await TimelineAudioPeak.measure(
+                    asset: built.composition,
+                    audioMix: built.audioMix
+                )
+                editError = nil
+            } catch is CancellationError {
+                // A newer edit owns the preview.
+            } catch {
+                editError = error.localizedDescription
+            }
+        }
+    }
+
+    private func exportTimeline() {
+        guard let document,
+              let timeline = document.timeline,
+              let root = project.root else {
+            return
+        }
+        editError = nil
+        Task { @MainActor in
+            do {
+                let result = try await workspace.exportTimeline(
+                    timeline: timeline,
+                    assets: assets,
+                    destinationDirectory: root
+                )
+                try Task.checkCancellation()
+                await project.refreshNow()
+                if let asset = project.assets.first(where: {
+                    MarkdownSecurity.canonical($0.url)
+                        == MarkdownSecurity.canonical(result.url)
+                }) {
+                    project.openAsset(asset)
+                }
+            } catch is CancellationError {
+                // The workspace already shows the cancelled state.
+            } catch {
+                editError = error.localizedDescription
+            }
+        }
     }
 
     private func add(

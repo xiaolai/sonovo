@@ -9,6 +9,11 @@ import SonovoCore
 final class TimelineWorkspace {
     private(set) var document: TimelineDocument?
     private(set) var lastError: String?
+    private(set) var isExporting = false
+    private(set) var exportProgress: Double = 0
+    private(set) var exportMessage: String?
+    private var exportTask: Task<TimelineExportResult, Error>?
+    private var exportGeneration: UInt64 = 0
 
     var hasDirtyDocuments: Bool {
         document?.hasUnsavedChanges == true
@@ -99,6 +104,63 @@ final class TimelineWorkspace {
             lastError = error.localizedDescription
             return false
         }
+    }
+
+    /// Exports through the workspace so deactivation and termination can
+    /// cancel the job even when the timeline view is gone.
+    func exportTimeline(
+        timeline: ProjectTimeline,
+        assets: [ProjectAsset],
+        destinationDirectory: URL
+    ) async throws -> TimelineExportResult {
+        cancelJobs()
+        exportGeneration &+= 1
+        let generation = exportGeneration
+        isExporting = true
+        exportProgress = 0
+        exportMessage = nil
+        let job = Task { @MainActor [weak self] in
+            try await TimelineExportService.export(
+                timeline: timeline,
+                assets: assets,
+                destinationDirectory: destinationDirectory
+            ) { value in
+                guard self?.exportGeneration == generation else { return }
+                self?.exportProgress = value
+            }
+        }
+        exportTask = job
+        do {
+            let result = try await job.value
+            guard generation == exportGeneration else {
+                return result
+            }
+            isExporting = false
+            exportTask = nil
+            exportMessage = "Exported \(result.url.lastPathComponent)"
+            return result
+        } catch {
+            guard generation == exportGeneration else {
+                throw error
+            }
+            isExporting = false
+            exportTask = nil
+            if error is CancellationError {
+                exportMessage = "Export cancelled"
+            }
+            throw error
+        }
+    }
+
+    func cancelExport() {
+        exportTask?.cancel()
+    }
+
+    func cancelJobs() {
+        exportGeneration &+= 1
+        exportTask?.cancel()
+        exportTask = nil
+        isExporting = false
     }
 
     func prepareForTermination() {
