@@ -1,4 +1,5 @@
 import Foundation
+import SonovoCore
 import Speech
 import XCTest
 @testable import Sonovo
@@ -204,6 +205,13 @@ final class TranscriptSessionTests: XCTestCase {
         XCTAssertFalse(captions.contains("Harbor"))
         XCTAssertTrue(captions.contains("wakes"))
         XCTAssertTrue(captions.contains("-->"))
+        XCTAssertEqual(
+            SubtitleFormat.detect(url: nil, source: captions),
+            .srt
+        )
+        let parsed = SubtitleParser.parse(captions, format: .srt)
+        XCTAssertEqual(parsed.cues.count, 1)
+        XCTAssertEqual(parsed.cues[0].rawText, "wakes")
     }
 
     func testFillerSelectionAndCaptionExport() throws {
