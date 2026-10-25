@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Switching between open folder projects. The order and shortcut indices
-/// come from `ProjectSwitcherModel`, the same model the chip rail uses.
+/// come from `ProjectSwitcherModel`, the same model the Projects menu uses.
 @MainActor
 struct ProjectCommands: Commands {
     @Bindable var state: AppState

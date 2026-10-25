@@ -104,6 +104,7 @@ private struct EditorTabButton: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .focusEffectDisabled()
 
             if isHovering || isSelected {
                 Button {
@@ -116,6 +117,7 @@ private struct EditorTabButton: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
                 .padding(.trailing, AppTheme.Spacing.xs)
                 .help("Close Tab")
                 .accessibilityLabel("Close \(tab.title)")

@@ -27,6 +27,8 @@ final class Project: Identifiable {
 
     private(set) var assets: [ProjectAsset] = []
     private(set) var groups: [ProjectAssetGroup] = []
+    /// The Files navigator's folder hierarchy, rebuilt with each scan.
+    private(set) var fileTree: [FileNode] = []
     private(set) var availability: Availability
     private(set) var truncated = false
     private(set) var visitedEntries = 0
@@ -568,6 +570,7 @@ final class Project: Identifiable {
         groups = result.isPartial || result.truncated
             ? ProjectScanner.groups(from: effectiveAssets)
             : result.groups
+        fileTree = ProjectFileTree.nodes(from: effectiveAssets)
         truncated = result.truncated || result.isPartial
         visitedEntries = result.visitedEntries
         availability = .available
@@ -775,14 +778,19 @@ final class Project: Identifiable {
         openTabs.first { $0.id == selectedTabID }
     }
 
+    /// The filter is shared by every navigator mode. Whitespace-only input is
+    /// no filter, so a stray space never empties the sidebar.
+    var trimmedFilterText: String {
+        filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var filteredGroups: [ProjectAssetGroup] {
-        guard !filterText.isEmpty else { return groups }
+        let query = trimmedFilterText
+        guard !query.isEmpty else { return groups }
         return groups.compactMap { group in
             let matches = group.assets.filter {
-                $0.name.localizedCaseInsensitiveContains(filterText)
-                    || $0.relativePath.localizedCaseInsensitiveContains(
-                        filterText
-                    )
+                $0.name.localizedCaseInsensitiveContains(query)
+                    || $0.relativePath.localizedCaseInsensitiveContains(query)
             }
             return matches.isEmpty
                 ? nil
@@ -795,11 +803,12 @@ final class Project: Identifiable {
 
     var filteredStages: [ProductionStage] {
         guard let demoProduction else { return [] }
-        guard !filterText.isEmpty else { return demoProduction.stages }
+        let query = trimmedFilterText
+        guard !query.isEmpty else { return demoProduction.stages }
         return demoProduction.stages.compactMap { stage in
             let matches = stage.assets.filter {
-                $0.name.localizedCaseInsensitiveContains(filterText)
-                    || $0.detail.localizedCaseInsensitiveContains(filterText)
+                $0.name.localizedCaseInsensitiveContains(query)
+                    || $0.detail.localizedCaseInsensitiveContains(query)
             }
             return matches.isEmpty
                 ? nil

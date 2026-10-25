@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The recent-project list shared by the compact switcher, the chip rail,
-/// the overview, and the Project menu. Paths are stored absolute; the label
-/// is the folder name.
+/// The recent-project list shared by the Projects toolbar menu, the overview,
+/// and the Project menu. Paths are stored absolute; the label is the folder
+/// name.
 struct RecentProjectsMenu: View {
     @Bindable var state: AppState
 

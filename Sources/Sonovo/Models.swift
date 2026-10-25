@@ -332,6 +332,24 @@ struct FileNode: Identifiable, Hashable, Sendable {
     let icon: String
     let assetID: String?
     var children: [FileNode]?
+
+    /// Filters a tree while keeping the ancestors of matching descendants.
+    /// A matching folder keeps its whole subtree.
+    static func filtered(_ nodes: [FileNode], query: String) -> [FileNode] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nodes }
+        return nodes.compactMap { node in
+            if node.name.localizedCaseInsensitiveContains(trimmed) {
+                return node
+            }
+            guard let children = node.children else { return nil }
+            let matches = filtered(children, query: trimmed)
+            guard !matches.isEmpty else { return nil }
+            var copy = node
+            copy.children = matches
+            return copy
+        }
+    }
 }
 
 enum SampleContent {
@@ -367,29 +385,27 @@ enum SampleContent {
     ]
 
     static let fileTree: [FileNode] = [
-        FileNode(id: "root", name: "Tidewater", icon: "folder", assetID: nil, children: [
-            FileNode(id: "file-script", name: "tidewater-script.md", icon: "doc.text", assetID: "script-md", children: nil),
-            FileNode(id: "file-outline", name: "outline.md", icon: "doc.text", assetID: "outline-md", children: nil),
-            FileNode(id: "file-captions", name: "captions.srt", icon: "captions.bubble", assetID: "captions-srt", children: nil),
-            FileNode(id: "folder-voice", name: "voice", icon: "folder", assetID: nil, children: [
-                FileNode(id: "file-vo-03", name: "vo-take-03.wav", icon: "waveform", assetID: "vo-take-03", children: nil),
-                FileNode(id: "file-vo-02", name: "vo-take-02.wav", icon: "waveform", assetID: "vo-take-02", children: nil)
-            ]),
-            FileNode(id: "folder-visuals", name: "visuals", icon: "folder", assetID: nil, children: [
-                FileNode(id: "folder-stills", name: "stills", icon: "folder", assetID: "stills", children: nil),
-                FileNode(id: "folder-broll", name: "b-roll", icon: "folder", assetID: "broll", children: nil)
-            ]),
-            FileNode(id: "folder-models", name: "models", icon: "folder", assetID: nil, children: [
-                FileNode(id: "file-model", name: "set-dressing.glb", icon: "cube.transparent", assetID: "model-3d", children: nil)
-            ]),
-            FileNode(id: "folder-takes", name: "takes", icon: "folder", assetID: nil, children: [
-                FileNode(id: "file-take-03", name: "take-03.mp4", icon: "film", assetID: "take-03", children: nil),
-                FileNode(id: "file-take-02", name: "take-02.mp4", icon: "film", assetID: "take-02", children: nil)
-            ]),
-            FileNode(id: "folder-delivery", name: "delivery", icon: "folder", assetID: nil, children: [
-                FileNode(id: "file-storyboard", name: "storyboard.html", icon: "globe", assetID: "storyboard-html", children: nil),
-                FileNode(id: "file-render", name: "Tidewater — 1080p.mp4", icon: "shippingbox", assetID: "render-1080", children: nil)
-            ])
+        FileNode(id: "file-script", name: "tidewater-script.md", icon: "doc.text", assetID: "script-md", children: nil),
+        FileNode(id: "file-outline", name: "outline.md", icon: "doc.text", assetID: "outline-md", children: nil),
+        FileNode(id: "file-captions", name: "captions.srt", icon: "captions.bubble", assetID: "captions-srt", children: nil),
+        FileNode(id: "folder-voice", name: "voice", icon: "folder", assetID: nil, children: [
+            FileNode(id: "file-vo-03", name: "vo-take-03.wav", icon: "waveform", assetID: "vo-take-03", children: nil),
+            FileNode(id: "file-vo-02", name: "vo-take-02.wav", icon: "waveform", assetID: "vo-take-02", children: nil)
+        ]),
+        FileNode(id: "folder-visuals", name: "visuals", icon: "folder", assetID: nil, children: [
+            FileNode(id: "folder-stills", name: "stills", icon: "folder", assetID: "stills", children: nil),
+            FileNode(id: "folder-broll", name: "b-roll", icon: "folder", assetID: "broll", children: nil)
+        ]),
+        FileNode(id: "folder-models", name: "models", icon: "folder", assetID: nil, children: [
+            FileNode(id: "file-model", name: "set-dressing.glb", icon: "cube.transparent", assetID: "model-3d", children: nil)
+        ]),
+        FileNode(id: "folder-takes", name: "takes", icon: "folder", assetID: nil, children: [
+            FileNode(id: "file-take-03", name: "take-03.mp4", icon: "film", assetID: "take-03", children: nil),
+            FileNode(id: "file-take-02", name: "take-02.mp4", icon: "film", assetID: "take-02", children: nil)
+        ]),
+        FileNode(id: "folder-delivery", name: "delivery", icon: "folder", assetID: nil, children: [
+            FileNode(id: "file-storyboard", name: "storyboard.html", icon: "globe", assetID: "storyboard-html", children: nil),
+            FileNode(id: "file-render", name: "Tidewater — 1080p.mp4", icon: "shippingbox", assetID: "render-1080", children: nil)
         ])
     ]
 }

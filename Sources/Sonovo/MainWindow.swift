@@ -16,19 +16,39 @@ struct MainWindow: View {
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                LeadingToolbarView(state: state)
-            }
-            ToolbarItemGroup(placement: .primaryAction) {
-                TrailingToolbarView(state: state)
-
-                Button {
-                    state.inspectorVisible.toggle()
-                } label: {
-                    Label("Inspector", systemImage: "sidebar.right")
-                        .labelStyle(.iconOnly)
+                HStack(spacing: AppTheme.Spacing.s6) {
+                    ProjectMenuButton(state: state)
+                    EditorChromeToggle(
+                        isOn: $state.showTabBar,
+                        icon: "rectangle.topthird.inset.filled",
+                        title: "Tab Bar"
+                    )
+                    EditorChromeToggle(
+                        isOn: $state.showBreadcrumbs,
+                        icon: "chevron.right",
+                        title: "Breadcrumbs"
+                    )
                 }
-                .help(state.inspectorVisible ? "Hide Inspector" : "Show Inspector")
-                .accessibilityLabel(state.inspectorVisible ? "Hide Inspector" : "Show Inspector")
+            }
+
+            if state.canUseMediaModes {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    ViewModeButton(state: state, mode: .player)
+                    ViewModeButton(state: state, mode: .compare)
+                    ViewModeButton(state: state, mode: .transcript)
+                }
+
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                TerminalMenu(state: state)
+            }
+
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                InspectorButton(state: state)
             }
         }
         .background(

@@ -16,11 +16,10 @@ final class ProjectSwitcherModelTests: XCTestCase {
         super.tearDown()
     }
 
-    func testRailHiddenBelowTwoRealProjects() throws {
+    func testEntriesFollowOpenOrderAndEndWithDemo() throws {
         let workspace = fixture.makeWorkspace()
         var model = ProjectSwitcherModel(workspace: workspace)
 
-        XCTAssertFalse(model.showsChipRail)
         XCTAssertEqual(
             model.entries.map(\.id),
             [workspace.demoProject.id]
@@ -33,14 +32,13 @@ final class ProjectSwitcherModelTests: XCTestCase {
         )
         model = ProjectSwitcherModel(workspace: workspace)
 
-        XCTAssertFalse(model.showsChipRail)
         XCTAssertEqual(
             model.entries.map(\.id),
             [first.id, workspace.demoProject.id]
         )
     }
 
-    func testTwoProjectsShowRailInStableOrder() throws {
+    func testTwoProjectsKeepStableOrder() throws {
         let workspace = fixture.makeWorkspace()
         let first = try XCTUnwrap(
             workspace.openProject(
@@ -55,7 +53,6 @@ final class ProjectSwitcherModelTests: XCTestCase {
 
         let model = ProjectSwitcherModel(workspace: workspace)
 
-        XCTAssertTrue(model.showsChipRail)
         XCTAssertEqual(
             model.entries.map(\.id),
             [first.id, second.id, workspace.demoProject.id]

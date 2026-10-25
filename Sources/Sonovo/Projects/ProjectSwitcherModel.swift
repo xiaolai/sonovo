@@ -1,7 +1,7 @@
 import Foundation
 
-/// One row in the chip rail, the overview, and the Project menu. The order is
-/// stable: real projects in open order, then the demo.
+/// One row in the project menu and the overview. The order is stable: real
+/// projects in open order, then the demo.
 struct ProjectSwitcherEntry: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
@@ -16,7 +16,6 @@ struct ProjectSwitcherEntry: Identifiable, Equatable, Sendable {
 
 struct ProjectSwitcherModel: Equatable, Sendable {
     let entries: [ProjectSwitcherEntry]
-    let showsChipRail: Bool
 
     @MainActor
     init(workspace: Workspace) {
@@ -35,9 +34,6 @@ struct ProjectSwitcherModel: Equatable, Sendable {
                 attention: project.attention
             )
         }
-        // The rail appears only when there is a real choice to make. With one
-        // project the compact dropdown is quieter.
-        showsChipRail = workspace.projects.count >= 2
     }
 
     /// Digits 1...9 map to the first nine entries in stable order.

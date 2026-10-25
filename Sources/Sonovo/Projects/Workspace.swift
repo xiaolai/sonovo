@@ -354,8 +354,8 @@ final class Workspace {
         activate(demoProject)
     }
 
-    /// Refresh every project's terminal badge count. Called by the chip
-    /// rail's polling task while it is visible.
+    /// Refresh every project's terminal badge count. Called by project
+    /// surfaces while they are visible.
     func refreshTerminalProcessStates() {
         for project in allProjects {
             project.terminalSessions.refreshProcessStates()

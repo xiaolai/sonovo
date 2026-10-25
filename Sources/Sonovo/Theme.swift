@@ -509,7 +509,6 @@ enum AppTheme {
         static let terminalTabClose: CGFloat = 20
         static let menuIcon: CGFloat = 18
         static let addIcon: CGFloat = 20
-        static let navigatorPickerWidth: CGFloat = 76
         static let mediaModePickerWidth: CGFloat = 94
         static let miniWindowSidebar: CGFloat = 26
         static let miniWindowTrafficDot: CGFloat = 3

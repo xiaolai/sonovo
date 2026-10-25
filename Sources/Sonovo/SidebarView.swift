@@ -6,7 +6,26 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
-            ProjectSwitcherView(state: state)
+            HStack(spacing: AppTheme.Spacing.s6) {
+                NavigatorModeTabs(state: state)
+                SidebarFilterField(state: state)
+            }
+            .padding(.horizontal, AppTheme.Spacing.md)
+            .padding(.top, AppTheme.Spacing.sm)
+            .padding(.bottom, AppTheme.Spacing.sm)
+
+            if let error = state.workspace.lastError {
+                Text(error)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(AppTheme.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, AppTheme.Spacing.md)
+                    .padding(.bottom, AppTheme.Spacing.xs)
+                    .onTapGesture {
+                        state.workspace.lastError = nil
+                    }
+            }
+
             switch state.navigatorMode {
             case .production:
                 if state.liveProject.isDemo {
@@ -19,6 +38,96 @@ struct SidebarView: View {
             }
         }
         .background(Color.appText)
+    }
+}
+
+/// The navigator's filter. It sits below the tabs and above the content, so
+/// the same field filters Production assets and the file tree in Files.
+private struct SidebarFilterField: View {
+    @Bindable var state: AppState
+    @FocusState private var focused: Bool
+
+    private var prompt: String {
+        state.navigatorMode == .files ? "Filter files" : "Filter assets"
+    }
+
+    var body: some View {
+        HStack(spacing: AppTheme.Spacing.s6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.tertiary)
+
+            TextField(prompt, text: $state.filterText)
+                .textFieldStyle(.plain)
+                .font(.system(size: AppTheme.TypeScale.body))
+                .focused($focused)
+                .accessibilityLabel(prompt)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !state.filterText.isEmpty {
+                Button {
+                    state.filterText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: AppTheme.TypeScale.sm))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter")
+                .accessibilityLabel("Clear filter")
+            }
+        }
+        .padding(.horizontal, AppTheme.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: AppTheme.ControlSize.medium)
+        .layoutPriority(1)
+        .background(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.control,
+                style: .continuous
+            )
+            .fill(Color.appCard)
+        )
+        .overlay(
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.control,
+                style: .continuous
+            )
+            .strokeBorder(
+                Color.appSeparator,
+                lineWidth: AppTheme.BorderWidth.hairline
+            )
+        )
+        .onChange(of: state.focusSidebarFilter) { _, _ in
+            focused = true
+        }
+        .onExitCommand {
+            if state.filterText.isEmpty {
+                focused = false
+            } else {
+                state.filterText = ""
+            }
+        }
+    }
+}
+
+private struct NavigatorModeTabs: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        Picker("Navigator", selection: $state.navigatorMode) {
+            ForEach(NavigatorMode.allCases) { mode in
+                Image(systemName: mode.icon)
+                    .accessibilityLabel(mode.label)
+                    .help(mode.label)
+                    .tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .accessibilityLabel("Navigator")
+        .fixedSize()
     }
 }
 
@@ -60,14 +169,6 @@ private struct ProductionListView: View {
                 )
             }
         }
-        // Keep the search field outside the result branches. Attaching it to
-        // the List removes the field exactly when a query returns no rows,
-        // leaving the user unable to correct the query.
-        .searchable(
-            text: $state.filterText,
-            placement: .sidebar,
-            prompt: "Filter assets"
-        )
     }
 }
 
@@ -206,13 +307,6 @@ private struct ProjectAssetListView: View {
                 }
             }
         }
-        // The field must survive an empty result set, or the user cannot
-        // edit the query that produced it.
-        .searchable(
-            text: $state.filterText,
-            placement: .sidebar,
-            prompt: "Filter files"
-        )
     }
 
     private var header: some View {
@@ -289,17 +383,55 @@ private struct FileTreeView: View {
     @Bindable var state: AppState
     @State private var expanded: Set<String> = []
 
+    private var project: Project { state.liveProject }
+
+    private var nodes: [FileNode] {
+        project.isDemo ? SampleContent.fileTree : project.fileTree
+    }
+
+    private var visibleNodes: [FileNode] {
+        FileNode.filtered(nodes, query: state.filterText)
+    }
+
+    private var isFiltering: Bool {
+        !project.trimmedFilterText.isEmpty
+    }
+
     var body: some View {
-        if state.liveProject.isDemo {
+        if case .offline(let reason) = project.availability {
+            ContentUnavailableView(
+                "Project Offline",
+                systemImage: "externaldrive.badge.xmark",
+                description: Text(reason)
+            )
+            .frame(maxHeight: .infinity)
+        } else if project.assets.isEmpty,
+                  !project.isDemo,
+                  project.availability == .scanning {
+            ProgressView("Scanning…")
+                .frame(maxHeight: .infinity)
+        } else if visibleNodes.isEmpty {
+            ContentUnavailableView(
+                isFiltering ? "No Matches" : "Empty Project",
+                systemImage: isFiltering ? "magnifyingglass" : "folder",
+                description: Text(
+                    isFiltering
+                        ? "No files match “\(state.filterText)”."
+                        : "No readable files were found in this folder."
+                )
+            )
+            .frame(maxHeight: .infinity)
+        } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: AppTheme.Spacing.zero) {
-                        ForEach(SampleContent.fileTree) { node in
+                        ForEach(visibleNodes) { node in
                             FileTreeNodeRow(
                                 state: state,
                                 node: node,
                                 level: 0,
-                                expanded: $expanded
+                                expanded: $expanded,
+                                forceExpanded: isFiltering
                             )
                         }
                     }
@@ -314,16 +446,9 @@ private struct FileTreeView: View {
                     reveal(assetID, proxy: proxy)
                 }
             }
-        } else {
-            ContentUnavailableView(
-                "Project Files",
-                systemImage: "folder",
-                description: Text(
-                    "Readable files for this project are grouped in the "
-                        + "Production navigator."
-                )
-            )
-            .frame(maxHeight: .infinity)
+            .onChange(of: project.id) { _, _ in
+                expanded.removeAll()
+            }
         }
     }
 
@@ -331,16 +456,10 @@ private struct FileTreeView: View {
     /// scroll to it once the expansion renders.
     private func reveal(_ assetID: String?, proxy: ScrollViewProxy) {
         guard let assetID,
-              let nodeID = Self.nodeID(
-                  forAsset: assetID,
-                  in: SampleContent.fileTree
-              ) else {
+              let nodeID = Self.nodeID(forAsset: assetID, in: nodes) else {
             return
         }
-        if let ancestors = Self.ancestors(
-            ofAsset: assetID,
-            in: SampleContent.fileTree
-        ) {
+        if let ancestors = Self.ancestors(ofAsset: assetID, in: nodes) {
             expanded.formUnion(ancestors)
         }
         DispatchQueue.main.async {
@@ -392,9 +511,16 @@ private struct FileTreeNodeRow: View {
     let node: FileNode
     let level: Int
     @Binding var expanded: Set<String>
+    /// A filtered tree shows matching structure without requiring the user to
+    /// expand every ancestor by hand.
+    let forceExpanded: Bool
 
     private var isSelected: Bool {
         node.assetID != nil && node.assetID == state.selectedAssetID
+    }
+
+    private var isExpanded: Bool {
+        forceExpanded || expanded.contains(node.id)
     }
 
     var body: some View {
@@ -402,7 +528,7 @@ private struct FileTreeNodeRow: View {
             HStack(spacing: AppTheme.Spacing.sm) {
                 if node.children != nil {
                     Image(
-                        systemName: expanded.contains(node.id)
+                        systemName: isExpanded
                             ? "chevron.down"
                             : "chevron.right"
                     )
@@ -454,13 +580,14 @@ private struct FileTreeNodeRow: View {
             }
             .help(node.assetID == nil ? node.name : "Open \(node.name)")
 
-            if expanded.contains(node.id), let children = node.children {
+            if isExpanded, let children = node.children {
                 ForEach(children) { child in
                     FileTreeNodeRow(
                         state: state,
                         node: child,
                         level: level + 1,
-                        expanded: $expanded
+                        expanded: $expanded,
+                        forceExpanded: forceExpanded
                     )
                 }
             }

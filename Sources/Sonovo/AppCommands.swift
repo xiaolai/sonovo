@@ -20,6 +20,11 @@ struct DocumentCommands: Commands {
         }
         SidebarCommands()
         CommandGroup(after: .sidebar) {
+            Button("Filter Navigator") {
+                state.columnVisibility = .all
+                state.focusSidebarFilter &+= 1
+            }
+            .keyboardShortcut("f", modifiers: [.command])
             Button("Toggle Inspector") { state.inspectorVisible.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
         }

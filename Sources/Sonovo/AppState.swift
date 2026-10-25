@@ -178,6 +178,9 @@ final class AppState {
         get { liveProject.filterText }
         set { liveProject.filterText = newValue }
     }
+    /// Bumped by the Filter Navigator command. The sidebar watches it so a
+    /// menu shortcut can focus the custom filter field.
+    var focusSidebarFilter = 0
 
     var activityText: String {
         if liveProject.isDemo {

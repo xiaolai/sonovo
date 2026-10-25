@@ -61,6 +61,14 @@ struct ProjectOverviewView: View {
             .padding(AppTheme.Spacing.md)
         }
         .frame(width: AppTheme.ProjectSwitcher.overviewWidth)
+        .task {
+            // Terminal process state is a Ghostty/tmux query, not an
+            // observable value. Refresh while the overview is on screen.
+            while !Task.isCancelled {
+                state.workspace.refreshTerminalProcessStates()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     private func row(_ entry: ProjectSwitcherEntry) -> some View {
@@ -91,8 +99,8 @@ struct ProjectOverviewView: View {
 
                     if !entry.isDemo {
                         Text(entry.detail)
-                            .font(.system(size: AppTheme.TypeScale.xxs))
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: AppTheme.TypeScale.xs))
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -110,6 +118,7 @@ struct ProjectOverviewView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .focusEffectDisabled()
             .help(entry.detail)
 
             if entry.canClose {
@@ -128,7 +137,11 @@ struct ProjectOverviewView: View {
         .padding(.horizontal, AppTheme.Spacing.md)
         .padding(.vertical, AppTheme.Spacing.sm)
         .frame(minHeight: AppTheme.ProjectSwitcher.overviewRowMinHeight)
-        .background(entry.isActive ? Color.appCard : Color.clear)
+        .background(
+            entry.isActive
+                ? Color.accentColor.opacity(AppTheme.Opacity.tintSoft)
+                : Color.clear
+        )
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(entry.isActive ? .isSelected : [])
     }

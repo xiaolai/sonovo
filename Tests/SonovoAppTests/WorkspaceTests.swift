@@ -34,6 +34,38 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(workspace.activeProject?.id, project.id)
     }
 
+    func testScanBuildsTheFilesTreeUsedByTheFilesNavigator() async throws {
+        let root = try makeRoot(
+            files: [
+                "script.md": "text",
+                "shots/one.png": "png",
+                "shots/two.png": "png",
+            ]
+        )
+        let workspace = makeWorkspace()
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        let loaded = await waitUntil { project.assets.count == 3 }
+        XCTAssertTrue(loaded)
+
+        XCTAssertEqual(
+            project.fileTree.map(\.name),
+            ["shots", "script.md"]
+        )
+        let shots = try XCTUnwrap(project.fileTree.first)
+        XCTAssertEqual(shots.children?.map(\.name), ["one.png", "two.png"])
+
+        project.filterText = "one"
+        let filtered = FileNode.filtered(
+            project.fileTree,
+            query: project.filterText
+        )
+        XCTAssertEqual(filtered.map(\.name), ["shots"])
+        XCTAssertEqual(
+            filtered.first?.children?.map(\.name),
+            ["one.png"]
+        )
+    }
+
     func testDuplicateAndOverlappingRootsAreRejected() async throws {
         let parent = try makeRoot(files: ["a.md": "a"])
         let child = parent.appendingPathComponent("shots", isDirectory: true)
