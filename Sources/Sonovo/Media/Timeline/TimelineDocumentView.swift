@@ -317,9 +317,11 @@ struct TimelineDocumentView: View {
         .background(AppTheme.Palette.card)
     }
 
-    private var previewPane: some View {        ZStack(alignment: .bottomLeading) {
+    private var previewPane: some View {
+        VStack(spacing: AppTheme.Spacing.zero) {
             MediaPlayerView(player: playback.player)
                 .frame(height: AppTheme.Size.timelinePreviewHeight)
+                .background(AppTheme.Palette.black)
             HStack(spacing: AppTheme.Spacing.sm) {
                 Button {
                     playback.togglePlayback()
@@ -337,16 +339,12 @@ struct TimelineDocumentView: View {
                 )
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .monospacedDigit()
+                Spacer()
             }
-            .padding(AppTheme.Spacing.sm)
-            .background(
-                AppTheme.Palette.black.opacity(AppTheme.Opacity.dim),
-                in: RoundedRectangle(cornerRadius: AppTheme.Radius.micro)
-            )
-            .padding(AppTheme.Spacing.sm)
+            .padding(.horizontal, AppTheme.Spacing.sm)
+            .padding(.vertical, AppTheme.Spacing.xs)
+            .background(AppTheme.Palette.card)
         }
-        .frame(height: AppTheme.Size.timelinePreviewHeight)
-        .background(AppTheme.Palette.black)
     }
 
     private func ruler(seconds: Double, laneWidth: CGFloat) -> some View {
