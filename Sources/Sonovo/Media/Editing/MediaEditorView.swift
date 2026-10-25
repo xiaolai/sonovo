@@ -18,6 +18,12 @@ struct MediaEditorToolbar: View {
     let onRedo: () -> Void
     let onSaveTake: () -> Void
     let onReplace: () -> Void
+    let isAuditioning: Bool
+    let canAudition: Bool
+    let onAudition: () -> Void
+    let canFindPauses: Bool
+    let findPausesHelp: String
+    let onFindPauses: () -> Void
 
     private var recorder: AudioRecorder { project.mediaEdits.recorder }
     private var exporter: MediaExportService { project.mediaEdits.exportService }
@@ -153,6 +159,23 @@ struct MediaEditorToolbar: View {
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
+            mediaButton(
+                isAuditioning ? "stop.circle" : "play.circle",
+                help: isAuditioning ? "Stop Audition" : "Audition Selection",
+                isSelected: isAuditioning,
+                isEnabled: canAudition && !isBusy
+            ) {
+                onAudition()
+            }
+
+            mediaButton(
+                "waveform.badge.minus",
+                help: findPausesHelp,
+                isEnabled: canFindPauses && !isBusy
+            ) {
+                onFindPauses()
+            }
+
             recordingControls
             exportControls
 
@@ -252,6 +275,7 @@ struct MediaEditorToolbar: View {
     private func mediaButton(
         _ systemName: String,
         help: String,
+        isSelected: Bool = false,
         tint: Color? = nil,
         isEnabled: Bool = true,
         action: @escaping () -> Void
@@ -259,6 +283,7 @@ struct MediaEditorToolbar: View {
         BarIconButton(
             systemName: systemName,
             help: help,
+            isSelected: isSelected,
             tint: tint,
             iconSize: AppTheme.IconSize.medium,
             width: AppTheme.ControlSize.large,

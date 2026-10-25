@@ -71,7 +71,52 @@ enum MediaEditLimits {
     static let minimumSelectionDuration: Double = 0.02
     // token-exempt: edit threshold, not a visual value
     static let minimumRangeDuration: Double = 0.001
+    /// The smallest source window the audio timeline can zoom into. This is
+    /// an interaction bound, not a drawing value.
+    // token-exempt: timeline interaction bound, not a visual value
+    static let minimumTimelineVisibleDuration: Double = 0.1
+    /// Fine and coarse keyboard nudges for a selection edge.
+    // token-exempt: edit step, not a visual value
+    static let selectionNudgeStep: Double = 0.010
+    // token-exempt: edit step, not a visual value
+    static let selectionNudgeCoarseStep: Double = 0.100
+    /// A silence batch that leaves less than this much material is refused
+    /// rather than producing a near-empty take.
+    // token-exempt: edit threshold, not a visual value
+    static let minimumRetainedDuration: Double = 0.5
+    /// Default pause detector settings. RMS is measured on the analysis
+    /// waveform; these are audio thresholds, not visual tokens.
+    // token-exempt: audio detector setting, not a visual value
+    static let silenceThresholdDBFS: Double = -35
+    // token-exempt: audio detector setting, not a visual value
+    static let silenceMinimumPause: Double = 0.30
+    // token-exempt: audio detector setting, not a visual value
+    static let silenceGuardPadding: Double = 0.05
+    // token-exempt: audio detector setting, not a visual value
+    static let silenceHysteresisDB: Double = 6
+    // token-exempt: audio detector setting, not a visual value
+    static let silenceThresholdRange: ClosedRange<Double> = -60 ... -20
+    // token-exempt: audio detector setting, not a visual value
+    static let silenceMinimumPauseRange: ClosedRange<Double> = 0.15 ... 1.0
+    /// The click-guard fade at each cut. The platform smooths volume ramps,
+    /// so this is deliberately longer than the few-millisecond fade that looks
+    /// sufficient on paper.
+    // token-exempt: audio fade duration, not a visual value
+    static let cutFadeDuration: Double = 0.030
+    // token-exempt: thumbnail request tolerance, not a visual value
+    static let thumbnailTimeTolerance: Double = 0.1
+    // token-exempt: thumbnail cache bound, not a visual value
+    static let thumbnailMaximumTiles: Int = 12
+    // token-exempt: thumbnail sampling position, not a visual value
+    static let thumbnailTileCenterFraction: Double = 0.5
     static let timescale: Int32 = 600_000
+}
+
+/// Result of a batched structural edit such as removing detected pauses.
+enum MediaEditRemovalResult: Equatable, Sendable {
+    case changed
+    case unchanged
+    case tooShort
 }
 
 /// The complete non-destructive edit decision: which source ranges survive,
@@ -253,6 +298,75 @@ struct MediaEditState: Equatable, Sendable {
         return true
     }
 
+    /// Remove every supplied source range in one structural mutation. Used
+    /// by pause removal, where one user action must produce one undo entry
+    /// rather than one entry per detected pause.
+    mutating func removeRanges(_ ranges: [MediaTimeRange]) -> MediaEditRemovalResult {
+        let next = rangesAfterRemoving(ranges)
+        guard next != keepRanges else { return .unchanged }
+        let retained = next.reduce(0) { $0 + $1.duration }
+        guard retained >= MediaEditLimits.minimumRetainedDuration else {
+            return .tooShort
+        }
+        keepRanges = next
+        selection = nil
+        return .changed
+    }
+
+    /// The material that would remain if `ranges` were removed. This lets the
+    /// confirmation UI refuse an outcome that leaves almost nothing before
+    /// committing the edit.
+    func retainedDuration(afterRemoving ranges: [MediaTimeRange]) -> Double {
+        rangesAfterRemoving(ranges).reduce(0) { $0 + $1.duration }
+    }
+
+    /// Move the start edge without swapping edges or clearing a selection
+    /// that reaches the minimum width. Selection changes are deliberately not
+    /// undoable, matching drag-selection.
+    mutating func nudgeSelectionStart(by delta: Double) -> Bool {
+        guard let selection, delta.isFinite else { return false }
+        let upper = max(
+            selection.end - MediaEditLimits.minimumSelectionDuration,
+            0
+        )
+        let nextStart = min(max(selection.start + delta, 0), upper)
+        guard nextStart != selection.start else { return false }
+        self.selection = MediaTimeRange(
+            start: nextStart,
+            duration: selection.end - nextStart
+        )
+        return true
+    }
+
+    mutating func nudgeSelectionEnd(by delta: Double) -> Bool {
+        guard let selection, delta.isFinite else { return false }
+        let lower = min(
+            selection.start + MediaEditLimits.minimumSelectionDuration,
+            sourceDuration
+        )
+        let nextEnd = min(max(selection.end + delta, lower), sourceDuration)
+        guard nextEnd != selection.end else { return false }
+        self.selection = MediaTimeRange(
+            start: selection.start,
+            duration: nextEnd - selection.start
+        )
+        return true
+    }
+
+    private func rangesAfterRemoving(
+        _ ranges: [MediaTimeRange]
+    ) -> [MediaTimeRange] {
+        let cuts = ranges
+            .compactMap { $0.clamped(to: sourceDuration) }
+            .sorted { $0.start < $1.start }
+        guard !cuts.isEmpty else { return keepRanges }
+        var next = keepRanges
+        for cut in cuts {
+            next = next.flatMap { $0.subtracting(cut) }
+        }
+        return Self.coalesced(next)
+    }
+
     mutating func reset() -> Bool {
         let full = MediaTimeRange(start: 0, duration: sourceDuration)
         guard keepRanges != [full] || selection != nil else { return false }
@@ -262,9 +376,15 @@ struct MediaEditState: Equatable, Sendable {
     }
 
     private mutating func coalesceRanges() {
-        guard !keepRanges.isEmpty else { return }
+        keepRanges = Self.coalesced(keepRanges)
+    }
+
+    private static func coalesced(
+        _ ranges: [MediaTimeRange]
+    ) -> [MediaTimeRange] {
+        guard !ranges.isEmpty else { return [] }
         var merged: [MediaTimeRange] = []
-        for range in keepRanges {
+        for range in ranges {
             if let last = merged.last,
                range.start - last.end <= MediaEditLimits.minimumRangeDuration {
                 merged[merged.count - 1] = MediaTimeRange(
@@ -275,6 +395,6 @@ struct MediaEditState: Equatable, Sendable {
                 merged.append(range)
             }
         }
-        keepRanges = merged
+        return merged
     }
 }

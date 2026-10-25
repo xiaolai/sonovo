@@ -125,6 +125,61 @@ final class MediaPlaybackModelTests: XCTestCase {
         return url
     }
 
+    func testAuditionLoopsTheSelectionAndStopsOnPause() async throws {
+        let url = try makeTone(duration: 1)
+        let model = MediaPlaybackModel()
+        model.load(url: url)
+        let ready = await waitUntil { model.state == .ready }
+        XCTAssertTrue(ready, "state was \(model.state)")
+
+        model.startAudition(range: 0.2 ... 0.4)
+        XCTAssertEqual(model.auditionRange, 0.2 ... 0.4)
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertNotNil(model.auditionRange)
+        XCTAssertLessThan(
+            model.elapsed,
+            0.5,
+            "the boundary observer must have looped before the item ended"
+        )
+
+        model.pause()
+        XCTAssertNil(model.auditionRange)
+        XCTAssertFalse(model.isAuditioning)
+    }
+
+    func testStoppingAnInactiveAuditionDoesNotPausePlayback() async throws {
+        let url = try makeTone(duration: 2)
+        let model = MediaPlaybackModel()
+        model.load(url: url)
+        let ready = await waitUntil { model.state == .ready }
+        XCTAssertTrue(ready, "state was \(model.state)")
+
+        await model.seek(to: 0.2)
+        model.play()
+        let started = await waitUntil { model.isPlaying }
+        XCTAssertTrue(started, "the transport must reflect playback")
+
+        model.stopAudition()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(
+            model.isPlaying,
+            "stopping a non-audition must not stop ordinary playback"
+        )
+        model.pause()
+    }
+
+    func testAuditionRejectsAWorkspaceThatCannotLoop() async throws {
+        let url = try makeTone(duration: 1)
+        let model = MediaPlaybackModel()
+        model.load(url: url)
+        let ready = await waitUntil { model.state == .ready }
+        XCTAssertTrue(ready, "state was \(model.state)")
+
+        model.startAudition(range: 0.2 ... 0.2)
+        XCTAssertNil(model.auditionRange)
+        model.stopAudition()
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 5,
         _ condition: @escaping () -> Bool

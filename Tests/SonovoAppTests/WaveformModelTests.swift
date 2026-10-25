@@ -53,6 +53,21 @@ final class WaveformModelTests: XCTestCase {
         XCTAssertEqual(model.data, first)
     }
 
+    func testVideoWithoutAudioReportsNoAudio() async throws {
+        let url = try XCTUnwrap(
+            Bundle.module.url(
+                forResource: "cfr",
+                withExtension: "mov",
+                subdirectory: "Fixtures"
+            )
+        )
+        let model = WaveformModel()
+        model.load(url: url, revision: .empty)
+        let settled = await waitUntil { model.state == .noAudio }
+        XCTAssertTrue(settled, "state was \(model.state)")
+        XCTAssertNil(model.data)
+    }
+
     func testCacheEvictsUnderItsBudget() {
         // One entry costs 160 bytes: 10 peaks + 10 sum-of-squares as Float
         // (80) plus 10 bucket counts as Int (80). A 200-byte budget holds

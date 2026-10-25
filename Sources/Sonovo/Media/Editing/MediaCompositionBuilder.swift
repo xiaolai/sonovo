@@ -29,6 +29,8 @@ struct MediaCompositionBuild {
     let duration: Double
     let audioChannelCount: Int?
     let audioTrackCount: Int
+    let fadePlan: MediaAudioFadePlan
+    let audioMix: AVAudioMix?
 }
 
 /// Builds the preview and export asset from the kept source ranges. One
@@ -53,6 +55,8 @@ enum MediaCompositionBuilder {
         let composition = AVMutableComposition()
         var naturalSize: CGSize?
         var audioChannelCount: Int?
+        var audioInsertions: [MediaAudioInsertion] = []
+        var audioCompositionTracks: [CMPersistentTrackID: AVMutableCompositionTrack] = [:]
 
         for sourceTrack in tracks {
             let timeRange: CMTimeRange
@@ -73,6 +77,9 @@ enum MediaCompositionBuilder {
             if let transform = try? await sourceTrack.load(.preferredTransform) {
                 compositionTrack.preferredTransform = transform
             }
+            if sourceTrack.mediaType == .audio {
+                audioCompositionTracks[compositionTrack.trackID] = compositionTrack
+            }
             if sourceTrack.mediaType == .video {
                 if naturalSize == nil,
                    let size = try? await sourceTrack.load(.naturalSize) {
@@ -91,7 +98,7 @@ enum MediaCompositionBuilder {
             }
 
             var cursor = CMTime.zero
-            for range in state.keepRanges {
+            for (rangeIndex, range) in state.keepRanges.enumerated() {
                 // Tracks in one file can differ by a few milliseconds at the
                 // head or tail (encoder priming, last audio frame). Insert the
                 // overlap and keep the cursor on the requested timeline so
@@ -125,6 +132,19 @@ enum MediaCompositionBuilder {
                     } catch {
                         throw MediaCompositionError.rangeOutsideTrack
                     }
+                    if sourceTrack.mediaType == .audio {
+                        audioInsertions.append(
+                            MediaAudioInsertion(
+                                trackID: compositionTrack.trackID,
+                                sourceRange: range,
+                                insertedStart: insertAt.seconds,
+                                insertedDuration: duration.seconds,
+                                isFirstInTrack: rangeIndex == 0,
+                                isLastInTrack: rangeIndex
+                                    == state.keepRanges.count - 1
+                            )
+                        )
+                    }
                 }
                 cursor = cursor + CMTime(
                     seconds: range.duration,
@@ -136,13 +156,67 @@ enum MediaCompositionBuilder {
         if let naturalSize {
             composition.naturalSize = naturalSize
         }
+        let fadePlan = MediaAudioFadePlanner.plan(
+            insertions: audioInsertions,
+            sourceDuration: state.sourceDuration
+        )
+        let audioMix = makeAudioMix(plan: fadePlan, tracks: audioCompositionTracks)
         return MediaCompositionBuild(
             composition: composition,
             hasVideo: !(videoTracks ?? []).isEmpty,
             hasAudio: !(audioTracks ?? []).isEmpty,
             duration: composition.duration.seconds,
             audioChannelCount: audioChannelCount,
-            audioTrackCount: audioTracks?.count ?? 0
+            audioTrackCount: audioTracks?.count ?? 0,
+            fadePlan: fadePlan,
+            audioMix: audioMix
+        )
+    }
+
+    private static func makeAudioMix(
+        plan: MediaAudioFadePlan,
+        tracks: [CMPersistentTrackID: AVMutableCompositionTrack]
+    ) -> AVAudioMix? {
+        guard plan.hasFades else { return nil }
+        let grouped = Dictionary(grouping: plan.spans, by: \.trackID)
+        var parameters: [AVMutableAudioMixInputParameters] = []
+        for (trackID, spans) in grouped {
+            guard let track = tracks[trackID] else { continue }
+            let input = AVMutableAudioMixInputParameters(track: track)
+            for span in spans {
+                if let fadeIn = span.fadeIn {
+                    input.setVolumeRamp(
+                        fromStartVolume: 0,
+                        toEndVolume: 1,
+                        timeRange: timeRange(fadeIn)
+                    )
+                }
+                if let fadeOut = span.fadeOut {
+                    input.setVolumeRamp(
+                        fromStartVolume: 1,
+                        toEndVolume: 0,
+                        timeRange: timeRange(fadeOut)
+                    )
+                }
+            }
+            parameters.append(input)
+        }
+        guard !parameters.isEmpty else { return nil }
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = parameters
+        return mix
+    }
+
+    private static func timeRange(_ range: MediaTimeRange) -> CMTimeRange {
+        CMTimeRange(
+            start: CMTime(
+                seconds: range.start,
+                preferredTimescale: MediaEditLimits.timescale
+            ),
+            duration: CMTime(
+                seconds: range.duration,
+                preferredTimescale: MediaEditLimits.timescale
+            )
         )
     }
 }

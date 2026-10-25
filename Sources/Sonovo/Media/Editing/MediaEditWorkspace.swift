@@ -61,6 +61,7 @@ final class MediaEditWorkspace {
         }
         exportingDocumentID = document.id
         isExportingOperation = true
+        document.beginExportLock()
         return true
     }
 
@@ -71,6 +72,7 @@ final class MediaEditWorkspace {
         }
         exportingDocumentID = nil
         isExportingOperation = false
+        document.endExportLock()
     }
 
     func close(url: URL) {

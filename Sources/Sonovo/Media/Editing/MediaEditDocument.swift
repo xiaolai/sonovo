@@ -21,6 +21,12 @@ final class MediaEditDocument: Identifiable {
     private(set) var editState: MediaEditState?
     private(set) var isStale = false
     private(set) var staleMessage: String?
+    /// Structural edits and selection changes are frozen while this document
+    /// owns an export. The workspace sets this; the document enforces it at
+    /// every mutation boundary, not only in the view.
+    private(set) var isExporting = false
+    /// Non-undoable timeline presentation state. `nil` means fit the source.
+    var timelineViewport: MediaTimelineViewport?
 
     private var undoStack: [MediaEditState.Snapshot] = []
     private var redoStack: [MediaEditState.Snapshot] = []
@@ -34,8 +40,13 @@ final class MediaEditDocument: Identifiable {
     var editedDuration: Double { editState?.editedDuration ?? 0 }
     var hasPendingEdits: Bool { editState?.hasEdits == true }
 
-    var canUndo: Bool { !undoStack.isEmpty }
-    var canRedo: Bool { !redoStack.isEmpty }
+    var canUndo: Bool {
+        !isStale && !isExporting && !undoStack.isEmpty
+    }
+
+    var canRedo: Bool {
+        !isStale && !isExporting && !redoStack.isEmpty
+    }
 
     var canTrimToSelection: Bool {
         !isStale && editState?.canTrimToSelection == true
@@ -64,11 +75,13 @@ final class MediaEditDocument: Identifiable {
     /// negative or non-finite duration never becomes an editable state.
     func prepare(sourceDuration: Double) {
         guard editState == nil,
+              !isExporting,
               sourceDuration.isFinite,
               sourceDuration > 0 else {
             return
         }
         editState = MediaEditState(sourceDuration: sourceDuration)
+        timelineViewport = nil
         undoStack.removeAll()
         redoStack.removeAll()
     }
@@ -91,8 +104,13 @@ final class MediaEditDocument: Identifiable {
     /// Accept the revision currently on disk and start a fresh edit. The
     /// caller supplies the newly loaded source duration.
     func reload(sourceDuration: Double) {
-        guard sourceDuration.isFinite, sourceDuration > 0 else { return }
+        guard !isExporting,
+              sourceDuration.isFinite,
+              sourceDuration > 0 else {
+            return
+        }
         editState = MediaEditState(sourceDuration: sourceDuration)
+        timelineViewport = nil
         undoStack.removeAll()
         redoStack.removeAll()
         isStale = false
@@ -101,7 +119,9 @@ final class MediaEditDocument: Identifiable {
 
     @discardableResult
     func setSelection(start: Double, end: Double) -> Bool {
-        guard var state = editState else { return false }
+        guard !isStale, !isExporting, var state = editState else {
+            return false
+        }
         let changed = state.setSelection(start: start, end: end)
         editState = state
         return changed
@@ -127,10 +147,60 @@ final class MediaEditDocument: Identifiable {
 
     @discardableResult
     func clearSelection() -> Bool {
-        guard var state = editState else { return false }
+        guard !isStale, !isExporting, var state = editState else {
+            return false
+        }
         guard state.clearSelection() else { return false }
         editState = state
         return true
+    }
+
+    /// Remove a batch of source ranges as one user action. Used by pause
+    /// removal; returns `.tooShort` without mutating if the result would leave
+    /// less than the minimum retained material.
+    @discardableResult
+    func removeRanges(_ ranges: [MediaTimeRange]) -> MediaEditRemovalResult {
+        guard !isStale, !isExporting,
+              var next = editState,
+              let current = editState else {
+            return .unchanged
+        }
+        let result = next.removeRanges(ranges)
+        guard result == .changed else { return result }
+        undoStack.append(current.snapshot)
+        trimHistory(&undoStack)
+        redoStack.removeAll()
+        editState = next
+        return .changed
+    }
+
+    /// Selection-only nudge; intentionally does not enter undo.
+    @discardableResult
+    func nudgeSelectionStart(bySourceDelta delta: Double) -> Bool {
+        guard !isStale, !isExporting, var state = editState else {
+            return false
+        }
+        guard state.nudgeSelectionStart(by: delta) else { return false }
+        editState = state
+        return true
+    }
+
+    @discardableResult
+    func nudgeSelectionEnd(bySourceDelta delta: Double) -> Bool {
+        guard !isStale, !isExporting, var state = editState else {
+            return false
+        }
+        guard state.nudgeSelectionEnd(by: delta) else { return false }
+        editState = state
+        return true
+    }
+
+    func beginExportLock() {
+        isExporting = true
+    }
+
+    func endExportLock() {
+        isExporting = false
     }
 
     @discardableResult
@@ -150,7 +220,9 @@ final class MediaEditDocument: Identifiable {
 
     @discardableResult
     func undo() -> Bool {
-        guard let state = editState,
+        guard !isStale,
+              !isExporting,
+              let state = editState,
               let previous = undoStack.popLast() else {
             return false
         }
@@ -165,7 +237,9 @@ final class MediaEditDocument: Identifiable {
 
     @discardableResult
     func redo() -> Bool {
-        guard let state = editState,
+        guard !isStale,
+              !isExporting,
+              let state = editState,
               let next = redoStack.popLast() else {
             return false
         }
@@ -181,7 +255,9 @@ final class MediaEditDocument: Identifiable {
     private func perform(
         _ change: (inout MediaEditState) -> Bool
     ) -> Bool {
-        guard !isStale, var next = editState, let current = editState else {
+        guard !isStale, !isExporting,
+              var next = editState,
+              let current = editState else {
             return false
         }
         guard change(&next) else { return false }

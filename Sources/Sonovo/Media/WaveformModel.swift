@@ -39,6 +39,8 @@ final class WaveformModel {
         case idle
         case loading
         case ready
+        case noAudio
+        case unavailable(String)
         case failed(String)
     }
 
@@ -77,6 +79,16 @@ final class WaveformModel {
                 self.state = .ready
             } catch is CancellationError {
                 // A newer source replaced this one.
+            } catch let error as WaveformError {
+                guard let self, generation == self.generation else { return }
+                switch error {
+                case .noAudioTrack:
+                    self.state = .noAudio
+                case .tooLong:
+                    self.state = .unavailable(error.localizedDescription)
+                default:
+                    self.state = .failed(error.localizedDescription)
+                }
             } catch {
                 guard let self, generation == self.generation else { return }
                 self.state = .failed(error.localizedDescription)

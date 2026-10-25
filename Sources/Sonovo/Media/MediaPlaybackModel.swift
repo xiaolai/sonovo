@@ -51,8 +51,12 @@ final class MediaPlaybackModel {
     }
 
     var isLooping = false
+    private(set) var auditionRange: ClosedRange<Double>?
+    var isAuditioning: Bool { auditionRange != nil }
 
     private var timeObserver: Any?
+    private var auditionObserver: Any?
+    private var auditionGeneration: UInt64 = 0
     private var statusObservation: NSKeyValueObservation?
     private var controlObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
@@ -112,6 +116,9 @@ final class MediaPlaybackModel {
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
         }
+        if let auditionObserver {
+            player.removeTimeObserver(auditionObserver)
+        }
         controlObservation?.invalidate()
         removeItemObservers()
     }
@@ -143,7 +150,18 @@ final class MediaPlaybackModel {
     /// Plays an edited composition while keeping the source file's identity
     /// and metadata. Frame stepping is not claimed for the composition: its
     /// frame timing has not been measured.
-    func load(asset: AVAsset, sourceURL: URL, fileSize: Int64) {
+    /// Exposed for tests and diagnostics: the preview item must carry the
+    /// same cut-fade mix the exporter uses.
+    var previewAudioMix: AVAudioMix? {
+        player.currentItem?.audioMix
+    }
+
+    func load(
+        asset: AVAsset,
+        sourceURL: URL,
+        fileSize: Int64,
+        audioMix: AVAudioMix? = nil
+    ) {
         loadTask?.cancel()
         loadGeneration &+= 1
         let generation = loadGeneration
@@ -154,6 +172,7 @@ final class MediaPlaybackModel {
             displayURL: sourceURL,
             timingURL: nil,
             fileSize: fileSize,
+            audioMix: audioMix,
             generation: generation
         )
     }
@@ -163,6 +182,7 @@ final class MediaPlaybackModel {
         displayURL: URL,
         timingURL: URL?,
         fileSize: Int64,
+        audioMix: AVAudioMix? = nil,
         generation: UInt64
     ) {
         url = displayURL
@@ -172,6 +192,7 @@ final class MediaPlaybackModel {
             await self?.loadAsset(
                 asset: asset,
                 timingURL: timingURL,
+                audioMix: audioMix,
                 generation: generation
             )
         }
@@ -203,6 +224,7 @@ final class MediaPlaybackModel {
     private func loadAsset(
         asset: AVAsset,
         timingURL: URL?,
+        audioMix: AVAudioMix?,
         generation: UInt64
     ) async {
         let metadata = await readMetadata(
@@ -220,6 +242,7 @@ final class MediaPlaybackModel {
         case .success(let value):
             apply(value)
             let item = AVPlayerItem(asset: asset)
+            item.audioMix = audioMix
             observe(item: item, generation: generation)
             player.replaceCurrentItem(with: item)
         }
@@ -369,8 +392,113 @@ final class MediaPlaybackModel {
     }
 
     func pause() {
+        stopAudition()
         playIntent &+= 1
         player.pause()
+    }
+
+    /// Loops the edited span between the selection bounds. The boundary time
+    /// observer fires at the selection end; a periodic 30 Hz observer would
+    /// overshoot by up to a frame and is not used here.
+    func startAudition(range: ClosedRange<Double>) {
+        guard state == .ready,
+              range.lowerBound.isFinite,
+              range.upperBound.isFinite,
+              range.lowerBound >= 0,
+              range.upperBound - range.lowerBound
+                > MediaEditLimits.minimumSelectionDuration,
+              duration > 0 else {
+            return
+        }
+        stopAudition()
+        // Ordinary playback may still be running when the audition starts;
+        // pause it explicitly so the exact seek does not leave a blip of the
+        // old position before the loop begins.
+        player.pause()
+        playIntent &+= 1
+        auditionGeneration &+= 1
+        let generation = auditionGeneration
+        let start = min(max(range.lowerBound, 0), duration)
+        let end = min(max(range.upperBound, start), duration)
+        guard end - start > MediaEditLimits.minimumSelectionDuration else {
+            return
+        }
+        auditionRange = start ... end
+        let boundary = CMTime(
+            seconds: end,
+            preferredTimescale: Self.seekTimescale
+        )
+        auditionObserver = player.addBoundaryTimeObserver(
+            forTimes: [NSValue(time: boundary)],
+            queue: .main
+        ) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      generation == self.auditionGeneration,
+                      self.auditionRange != nil else {
+                    return
+                }
+                await self.loopAudition(generation: generation)
+            }
+        }
+        player.seek(
+            to: CMTime(
+                seconds: start,
+                preferredTimescale: Self.seekTimescale
+            ),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      generation == self.auditionGeneration,
+                      self.auditionRange != nil else {
+                    return
+                }
+                self.player.play()
+            }
+        }
+    }
+
+    func stopAudition() {
+        let wasAuditioning = auditionRange != nil || auditionObserver != nil
+        auditionGeneration &+= 1
+        auditionRange = nil
+        if let auditionObserver {
+            player.removeTimeObserver(auditionObserver)
+            self.auditionObserver = nil
+        }
+        // Seeking and selection changes call this unconditionally. Only an
+        // actual audition owns a pause; a no-op here must not turn a normal
+        // seek into a stop.
+        if wasAuditioning {
+            player.pause()
+        }
+    }
+
+    private func loopAudition(generation: UInt64) async {
+        guard generation == auditionGeneration,
+              let range = auditionRange else {
+            return
+        }
+        player.pause()
+        await withCheckedContinuation { continuation in
+            player.seek(
+                to: CMTime(
+                    seconds: range.lowerBound,
+                    preferredTimescale: Self.seekTimescale
+                ),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            ) { _ in
+                continuation.resume()
+            }
+        }
+        guard generation == auditionGeneration,
+              auditionRange != nil else {
+            return
+        }
+        player.play()
     }
 
     func togglePlayback() {
@@ -382,6 +510,7 @@ final class MediaPlaybackModel {
     }
 
     func seek(to seconds: Double) async {
+        stopAudition()
         let clamped = min(max(seconds, 0), max(duration, 0))
         await seek(
             to: CMTime(
@@ -543,6 +672,10 @@ final class MediaPlaybackModel {
                 guard let self, generation == self.loadGeneration else {
                     return
                 }
+                if self.auditionRange != nil {
+                    self.isPlaying = false
+                    return
+                }
                 self.isPlaying = false
                 if self.isLooping {
                     let intent = self.playIntent
@@ -609,6 +742,7 @@ final class MediaPlaybackModel {
     }
 
     private func reset() {
+        stopAudition()
         player.pause()
         player.replaceCurrentItem(with: nil)
         removeItemObservers()

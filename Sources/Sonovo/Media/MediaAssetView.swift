@@ -44,6 +44,10 @@ struct MediaAssetView: View {
     @State private var previewedRanges: [MediaTimeRange] = []
     @State private var operationError: String?
     @State private var showReplaceConfirmation = false
+    @State private var isTimelineInteracting = false
+    @State private var silenceCandidates: [MediaTimeRange] = []
+    @State private var silenceSettings = MediaSilenceSettings()
+    @State private var showSilencePopover = false
     @Environment(\.projectIsVisible) private var projectIsVisible
     @Environment(\.scenePhase) private var scenePhase
 
@@ -59,6 +63,60 @@ struct MediaAssetView: View {
     private var canEdit: Bool {
         guard project != nil else { return false }
         return asset.kind == .audio || asset.kind == .video
+    }
+
+    private var isExportingOperation: Bool {
+        project?.mediaEdits.isExportingOperation ?? false
+    }
+
+    private var waveformMessage: String? {
+        switch waveform.state {
+        case let .failed(message), let .unavailable(message):
+            message
+        case .noAudio:
+            "No audio track in this file."
+        default:
+            nil
+        }
+    }
+
+    private var canAudition: Bool {
+        guard !isExportingOperation,
+              playback.state == .ready,
+              let state = editDocument?.editState,
+              let selection = state.selection else {
+            return false
+        }
+        return MediaAudition.range(for: selection, in: state) != nil
+    }
+
+    private var canFindPauses: Bool {
+        guard !isExportingOperation,
+              asset.kind == .audio,
+              editDocument?.isStale != true,
+              waveform.state == .ready,
+              waveform.data != nil,
+              let document = editDocument,
+              document.editState?.keepRanges.isEmpty == false else {
+            return false
+        }
+        return true
+    }
+
+    private var findPausesHelp: String {
+        if asset.kind != .audio {
+            return "Pause removal is available for audio files"
+        }
+        if isExportingOperation {
+            return "Wait for the export to finish"
+        }
+        if waveform.state == .loading {
+            return "The waveform is still loading"
+        }
+        if waveform.data == nil {
+            return "No audio waveform is available"
+        }
+        return "Find Pauses…"
     }
 
     private var sourcePlayhead: Double {
@@ -124,11 +182,22 @@ struct MediaAssetView: View {
         .onChange(of: playback.state) { _, state in
             handlePlaybackState(state)
         }
+        .onChange(of: playback.elapsed) { _, _ in
+            followPlayhead()
+        }
+        .onChange(of: editDocument?.selection) { _, _ in
+            playback.stopAudition()
+        }
+        .onChange(of: isExportingOperation) { _, busy in
+            if busy {
+                playback.stopAudition()
+            }
+        }
         .onChange(of: asset.revision) { _, _ in
             handleAssetRevisionChange()
         }
         .onChange(of: playback.hasAudio) { _, hasAudio in
-            guard hasAudio, !playback.hasVideo else { return }
+            guard hasAudio, asset.kind == .audio else { return }
             waveform.load(url: asset.url, revision: asset.revision)
         }
         .onChange(of: editDocument?.editState?.keepRanges) { _, ranges in
@@ -138,6 +207,9 @@ struct MediaAssetView: View {
                   ranges != previewedRanges else {
                 return
             }
+            playback.stopAudition()
+            showSilencePopover = false
+            silenceCandidates = []
             operationError = nil
             rebuildPreview()
         }
@@ -156,6 +228,11 @@ struct MediaAssetView: View {
         .onChange(of: appState?.mediaReplaceRequest) { _, _ in
             consumeReplaceRequest()
         }
+        .onChange(of: showSilencePopover) { _, shown in
+            if !shown {
+                silenceCandidates = []
+            }
+        }
         .confirmationDialog(
             "Replace \(asset.name)?",
             isPresented: $showReplaceConfirmation,
@@ -171,6 +248,7 @@ struct MediaAssetView: View {
             )
         }
         .onDisappear {
+            playback.stopAudition()
             playback.unload()
             waveform.cancel()
             if let project, let editDocument {
@@ -257,8 +335,8 @@ struct MediaAssetView: View {
 
     private var audioStage: some View {
         VStack(spacing: AppTheme.Spacing.md) {
-            if case .failed(let message) = waveform.state {
-                Text(message)
+            if let waveformMessage {
+                Text(waveformMessage)
                     .font(.system(size: AppTheme.TypeScale.sm))
                     .foregroundStyle(.secondary)
             }
@@ -337,8 +415,35 @@ struct MediaAssetView: View {
                     },
                     onReplace: {
                         showReplaceConfirmation = true
+                    },
+                    isAuditioning: playback.isAuditioning,
+                    canAudition: canAudition,
+                    onAudition: {
+                        toggleAudition(document: editDocument)
+                    },
+                    canFindPauses: canFindPauses,
+                    findPausesHelp: findPausesHelp,
+                    onFindPauses: {
+                        showSilencePopover.toggle()
                     }
                 )
+                .popover(
+                    isPresented: $showSilencePopover,
+                    arrowEdge: .bottom
+                ) {
+                    MediaSilenceReview(
+                        data: waveform.data,
+                        sourceDuration: editDocument.sourceDuration,
+                        keepRanges: editDocument.editState?.keepRanges ?? [],
+                        settings: $silenceSettings,
+                        onCandidates: { candidates in
+                            silenceCandidates = candidates
+                        },
+                        onRemove: { ranges in
+                            removeSilences(ranges, document: editDocument)
+                        }
+                    )
+                }
             } else {
                 loadingState
             }
@@ -354,58 +459,62 @@ struct MediaAssetView: View {
                 description: Text("Reset the edit to bring the source back.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if showsVideoInEdit {
-            VStack(spacing: AppTheme.Spacing.zero) {
-                if playback.state == .ready {
-                    MediaPlayerView(player: playback.player)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(AppTheme.Palette.black)
-                } else {
-                    loadingState
-                }
-                selectionStrip(document)
-                    .padding(.horizontal, AppTheme.Spacing.md)
-                    .padding(.vertical, AppTheme.Spacing.sm)
-                    .background(Color.appCard)
-            }
         } else {
-            VStack(spacing: AppTheme.Spacing.md) {
-                if case .failed(let message) = waveform.state {
-                    Text(message)
-                        .font(.system(size: AppTheme.TypeScale.sm))
-                        .foregroundStyle(.secondary)
-                }
-                selectionStrip(document)
-                    .frame(height: AppTheme.Size.waveformHeight)
-                if waveform.state == .loading {
-                    ProgressView()
-                        .controlSize(.small)
+            GeometryReader { geometry in
+                let compact = geometry.size.height < 520
+                VStack(spacing: AppTheme.Spacing.zero) {
+                    if showsVideoInEdit {
+                        if playback.state == .ready {
+                            MediaPlayerView(player: playback.player)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    maxHeight: .infinity
+                                )
+                                .background(AppTheme.Palette.black)
+                        } else {
+                            loadingState
+                        }
+                    } else {
+                        Spacer(minLength: AppTheme.Spacing.zero)
+                    }
+                    timeline(document, compact: compact)
+                        .padding(.horizontal, AppTheme.Spacing.md)
+                        .padding(.vertical, AppTheme.Spacing.sm)
+                        .background(Color.appCard)
+                    if !showsVideoInEdit {
+                        Spacer(minLength: AppTheme.Spacing.zero)
+                    }
                 }
             }
-            .padding(AppTheme.Spacing.lg)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private func selectionStrip(_ document: MediaEditDocument) -> some View {
+    private func timeline(
+        _ document: MediaEditDocument,
+        compact: Bool
+    ) -> some View {
         let busy = project?.mediaEdits.isExportingOperation ?? false
-        return VStack(spacing: AppTheme.Spacing.sm) {
-            if showsVideoInEdit {
-                HStack {
-                    Text("Source trim range")
-                        .font(.system(size: AppTheme.TypeScale.xxs))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                }
+        let viewport = effectiveViewport(for: document)
+        return VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+            if let waveformMessage {
+                Text(waveformMessage)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(.secondary)
             }
-            MediaSelectionWaveformView(
-                data: showsVideoInEdit ? nil : waveform.data,
+            MediaTimelineView(
+                data: waveform.data,
                 sourceDuration: document.sourceDuration,
                 removedRanges: document.editState?.removedRanges ?? [],
                 selection: document.selection,
                 playhead: sourcePlayhead,
-                compact: showsVideoInEdit,
-                isEnabled: !busy,
+                viewport: viewport,
+                silenceCandidates: silenceCandidates,
+                compact: compact,
+                isInteractionEnabled: !busy,
+                thumbnailURL: showsVideoInEdit ? asset.url : nil,
+                thumbnailRevision: showsVideoInEdit ? asset.revision : nil,
+                showsThumbnails: showsVideoInEdit && !compact,
+                thumbnailsEnabled: !busy && !playback.isPlaying,
                 onSeek: { sourceTime in
                     guard !(project?.mediaEdits.isExportingOperation ?? false)
                     else { return }
@@ -416,15 +525,39 @@ struct MediaAssetView: View {
                     else { return }
                     _ = document.setSelection(start: start, end: end)
                     operationError = nil
+                },
+                onNudge: { edge, delta in
+                    guard !(project?.mediaEdits.isExportingOperation ?? false)
+                    else { return }
+                    switch edge {
+                    case .start:
+                        _ = document.nudgeSelectionStart(bySourceDelta: delta)
+                    case .end:
+                        _ = document.nudgeSelectionEnd(bySourceDelta: delta)
+                    }
+                },
+                onViewportChange: { next in
+                    document.timelineViewport = next.clamped(
+                        to: document.sourceDuration
+                    )
+                },
+                onInteractionChange: { interacting in
+                    isTimelineInteracting = interacting
                 }
             )
-            .frame(
-                height: showsVideoInEdit
-                    ? AppTheme.Size.mediaTrimStripHeight
-                    : AppTheme.Size.waveformHeight
-            )
-            .allowsHitTesting(!busy)
+            if waveform.state == .loading {
+                ProgressView()
+                    .controlSize(.small)
+            }
         }
+    }
+
+    private func effectiveViewport(
+        for document: MediaEditDocument
+    ) -> MediaTimelineViewport {
+        (document.timelineViewport ?? .full(
+            sourceDuration: document.sourceDuration
+        )).clamped(to: document.sourceDuration)
     }
 
     private var staleState: some View {
@@ -471,10 +604,14 @@ struct MediaAssetView: View {
         guard let project else { return }
         playback.pause()
         operationError = nil
+        silenceCandidates = []
         project.clearMediaError()
         let document = project.mediaEdits.document(for: asset)
         editDocument = document
         project.mediaEdits.activate(document)
+        if asset.kind == .video {
+            waveform.load(url: asset.url, revision: asset.revision)
+        }
         if document.isStale {
             pendingEditStart = false
             return
@@ -491,10 +628,13 @@ struct MediaAssetView: View {
     }
 
     private func leaveEdit() {
+        playback.stopAudition()
         pendingEditStart = false
         pendingReload = false
         previewGeneration &+= 1
         previewedRanges = []
+        isTimelineInteracting = false
+        silenceCandidates = []
         if let project, let editDocument {
             project.mediaEdits.deactivate(editDocument)
         }
@@ -502,6 +642,24 @@ struct MediaAssetView: View {
         operationError = nil
         if loaded == .composition || playback.state == .idle {
             loadSource()
+        }
+    }
+
+    private func followPlayhead() {
+        guard mode == .edit,
+              playback.isPlaying,
+              !isTimelineInteracting,
+              let document = editDocument,
+              document.sourceDuration > 0 else {
+            return
+        }
+        let current = effectiveViewport(for: document)
+        let next = current.followed(
+            to: sourcePlayhead,
+            sourceDuration: document.sourceDuration
+        )
+        if next != current {
+            document.timelineViewport = next
         }
     }
 
@@ -559,6 +717,7 @@ struct MediaAssetView: View {
 
     private func reloadSource() {
         guard editDocument != nil else { return }
+        playback.stopAudition()
         operationError = nil
         pendingReload = true
         pendingEditStart = false
@@ -566,7 +725,7 @@ struct MediaAssetView: View {
         previewGeneration &+= 1
         loaded = .source
         playback.load(url: asset.url)
-        if asset.kind == .audio {
+        if asset.kind == .audio || asset.kind == .video {
             waveform.load(url: asset.url, revision: asset.revision)
         }
     }
@@ -602,7 +761,8 @@ struct MediaAssetView: View {
                 playback.load(
                     asset: build.composition,
                     sourceURL: asset.url,
-                    fileSize: asset.size
+                    fileSize: asset.size,
+                    audioMix: build.audioMix
                 )
             } catch let error as MediaCompositionError
                 where error == .emptyEdit {
@@ -627,6 +787,41 @@ struct MediaAssetView: View {
         }
         guard action() else { return }
         operationError = nil
+    }
+
+    private func toggleAudition(document: MediaEditDocument) {
+        guard !isExportingOperation else { return }
+        if playback.isAuditioning {
+            playback.stopAudition()
+            return
+        }
+        guard let state = document.editState,
+              let selection = state.selection,
+              let range = MediaAudition.range(
+                  for: selection,
+                  in: state
+              ) else {
+            return
+        }
+        playback.startAudition(range: range)
+    }
+
+    private func removeSilences(
+        _ ranges: [MediaTimeRange],
+        document: MediaEditDocument
+    ) {
+        guard !isExportingOperation else { return }
+        switch document.removeRanges(ranges) {
+        case .changed:
+            silenceCandidates = []
+            operationError = nil
+            showSilencePopover = false
+        case .tooShort:
+            operationError =
+                "Removing these pauses would leave too little material."
+        case .unchanged:
+            operationError = "No pauses could be removed."
+        }
     }
 
     private func setSelectionStart(_ document: MediaEditDocument) {

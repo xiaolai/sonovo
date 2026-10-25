@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
 import Observation
@@ -26,7 +26,7 @@ enum MediaExportError: LocalizedError, Equatable {
         case .busy:
             "Another export is already running."
         case let .unsupportedContainer(extensionName):
-            "This file’s .\(extensionName) container cannot be replaced by a lossless edit."
+            "This file’s .\(extensionName) container cannot be replaced safely by this edit."
         case let .exportFailed(message):
             message
         case .noAudioTrack:
@@ -174,6 +174,7 @@ final class MediaExportService {
             let fileType = Self.fileType(for: outputExtension)
             try await MediaVideoExporter.export(
                 composition: composition,
+                audioMix: build.audioMix,
                 outputURL: temporary,
                 fileType: fileType
             ) { [weak self] value in
@@ -182,6 +183,7 @@ final class MediaExportService {
         } else {
             try await MediaAudioExporter.export(
                 composition: composition,
+                audioMix: build.audioMix,
                 outputURL: temporary
             ) { [weak self] value in
                 self?.status = .exporting(progress: value)
@@ -280,9 +282,10 @@ final class MediaExportService {
     }
 }
 
-private enum MediaAudioExporter {
+enum MediaAudioExporter {
     static func export(
         composition: sending AVComposition,
+        audioMix: sending AVAudioMix?,
         outputURL: URL,
         progress: @escaping @Sendable @MainActor (Double) -> Void
     ) async throws {
@@ -293,16 +296,27 @@ private enum MediaAudioExporter {
         let format = await audioFormat(for: track)
         let duration = try await composition.load(.duration).seconds
         let reader = try AVAssetReader(asset: composition)
-        let output = AVAssetReaderTrackOutput(
-            track: track,
-            outputSettings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMIsFloatKey: true,
-                AVLinearPCMBitDepthKey: 32,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
-            ]
-        )
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let output: AVAssetReaderOutput
+        if let audioMix {
+            let mixOutput = AVAssetReaderAudioMixOutput(
+                audioTracks: [track],
+                audioSettings: outputSettings
+            )
+            mixOutput.audioMix = audioMix
+            output = mixOutput
+        } else {
+            output = AVAssetReaderTrackOutput(
+                track: track,
+                outputSettings: outputSettings
+            )
+        }
         guard reader.canAdd(output) else {
             throw MediaExportError.exportFailed(
                 "The edited audio could not be read."
@@ -373,7 +387,7 @@ private enum MediaAudioExporter {
         await progress(1)
     }
 
-    private static func audioFormat(
+    static func audioFormat(
         for track: AVAssetTrack
     ) async -> (sampleRate: Double, channelCount: Int) {
         guard let descriptions = try? await track.load(.formatDescriptions),
@@ -390,14 +404,134 @@ private enum MediaAudioExporter {
     }
 }
 
-@MainActor
-private enum MediaVideoExporter {
+private enum MediaAudioRenderer {
+    /// Renders the edited composition's audio with the same mix used for
+    /// preview. The video mux then carries this AAC track through passthrough,
+    /// so the video stream is never re-encoded just to apply a cut fade.
+    static func exportAAC(
+        composition: sending AVComposition,
+        audioMix: sending AVAudioMix,
+        outputURL: URL,
+        progress: @escaping @Sendable @MainActor (Double) -> Void
+    ) async throws {
+        let tracks = try await composition.loadTracks(withMediaType: .audio)
+        guard let track = tracks.first else {
+            throw MediaExportError.noAudioTrack
+        }
+        let format = await MediaAudioExporter.audioFormat(for: track)
+        guard format.channelCount <= 2 else {
+            throw MediaExportError.exportFailed(
+                "Multichannel video audio is not supported yet."
+            )
+        }
+        let duration = try await composition.load(.duration).seconds
+        let reader = try AVAssetReader(asset: composition)
+        let output = AVAssetReaderAudioMixOutput(
+            audioTracks: tracks,
+            audioSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMIsFloatKey: true,
+                AVLinearPCMBitDepthKey: 32,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false
+            ]
+        )
+        output.audioMix = audioMix
+        guard reader.canAdd(output) else {
+            throw MediaExportError.exportFailed(
+                "The edited audio could not be read."
+            )
+        }
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .m4a)
+        let input = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: format.channelCount,
+                AVEncoderBitRateKey: 192_000
+            ]
+        )
+        guard writer.canAdd(input) else {
+            throw MediaExportError.exportFailed(
+                "The faded audio could not be written."
+            )
+        }
+        let receiver = writer.inputReceiver(for: input)
+        let provider = reader.outputProvider(for: output)
+        do {
+            try writer.start()
+            writer.startSession(atSourceTime: .zero)
+            try reader.start()
+        } catch {
+            writer.cancelWriting()
+            throw error
+        }
+
+        do {
+            while let sample = try await provider.next() {
+                try Task.checkCancellation()
+                try await receiver.append(sample)
+                if duration > 0 {
+                    let time = sample.presentationTimeStamp.seconds
+                    await progress(min(max(time / duration, 0), 0.99))
+                }
+            }
+        } catch {
+            reader.cancelReading()
+            receiver.finish()
+            writer.cancelWriting()
+            throw error
+        }
+        if reader.status == .failed {
+            receiver.finish()
+            writer.cancelWriting()
+            throw reader.error ?? MediaExportError.exportFailed(
+                "The audio mix reader failed."
+            )
+        }
+        receiver.finish()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting {
+                continuation.resume()
+            }
+        }
+        guard writer.status == .completed else {
+            throw writer.error ?? MediaExportError.exportFailed(
+                "The faded audio writer did not complete."
+            )
+        }
+        await progress(1)
+    }
+}
+
+/// Confines one non-Sendable export session to the two tasks that drive it.
+private final class ExportSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+
+    init(_ session: AVAssetExportSession) {
+        self.session = session
+    }
+}
+
+enum MediaVideoExporter {
     static func export(
-        composition: AVComposition,
+        composition: sending AVComposition,
+        audioMix: sending AVAudioMix?,
         outputURL: URL,
         fileType: AVFileType,
-        progress: @escaping @MainActor (Double) -> Void
+        progress: @escaping @Sendable @MainActor (Double) -> Void
     ) async throws {
+        if let audioMix {
+            try await exportWithFades(
+                composition: composition,
+                audioMix: audioMix,
+                outputURL: outputURL,
+                fileType: fileType,
+                progress: progress
+            )
+            return
+        }
         // Passthrough keeps the source streams untouched. A container or
         // codec the file type cannot carry fails; the highest-quality preset
         // is the single re-encode fallback.
@@ -419,7 +553,7 @@ private enum MediaVideoExporter {
                     fileType: fileType,
                     progress: progress
                 )
-                progress(1)
+                await progress(1)
                 return
             } catch is CancellationError {
                 throw CancellationError()
@@ -437,19 +571,135 @@ private enum MediaVideoExporter {
         )
     }
 
+    /// Video with a cut fade: render the mixed audio once, then pass the
+    /// original compressed video samples through untouched. Attaching an
+    /// audioMix to a passthrough export would silently drop it; forcing
+    /// HighestQuality would re-encode the entire video and lose its codec.
+    private static func exportWithFades(
+        composition: sending AVComposition,
+        audioMix: sending AVAudioMix,
+        outputURL: URL,
+        fileType: AVFileType,
+        progress: @escaping @Sendable @MainActor (Double) -> Void
+    ) async throws {
+        let mux = AVMutableComposition()
+        let videoTracks = try await composition.loadTracks(
+            withMediaType: .video
+        )
+        guard !videoTracks.isEmpty else {
+            throw MediaExportError.missingOutput
+        }
+        for track in videoTracks {
+            let timeRange = try await track.load(.timeRange)
+            guard let muxTrack = mux.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                throw MediaExportError.exportFailed(
+                    "The video track could not be copied."
+                )
+            }
+            try muxTrack.insertTimeRange(
+                timeRange,
+                of: track,
+                at: .zero
+            )
+            muxTrack.preferredTransform = try await track.load(
+                .preferredTransform
+            )
+        }
+
+        // MOV can carry the lossless 24-bit PCM the audio exporter already
+        // writes; MP4/M4V require AAC. Keeping MOV lossless also avoids an
+        // encoder-delay alignment risk at the cut.
+        let audioExtension = fileType == .mov ? "wav" : "m4a"
+        let audioURL = try MediaStorage.makeTemporaryURL(
+            pathExtension: audioExtension
+        )
+        defer { MediaStorage.removeIfPresent(audioURL) }
+        if fileType == .mov {
+            try await MediaAudioExporter.export(
+                composition: composition,
+                audioMix: audioMix,
+                outputURL: audioURL
+            ) { value in
+                progress(value * 0.5)
+            }
+        } else {
+            try await MediaAudioRenderer.exportAAC(
+                composition: composition,
+                audioMix: audioMix,
+                outputURL: audioURL
+            ) { value in
+                progress(value * 0.5)
+            }
+        }
+
+        let audioAsset = AVURLAsset(url: audioURL)
+        let audioTracks = try await audioAsset.loadTracks(
+            withMediaType: .audio
+        )
+        guard let sourceAudio = audioTracks.first else {
+            throw MediaExportError.noAudioTrack
+        }
+        let audioRange = try await sourceAudio.load(.timeRange)
+        guard let muxAudio = mux.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw MediaExportError.exportFailed(
+                "The faded audio track could not be added."
+            )
+        }
+        try muxAudio.insertTimeRange(
+            audioRange,
+            of: sourceAudio,
+            at: .zero
+        )
+
+        guard let session = AVAssetExportSession(
+            asset: mux,
+            presetName: AVAssetExportPresetPassthrough
+        ) else {
+            throw MediaExportError.unsupportedContainer(
+                outputURL.pathExtension
+            )
+        }
+        session.shouldOptimizeForNetworkUse = false
+        do {
+            try await run(
+                session: session,
+                outputURL: outputURL,
+                fileType: fileType,
+                progress: { value in
+                    progress(0.5 + value * 0.5)
+                }
+            )
+            await progress(1)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            MediaStorage.removeIfPresent(outputURL)
+            throw MediaExportError.exportFailed(error.localizedDescription)
+        }
+    }
+
     private static func run(
         session: AVAssetExportSession,
         outputURL: URL,
         fileType: AVFileType,
-        progress: @escaping @MainActor (Double) -> Void
+        progress: @escaping @Sendable @MainActor (Double) -> Void
     ) async throws {
-        let exportTask = Task { @MainActor in
-            try await session.export(to: outputURL, as: fileType)
+        // AVAssetExportSession is not Sendable, but both tasks below use the
+        // same single export operation; the box confines it to them.
+        let box = ExportSessionBox(session)
+        let exportTask = Task {
+            try await box.session.export(to: outputURL, as: fileType)
         }
-        let progressTask = Task { @MainActor in
-            for await state in session.states(updateInterval: 0.1) {
+        let progressTask = Task {
+            for await state in box.session.states(updateInterval: 0.1) {
                 if case let .exporting(value) = state {
-                    progress(
+                    await progress(
                         min(max(value.fractionCompleted, 0), 0.99)
                     )
                 }

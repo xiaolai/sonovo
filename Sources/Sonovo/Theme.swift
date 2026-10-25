@@ -482,6 +482,13 @@ enum AppTheme {
         static let extraLarge: CGFloat = 30
     }
 
+    /// Timeline interaction factors. The zoom factor is a control constant,
+    /// not a drawing size, but it lives here with the other timeline values.
+    enum MediaTimeline {
+        static let zoomInFactor: Double = 2
+        static let zoomOutFactor: Double = 0.5
+    }
+
     enum Size {
         static let toolbarDividerHeight: CGFloat = 16
         static let metadataLabelWidth: CGFloat = 76
@@ -499,6 +506,12 @@ enum AppTheme {
         static let scrubberThumbRadius: CGFloat = 5
         static let scrubberHitHeight: CGFloat = 14
         static let waveformHeight: CGFloat = 208
+        /// Compact timeline height when the window is short or the video
+        /// preview needs the remaining space.
+        static let mediaTimelineCompactHeight: CGFloat = 120
+        static let mediaTimelineThumbnailHeight: CGFloat = 56
+        static let mediaTimelineThumbnailTileWidth: CGFloat = 72
+        static let mediaSilencePopoverWidth: CGFloat = 320
         static let letterBadge: CGFloat = 17
         static let thumbnailWidth: CGFloat = 116
         static let thumbnailHeight: CGFloat = 65
