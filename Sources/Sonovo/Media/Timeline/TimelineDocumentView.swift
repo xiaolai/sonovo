@@ -10,7 +10,6 @@ import UniformTypeIdentifiers
 struct TimelineDocumentView: View {
     let workspace: TimelineWorkspace
     let assets: [ProjectAsset]
-    let selectedAsset: ProjectAsset?
     let project: Project
 
     @State private var selectedClipID: String?
@@ -222,20 +221,31 @@ struct TimelineDocumentView: View {
 
     private var addMenu: some View {
         Menu {
-            Button("Voice Track") {
-                addSelectedAsset(to: .voice)
-            }
-            Button("Music Track") {
-                addSelectedAsset(to: .music)
-            }
-            Button("Video Track") {
-                addSelectedAsset(to: .video)
+            ForEach(mediaAssets) { asset in
+                Menu(asset.name) {
+                    if asset.kind == .video {
+                        Button("Video Track") {
+                            add(asset: asset, to: .video, at: playhead)
+                        }
+                    } else {
+                        Button("Voice Track") {
+                            add(asset: asset, to: .voice, at: playhead)
+                        }
+                        Button("Music Track") {
+                            add(asset: asset, to: .music, at: playhead)
+                        }
+                    }
+                }
             }
         } label: {
             Image(systemName: "plus.rectangle.on.rectangle")
         }
-        .help("Add the selected project asset at the playhead")
-        .disabled(selectedAsset == nil)
+        .help("Add a project media asset at the playhead")
+        .disabled(mediaAssets.isEmpty)
+    }
+
+    private var mediaAssets: [ProjectAsset] {
+        assets.filter { $0.kind == .audio || $0.kind == .video }
     }
 
     private func timelineContent(_ timeline: ProjectTimeline) -> some View {
@@ -598,11 +608,6 @@ struct TimelineDocumentView: View {
                 editError = error.localizedDescription
             }
         }
-    }
-
-    private func addSelectedAsset(to kind: TimelineTrackKind) {
-        guard let selectedAsset else { return }
-        add(asset: selectedAsset, to: kind, at: playhead)
     }
 
     private func seek(to seconds: Double) {
