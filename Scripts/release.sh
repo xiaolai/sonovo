@@ -70,8 +70,12 @@ security find-identity -v -p codesigning 2>/dev/null | grep -Fq "\"$identity\"" 
 profile="${SONOVO_NOTARY_PROFILE:-chase-notary}"
 if [ "$mode" = release ]; then
     [[ -n "$profile" ]] || fail "SONOVO_NOTARY_PROFILE is empty"
+    if ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
+        Scripts/notary-profile.sh --profile "$profile" \
+            || fail "notarytool cannot use '$profile'; run Scripts/notary-profile.sh"
+    fi
     xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1 \
-        || fail "notarytool cannot use '$profile'; create it once with: xcrun notarytool store-credentials $profile"
+        || fail "notarytool cannot use '$profile' after Scripts/notary-profile.sh"
 fi
 
 note "release: Sonovo $VERSION, $mode"
