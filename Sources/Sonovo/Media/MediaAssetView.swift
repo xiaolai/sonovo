@@ -42,6 +42,9 @@ struct MediaAssetView: View {
     @State private var pendingReload = false
     @State private var previewGeneration: UInt64 = 0
     @State private var previewedRanges: [MediaTimeRange] = []
+    /// The old player item stays current while a new composition builds. Keep
+    /// audition and timeline mapping off the old item during that window.
+    @State private var isPreviewPending = false
     @State private var operationError: String?
     @State private var showReplaceConfirmation = false
     @State private var isTimelineInteracting = false
@@ -82,6 +85,7 @@ struct MediaAssetView: View {
 
     private var canAudition: Bool {
         guard !isExportingOperation,
+              !isPreviewPending,
               playback.state == .ready,
               let state = editDocument?.editState,
               let selection = state.selection else {
@@ -124,6 +128,7 @@ struct MediaAssetView: View {
               let state = editDocument?.editState else {
             return playback.elapsed
         }
+        guard !isPreviewPending else { return 0 }
         return state.sourceTime(forEditedTime: playback.elapsed)
     }
 
@@ -241,6 +246,7 @@ struct MediaAssetView: View {
             Button("Replace Original", role: .destructive) {
                 Task { await performExport(.replaceOriginal) }
             }
+            .disabled(isExportingOperation || editDocument?.isStale == true)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
@@ -248,6 +254,8 @@ struct MediaAssetView: View {
             )
         }
         .onDisappear {
+            previewGeneration &+= 1
+            isPreviewPending = false
             playback.stopAudition()
             playback.unload()
             waveform.cancel()
@@ -510,7 +518,7 @@ struct MediaAssetView: View {
                 viewport: viewport,
                 silenceCandidates: silenceCandidates,
                 compact: compact,
-                isInteractionEnabled: !busy,
+                isInteractionEnabled: !busy && !isPreviewPending,
                 thumbnailURL: showsVideoInEdit ? asset.url : nil,
                 thumbnailRevision: showsVideoInEdit ? asset.revision : nil,
                 showsThumbnails: showsVideoInEdit && !compact,
@@ -632,6 +640,7 @@ struct MediaAssetView: View {
         pendingEditStart = false
         pendingReload = false
         previewGeneration &+= 1
+        isPreviewPending = false
         previewedRanges = []
         isTimelineInteracting = false
         silenceCandidates = []
@@ -647,6 +656,7 @@ struct MediaAssetView: View {
 
     private func followPlayhead() {
         guard mode == .edit,
+              !isPreviewPending,
               playback.isPlaying,
               !isTimelineInteracting,
               let document = editDocument,
@@ -708,6 +718,7 @@ struct MediaAssetView: View {
                 playback.unload()
                 loaded = .none
                 previewGeneration &+= 1
+                isPreviewPending = false
                 previewedRanges = []
             }
         } else {
@@ -723,6 +734,7 @@ struct MediaAssetView: View {
         pendingEditStart = false
         previewedRanges = []
         previewGeneration &+= 1
+        isPreviewPending = false
         loaded = .source
         playback.load(url: asset.url)
         if asset.kind == .audio || asset.kind == .video {
@@ -741,11 +753,13 @@ struct MediaAssetView: View {
               let document = editDocument,
               let state = document.editState,
               !document.isStale else {
+            isPreviewPending = false
             return
         }
         previewGeneration &+= 1
         let generation = previewGeneration
         previewedRanges = state.keepRanges
+        isPreviewPending = true
         playback.pause()
         Task { @MainActor in
             do {
@@ -764,18 +778,21 @@ struct MediaAssetView: View {
                     fileSize: asset.size,
                     audioMix: build.audioMix
                 )
+                isPreviewPending = false
             } catch let error as MediaCompositionError
                 where error == .emptyEdit {
                 guard generation == previewGeneration else { return }
                 loaded = .none
                 previewedRanges = []
                 playback.unload()
+                isPreviewPending = false
                 operationError = nil
             } catch {
                 guard generation == previewGeneration else { return }
                 loaded = .none
                 previewedRanges = []
                 playback.unload()
+                isPreviewPending = false
                 operationError = error.localizedDescription
             }
         }
@@ -880,6 +897,7 @@ struct MediaAssetView: View {
         }
         guard request.documentID == editDocument.id else { return }
         appState?.mediaReplaceRequest = nil
+        guard !isExportingOperation, !editDocument.isStale else { return }
         if mode == .edit, editDocument.canReplaceOriginal {
             showReplaceConfirmation = true
         }

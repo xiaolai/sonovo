@@ -147,6 +147,25 @@ final class MediaPlaybackModelTests: XCTestCase {
         XCTAssertFalse(model.isAuditioning)
     }
 
+    func testAuditionSelectionEndingAtItemEndLoops() async throws {
+        let url = try makeTone(duration: 1)
+        let model = MediaPlaybackModel()
+        model.load(url: url)
+        let ready = await waitUntil { model.state == .ready }
+        XCTAssertTrue(ready, "state was \(model.state)")
+
+        model.startAudition(range: 0.6 ... 1.0)
+        XCTAssertNotNil(model.auditionRange)
+        try await Task.sleep(for: .milliseconds(1_200))
+        XCTAssertNotNil(model.auditionRange)
+        XCTAssertLessThan(
+            model.elapsed,
+            0.95,
+            "a selection ending at the item end must loop, not stall"
+        )
+        model.pause()
+    }
+
     func testStoppingAnInactiveAuditionDoesNotPausePlayback() async throws {
         let url = try makeTone(duration: 2)
         let model = MediaPlaybackModel()
