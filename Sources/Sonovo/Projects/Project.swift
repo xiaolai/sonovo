@@ -1312,9 +1312,7 @@ final class Project: Identifiable {
             return await closeWorkspaceDocuments(kind: kind)
         }
         if tab.kind == .audio || tab.kind == .video {
-            if mediaEdits.recorder.isRecording {
-                _ = stopAudioRecording(openWhenFinished: false)
-            }
+            stopOrCancelRecordingForLifecycle()
             if let url = tab.url
                 ?? (isDemo ? sampleMediaAsset(for: tab.assetID)?.url : nil) {
                 mediaEdits.close(url: url)
@@ -1521,10 +1519,17 @@ final class Project: Identifiable {
             return nil
         }
         let values = try? url.resourceValues(
-            forKeys: [.fileSizeKey, .contentModificationDateKey]
+            forKeys: [
+                .fileSizeKey,
+                .contentModificationDateKey,
+                .fileResourceIdentifierKey
+            ]
         )
         let size = Int64(values?.fileSize ?? 0)
         let modified = values?.contentModificationDate
+        let identifier = values?.fileResourceIdentifier.map {
+            String(describing: $0)
+        }
         return ProjectAsset(
             id: id,
             url: url,
@@ -1534,9 +1539,9 @@ final class Project: Identifiable {
             size: size,
             modified: modified,
             revision: AssetRevision(
-                fileIdentifier: nil,
+                fileIdentifier: identifier,
                 size: size,
-                modified: modified
+                modified: modified,
             )
         )
     }
@@ -1586,7 +1591,15 @@ final class Project: Identifiable {
             mediaError = "This project has no writable folder for recordings."
             return false
         }
+        guard !mediaEdits.isExportingOperation else {
+            mediaError = "Wait for the current export to finish before recording."
+            return false
+        }
         if mediaEdits.recorder.isRecording { return true }
+        guard !mediaEdits.recorder.isPreparing else {
+            mediaError = "A recording is already starting."
+            return false
+        }
         do {
             let temporary = try MediaStorage.makeTemporaryURL(
                 pathExtension: "wav"
@@ -1594,6 +1607,9 @@ final class Project: Identifiable {
             try await mediaEdits.recorder.start(to: temporary)
             recordingDestinationDirectory = destination
             return true
+        } catch is CancellationError {
+            mediaError = nil
+            return false
         } catch {
             mediaError = error.localizedDescription
             return false
@@ -1660,6 +1676,10 @@ final class Project: Identifiable {
             throw MediaStorageError.sourceChanged(document.asset.name)
         }
         mediaError = nil
+        guard mediaEdits.beginExport(document) else {
+            throw MediaExportError.busy
+        }
+        defer { mediaEdits.endExport(document) }
         do {
             let outcome = try await mediaEdits.exportService.export(
                 source: document.asset,
@@ -1692,6 +1712,7 @@ final class Project: Identifiable {
                     return asset
                 }
                 await refreshNow()
+                await waitForScanSettlement()
                 let canonical = MarkdownSecurity.canonical(outcome.url)
                 if let asset = assets.first(where: {
                     MarkdownSecurity.canonical($0.url) == canonical
@@ -2033,7 +2054,7 @@ final class Project: Identifiable {
             revision: AssetRevision(
                 fileIdentifier: identifier,
                 size: size,
-                modified: modified
+                modified: modified,
             )
         )
     }
@@ -2182,9 +2203,7 @@ final class Project: Identifiable {
         watcherRetryTask = nil
         watcher?.stop()
         watcher = nil
-        if mediaEdits.recorder.isRecording {
-            _ = stopAudioRecording(openWhenFinished: false)
-        }
+        stopOrCancelRecordingForLifecycle()
         mediaEdits.cancelJobs()
         mediaEdits.closeAll()
         onSelectionChanged = nil
@@ -2195,10 +2214,17 @@ final class Project: Identifiable {
         // Subtitle media is owned by the workspace, not by a removable view,
         // so it must be paused explicitly when the project stops being shown.
         subtitles.pauseForDeactivation()
+        stopOrCancelRecordingForLifecycle()
+        mediaEdits.cancelJobs()
+    }
+
+    private func stopOrCancelRecordingForLifecycle() {
         if mediaEdits.recorder.isRecording {
             _ = stopAudioRecording(openWhenFinished: false)
+        } else if mediaEdits.recorder.isPreparing {
+            mediaEdits.recorder.cancel()
+            recordingDestinationDirectory = nil
         }
-        mediaEdits.cancelJobs()
     }
 
     var isOffline: Bool {
@@ -2220,9 +2246,7 @@ final class Project: Identifiable {
         refreshTask?.cancel()
         watcher?.stop()
         watcher = nil
-        if mediaEdits.recorder.isRecording {
-            _ = stopAudioRecording(openWhenFinished: false)
-        }
+        stopOrCancelRecordingForLifecycle()
         mediaEdits.cancelJobs()
         mediaEdits.closeAll()
         markdown.shutdown()

@@ -94,9 +94,16 @@ if [ "$sign_mode" = adhoc ]; then
     codesign --force --sign - --timestamp=none \
         --entitlements "$entitlements" "$app" > /dev/null
     codesign --verify --strict "$app"
-    if ! codesign -d --entitlements - --xml "$app" 2>/dev/null \
-        | grep -q 'com.apple.security.device.audio-input'; then
-        echo "ad-hoc signature is missing the audio-input entitlement" >&2
+    audio_input_entitlement="$(
+        codesign -d --entitlements - --xml "$app" 2>/dev/null \
+            | plutil -extract 'com\.apple\.security\.device\.audio-input' \
+                raw -expect bool -o - - 2>/dev/null
+    )" || {
+        echo "could not read the ad-hoc audio-input entitlement" >&2
+        exit 1
+    }
+    if [ "$audio_input_entitlement" != "true" ]; then
+        echo "ad-hoc signature does not enable the audio-input entitlement" >&2
         exit 1
     fi
 fi

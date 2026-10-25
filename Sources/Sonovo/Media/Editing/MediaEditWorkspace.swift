@@ -10,6 +10,11 @@ import SonovoCore
 final class MediaEditWorkspace {
     private(set) var documents: [String: MediaEditDocument] = [:]
     private(set) var activeDocumentID: String?
+    private(set) var exportingDocumentID: String?
+    /// True from the start of an export until the project has finished
+    /// refreshing/opening the result. This is what freezes edit controls;
+    /// the export service's own busy flag clears slightly earlier.
+    private(set) var isExportingOperation = false
     let recorder: AudioRecorder
     let exportService: MediaExportService
 
@@ -49,15 +54,37 @@ final class MediaEditWorkspace {
         }
     }
 
+    @discardableResult
+    func beginExport(_ document: MediaEditDocument) -> Bool {
+        guard exportingDocumentID == nil, !isExportingOperation else {
+            return false
+        }
+        exportingDocumentID = document.id
+        isExportingOperation = true
+        return true
+    }
+
+    func endExport(_ document: MediaEditDocument) {
+        guard exportingDocumentID == nil
+                || exportingDocumentID == document.id else {
+            return
+        }
+        exportingDocumentID = nil
+        isExportingOperation = false
+    }
+
     func close(url: URL) {
         let key = MarkdownSecurity.canonical(url).path
         guard let document = documents.removeValue(forKey: key) else { return }
         if activeDocumentID == document.id {
             activeDocumentID = nil
         }
-        // One export runs at a time in this workspace; a tab closing must not
-        // leave a job writing into a project after its document is gone.
-        exportService.cancel()
+        // Cancel only the job owned by this document. Closing an unrelated
+        // tab must not abort another document's export.
+        if exportingDocumentID == document.id {
+            exportingDocumentID = nil
+            exportService.cancel()
+        }
     }
 
     func discardDocument(for url: URL) {
@@ -65,12 +92,14 @@ final class MediaEditWorkspace {
     }
 
     func closeAll() {
+        exportingDocumentID = nil
         exportService.cancel()
         documents.removeAll()
         activeDocumentID = nil
     }
 
     func cancelJobs() {
+        exportingDocumentID = nil
         exportService.cancel()
     }
 }

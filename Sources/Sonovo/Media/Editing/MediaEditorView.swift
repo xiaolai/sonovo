@@ -21,6 +21,7 @@ struct MediaEditorToolbar: View {
 
     private var recorder: AudioRecorder { project.mediaEdits.recorder }
     private var exporter: MediaExportService { project.mediaEdits.exportService }
+    private var isBusy: Bool { project.mediaEdits.isExportingOperation }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
@@ -82,24 +83,24 @@ struct MediaEditorToolbar: View {
     private var operationRow: some View {
         HStack(spacing: AppTheme.Spacing.sm) {
             Button("Set In") { onSetIn() }
-                .disabled(document.editState == nil)
+                .disabled(document.editState == nil || isBusy)
             Button("Set Out") { onSetOut() }
-                .disabled(document.editState == nil)
+                .disabled(document.editState == nil || isBusy)
             Button("Trim to Selection") { onTrim() }
-                .disabled(!document.canTrimToSelection)
+                .disabled(!document.canTrimToSelection || isBusy)
             Button("Delete Selection") { onDelete() }
-                .disabled(!document.canDeleteSelection)
+                .disabled(!document.canDeleteSelection || isBusy)
             Button("Clear Selection") { onClearSelection() }
-                .disabled(document.selection == nil)
+                .disabled(document.selection == nil || isBusy)
             Button("Reset") { onReset() }
-                .disabled(!document.canReset)
+                .disabled(!document.canReset || isBusy)
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
             Button("Undo") { onUndo() }
-                .disabled(!document.canUndo)
+                .disabled(!document.canUndo || isBusy)
             Button("Redo") { onRedo() }
-                .disabled(!document.canRedo)
+                .disabled(!document.canRedo || isBusy)
         }
         .font(.system(size: AppTheme.TypeScale.sm))
         .controlSize(.small)
@@ -121,7 +122,7 @@ struct MediaEditorToolbar: View {
                 Button("Record Audio") {
                     Task { _ = await project.startAudioRecording() }
                 }
-                .disabled(!project.canRecordAudio || exporter.isBusy)
+                .disabled(!project.canRecordAudio || isBusy)
             }
 
             Spacer(minLength: AppTheme.Spacing.sm)
@@ -133,16 +134,18 @@ struct MediaEditorToolbar: View {
                     .font(.system(size: AppTheme.TypeScale.xxs, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Button("Cancel") { exporter.cancel() }
-            } else if exporter.isBusy {
+            } else if isBusy {
                 ProgressView()
                     .controlSize(.small)
-                Button("Cancel") { exporter.cancel() }
+                if exporter.isBusy {
+                    Button("Cancel") { exporter.cancel() }
+                }
             }
 
             Button("Save Take") { onSaveTake() }
-                .disabled(!document.canExport || exporter.isBusy)
+                .disabled(!document.canExport || isBusy)
             Button("Replace Original…") { onReplace() }
-                .disabled(!document.canReplaceOriginal || exporter.isBusy)
+                .disabled(!document.canReplaceOriginal || isBusy)
         }
         .font(.system(size: AppTheme.TypeScale.sm))
         .controlSize(.small)
@@ -153,7 +156,6 @@ struct MediaEditorNotices: View {
     let project: Project
     let document: MediaEditDocument
     let operationError: String?
-    let onReload: () -> Void
 
     private var recorder: AudioRecorder { project.mediaEdits.recorder }
     private var exporter: MediaExportService { project.mediaEdits.exportService }
@@ -173,15 +175,6 @@ struct MediaEditorNotices: View {
             : message
 
         return VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
-            if document.isStale {
-                noticeRow(
-                    icon: "exclamationmark.triangle",
-                    text: document.staleMessage
-                        ?? "This file changed on disk.",
-                    actionTitle: "Reload Source",
-                    action: onReload
-                )
-            }
             if recorder.permission.isDenied {
                 noticeRow(
                     icon: "mic.slash",

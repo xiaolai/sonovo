@@ -144,6 +144,8 @@ struct MediaAssetView: View {
         .onChange(of: projectIsVisible) { _, visible in
             if !visible {
                 playback.pause()
+            } else {
+                consumeReplaceRequest()
             }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -151,13 +153,8 @@ struct MediaAssetView: View {
                 project?.mediaEdits.recorder.refreshPermission()
             }
         }
-        .onChange(of: appState?.mediaReplaceRequest ?? false) { _, requested in
-            guard requested else { return }
-            appState?.mediaReplaceRequest = false
-            if mode == .edit,
-               editDocument?.canReplaceOriginal == true {
-                showReplaceConfirmation = true
-            }
+        .onChange(of: appState?.mediaReplaceRequest) { _, _ in
+            consumeReplaceRequest()
         }
         .confirmationDialog(
             "Replace \(asset.name)?",
@@ -297,12 +294,13 @@ struct MediaAssetView: View {
                 MediaEditorNotices(
                     project: project,
                     document: editDocument,
-                    operationError: operationError,
-                    onReload: reloadSource
+                    operationError: operationError
                 )
             }
 
-            if editDocument?.isStale == true {
+            if let failure {
+                failureState(failure)
+            } else if editDocument?.isStale == true {
                 staleState
             } else if let editDocument, let project {
                 editStage(editDocument)
@@ -390,7 +388,8 @@ struct MediaAssetView: View {
     }
 
     private func selectionStrip(_ document: MediaEditDocument) -> some View {
-        VStack(spacing: AppTheme.Spacing.sm) {
+        let busy = project?.mediaEdits.isExportingOperation ?? false
+        return VStack(spacing: AppTheme.Spacing.sm) {
             if showsVideoInEdit {
                 HStack {
                     Text("Source trim range")
@@ -406,10 +405,15 @@ struct MediaAssetView: View {
                 selection: document.selection,
                 playhead: sourcePlayhead,
                 compact: showsVideoInEdit,
+                isEnabled: !busy,
                 onSeek: { sourceTime in
+                    guard !(project?.mediaEdits.isExportingOperation ?? false)
+                    else { return }
                     seekSource(sourceTime, document: document)
                 },
                 onSelect: { start, end in
+                    guard !(project?.mediaEdits.isExportingOperation ?? false)
+                    else { return }
                     _ = document.setSelection(start: start, end: end)
                     operationError = nil
                 }
@@ -419,6 +423,7 @@ struct MediaAssetView: View {
                     ? AppTheme.Size.mediaTrimStripHeight
                     : AppTheme.Size.waveformHeight
             )
+            .allowsHitTesting(!busy)
         }
     }
 
@@ -443,9 +448,11 @@ struct MediaAssetView: View {
             .frame(maxWidth: AppTheme.Layout.emptyDescriptionMaxWidth)
             HStack(spacing: AppTheme.Spacing.sm) {
                 Button("Reload Source") { reloadSource() }
+                    .disabled(project?.mediaEdits.isExportingOperation == true)
                 Button("Discard Edit", role: .destructive) {
                     discardEdit()
                 }
+                .disabled(project?.mediaEdits.isExportingOperation == true)
             }
         }
         .padding(AppTheme.Spacing.lg)
@@ -531,8 +538,10 @@ struct MediaAssetView: View {
             if document.editState == nil {
                 // A successful replace discards the old document; the
                 // replaced source has no edit decision yet. Return to the
-                // player rather than pretending an empty edit is active.
+                // player and reload the new bytes: the player may still hold
+                // the old source item under the same URL.
                 project.mediaEdits.close(url: asset.url)
+                loadSource()
                 mode = .player
                 return
             }
@@ -613,16 +622,25 @@ struct MediaAssetView: View {
     }
 
     private func applyEdit(_ action: () -> Bool) {
+        guard !(project?.mediaEdits.isExportingOperation ?? false) else {
+            return
+        }
         guard action() else { return }
         operationError = nil
     }
 
     private func setSelectionStart(_ document: MediaEditDocument) {
+        guard !(project?.mediaEdits.isExportingOperation ?? false) else {
+            return
+        }
         _ = document.setSelectionStart(atSourceTime: sourcePlayhead)
         operationError = nil
     }
 
     private func setSelectionEnd(_ document: MediaEditDocument) {
+        guard !(project?.mediaEdits.isExportingOperation ?? false) else {
+            return
+        }
         _ = document.setSelectionEnd(atSourceTime: sourcePlayhead)
         operationError = nil
     }
@@ -647,6 +665,28 @@ struct MediaAssetView: View {
             // The user cancelled; the exporter cleaned its temporary file.
         } catch {
             operationError = error.localizedDescription
+        }
+    }
+
+    /// A menu request is addressed to one project document. Ignore it while
+    /// this host is hidden so a retained editor cannot prompt behind another
+    /// project; process it when the host becomes visible again.
+    private func consumeReplaceRequest() {
+        guard projectIsVisible,
+              let request = appState?.mediaReplaceRequest,
+              let project,
+              request.projectID == project.id else {
+            return
+        }
+        guard let editDocument else {
+            // The edit session ended before the request was delivered.
+            appState?.mediaReplaceRequest = nil
+            return
+        }
+        guard request.documentID == editDocument.id else { return }
+        appState?.mediaReplaceRequest = nil
+        if mode == .edit, editDocument.canReplaceOriginal {
+            showReplaceConfirmation = true
         }
     }
 

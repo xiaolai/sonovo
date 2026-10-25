@@ -18,6 +18,7 @@ enum MediaExportError: LocalizedError, Equatable {
     case unsupportedContainer(String)
     case exportFailed(String)
     case noAudioTrack
+    case multipleAudioTracks
     case missingOutput
 
     var errorDescription: String? {
@@ -30,6 +31,8 @@ enum MediaExportError: LocalizedError, Equatable {
             message
         case .noAudioTrack:
             "The edited file has no audio track."
+        case .multipleAudioTracks:
+            "This file has more than one audio track. Audio-only export of multiple tracks is not supported yet."
         case .missingOutput:
             "The exporter did not produce a file."
         }
@@ -131,6 +134,13 @@ final class MediaExportService {
         guard MediaStorage.matches(source.revision, url: source.url) else {
             throw MediaStorageError.sourceChanged(source.name)
         }
+        // A same-size/same-mtime in-place write cannot be distinguished from
+        // metadata. Destructive replacement therefore takes a content
+        // fingerprint before doing any asynchronous work and verifies the
+        // bytes swapped out at commit time.
+        let expectedFingerprint = mode == .replaceOriginal
+            ? try await MediaStorage.fingerprint(for: source.url)
+            : nil
         let build = try await MediaCompositionBuilder.build(
             sourceURL: source.url,
             state: state
@@ -139,6 +149,9 @@ final class MediaExportService {
         try Task.checkCancellation()
 
         let hasVideo = build.hasVideo
+        if !hasVideo, build.audioTrackCount > 1 {
+            throw MediaExportError.multipleAudioTracks
+        }
         let outputExtension = Self.newTakeExtension(
             for: source,
             hasVideo: hasVideo
@@ -200,6 +213,22 @@ final class MediaExportService {
             return MediaExportOutcome(url: destination, backupURL: nil)
         case .replaceOriginal:
             try Task.checkCancellation()
+            // Stage the output next to the source first. The expensive copy
+            // happens before the swap, then only the fast atomic exchange
+            // remains after the final revision checks.
+            let staged = try await MediaStorage.stageAtomicallyAsync(
+                from: temporary,
+                to: source.url
+            )
+            var commitAttempted = false
+            defer {
+                if !commitAttempted {
+                    MediaStorage.removeIfPresent(staged)
+                }
+            }
+            guard MediaStorage.matches(source.revision, url: source.url) else {
+                throw MediaStorageError.sourceChanged(source.name)
+            }
             let backupDirectory = try MediaStorage.backupDirectory(
                 projectName: projectName
             )
@@ -208,31 +237,28 @@ final class MediaExportService {
                 in: backupDirectory,
                 preferredName: backupName
             )
-            try await MediaStorage.copyItemAsync(
-                from: source.url,
-                to: backup
-            )
             try Task.checkCancellation()
+            guard let expectedFingerprint else {
+                throw MediaStorageError.sourceChanged(source.name)
+            }
+            commitAttempted = true
             do {
-                try await MediaStorage.installAtomicallyAsync(
-                    from: temporary,
+                // The swap moves the exact pre-replacement bytes to `staged`.
+                // They become the backup only after the fingerprint and size
+                // checks pass, so a concurrent writer is never lost.
+                try await MediaStorage.commitStagedReplacement(
+                    staged,
                     to: source.url,
-                    replacing: true
+                    expectedFingerprint: expectedFingerprint,
+                    expectedSize: MediaStorage.fileSize(for: temporary),
+                    backupTo: backup
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 throw MediaExportError.exportFailed(
                     error.localizedDescription
                 )
-            }
-            let installedSize = MediaStorage.fileSize(for: source.url)
-            let exportedSize = MediaStorage.fileSize(for: temporary)
-            guard installedSize > 0, installedSize == exportedSize else {
-                try? await MediaStorage.installAtomicallyAsync(
-                    from: backup,
-                    to: source.url,
-                    replacing: true
-                )
-                throw MediaStorageError.replaceVerificationFailed
             }
             return MediaExportOutcome(url: source.url, backupURL: backup)
         }

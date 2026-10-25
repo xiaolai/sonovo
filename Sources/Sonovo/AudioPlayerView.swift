@@ -11,7 +11,7 @@ struct AudioPlayerView: View {
 
     var body: some View {
         Group {
-            if let id = state.selectedAsset?.id,
+            if let id = project.selectedAssetID,
                let asset = project.sampleMediaAsset(for: id) {
                 MediaAssetView(
                     asset: asset,

@@ -11,6 +11,7 @@ struct MediaSelectionWaveformView: View {
     let selection: MediaTimeRange?
     let playhead: Double
     var compact = false
+    var isEnabled = true
     let onSeek: (Double) -> Void
     let onSelect: (Double, Double) -> Void
 
@@ -62,6 +63,10 @@ struct MediaSelectionWaveformView: View {
     private func dragGesture(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                guard isEnabled else {
+                    if dragStartX != nil { resetDrag() }
+                    return
+                }
                 guard sourceDuration > 0, width > 0 else { return }
                 let x = min(max(value.location.x, 0), width)
                 let time = Double(x / width) * sourceDuration
@@ -77,7 +82,7 @@ struct MediaSelectionWaveformView: View {
             }
             .onEnded { _ in
                 defer { resetDrag() }
-                guard sourceDuration > 0 else { return }
+                guard isEnabled, sourceDuration > 0 else { return }
                 if !dragMoved {
                     onSeek(dragAnchorTime)
                     return

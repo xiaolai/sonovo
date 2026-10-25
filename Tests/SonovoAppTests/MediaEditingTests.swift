@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreVideo
 import Foundation
+import Synchronization
 import XCTest
 @testable import Sonovo
 
@@ -354,6 +355,343 @@ final class MediaEditingTests: XCTestCase {
         }
     }
 
+    func testCancellingPendingPermissionNeverStartsCapture() async {
+        let gate = PermissionGate()
+        let access = MicrophoneAccess(
+            status: { .notDetermined },
+            request: { await gate.wait() }
+        )
+        let engine = FakeRecordingEngine()
+        let recorder = AudioRecorder(
+            engine: engine,
+            access: access,
+            channelProbe: { 1 },
+            inputAvailable: { true }
+        )
+        let url = temporaryFile(named: "cancelled-start.wav")
+        let start = Task { try await recorder.start(to: url) }
+        let waiting = await waitForGate(gate)
+        XCTAssertTrue(waiting)
+        XCTAssertTrue(recorder.isPreparing)
+
+        recorder.cancel()
+        await gate.resolve(true)
+        do {
+            try await start.value
+            XCTFail("a cancelled start must not begin capture")
+        } catch is CancellationError {
+            XCTAssertFalse(engine.isRecording)
+            XCTAssertFalse(recorder.isRecording)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testStartingAgainWhilePreparingIsRejected() async {
+        let gate = PermissionGate()
+        let access = MicrophoneAccess(
+            status: { .notDetermined },
+            request: { await gate.wait() }
+        )
+        let engine = FakeRecordingEngine()
+        let recorder = AudioRecorder(
+            engine: engine,
+            access: access,
+            channelProbe: { 1 },
+            inputAvailable: { true }
+        )
+        let start = Task {
+            try await recorder.start(
+                to: temporaryFile(named: "first-start.wav")
+            )
+        }
+        let waiting = await waitForGate(gate)
+        XCTAssertTrue(waiting)
+        do {
+            try await recorder.start(
+                to: temporaryFile(named: "second-start.wav")
+            )
+            XCTFail("a second start must be rejected while preparing")
+        } catch let error as AudioRecordingError {
+            XCTAssertEqual(error, .alreadyStarting)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        recorder.cancel()
+        await gate.resolve(false)
+        _ = try? await start.value
+        XCTAssertFalse(engine.isRecording)
+    }
+
+    func testLateCancelledStartCannotResetANewerStart() async {
+        let gate = PermissionGate()
+        let access = MicrophoneAccess(
+            status: { .notDetermined },
+            request: { await gate.wait() }
+        )
+        let engine = FakeRecordingEngine()
+        let recorder = AudioRecorder(
+            engine: engine,
+            access: access,
+            channelProbe: { 1 },
+            inputAvailable: { true }
+        )
+        let first = Task {
+            try await recorder.start(
+                to: temporaryFile(named: "late-old.wav")
+            )
+        }
+        let firstWaiting = await waitForGate(gate)
+        XCTAssertTrue(firstWaiting)
+        recorder.cancel()
+
+        let second = Task {
+            try await recorder.start(
+                to: temporaryFile(named: "late-new.wav")
+            )
+        }
+        let secondWaiting = await waitForGate(gate, count: 2)
+        XCTAssertTrue(secondWaiting)
+        XCTAssertTrue(recorder.isPreparing)
+
+        await gate.resolveNext(true)
+        _ = try? await first.value
+        XCTAssertTrue(
+            recorder.isPreparing,
+            "the old continuation must not reset the newer start"
+        )
+
+        recorder.cancel()
+        await gate.resolveNext(true)
+        _ = try? await second.value
+        XCTAssertFalse(engine.isRecording)
+    }
+
+    func testStopDetectsAFailedEngineBeforeTheNextTick() async throws {
+        let engine = FakeRecordingEngine()
+        let recorder = AudioRecorder(
+            engine: engine,
+            access: .granted,
+            channelProbe: { 1 },
+            inputAvailable: { true }
+        )
+        try await recorder.start(
+            to: temporaryFile(named: "stop-after-failure.wav")
+        )
+        engine.isRecording = false
+        engine.lastError = "The disk is full."
+
+        XCTAssertNil(recorder.stop())
+        XCTAssertFalse(recorder.isRecording)
+        XCTAssertEqual(recorder.lastError, "The disk is full.")
+    }
+
+    func testStopRejectsATakeAfterAnEncodeErrorEvenWhileRecording() async throws {
+        let engine = FakeRecordingEngine()
+        let recorder = AudioRecorder(
+            engine: engine,
+            access: .granted,
+            channelProbe: { 1 },
+            inputAvailable: { true }
+        )
+        try await recorder.start(
+            to: temporaryFile(named: "encode-error.wav")
+        )
+        // AVAudioRecorder can report an encode error while still claiming to
+        // be recording; the file is already incomplete.
+        engine.lastError = "The encoder failed."
+
+        XCTAssertNil(recorder.stop())
+        XCTAssertFalse(engine.isRecording)
+        XCTAssertFalse(recorder.isRecording)
+        XCTAssertEqual(recorder.lastError, "The encoder failed.")
+    }
+
+    func testUnexpectedEngineStopFailsTheTake() async throws {
+        let engine = FakeRecordingEngine()
+        let recorder = AudioRecorder(
+            engine: engine,
+            access: .granted,
+            channelProbe: { 1 },
+            inputAvailable: { true }
+        )
+        try await recorder.start(
+            to: temporaryFile(named: "engine-stop.wav")
+        )
+        engine.isRecording = false
+        engine.lastError = "The disk is full."
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertFalse(recorder.isRecording)
+        XCTAssertEqual(recorder.lastError, "The disk is full.")
+    }
+
+    func testRevisionMatchingRejectsADifferentFileWithTheSameStamp() throws {
+        let first = temporaryFile(named: "revision-a.wav")
+        let second = temporaryFile(named: "revision-b.wav")
+        try Data([1, 2, 3]).write(to: first)
+        try Data([4, 5, 6]).write(to: second)
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        for url in [first, second] {
+            try FileManager.default.setAttributes(
+                [.modificationDate: stamp],
+                ofItemAtPath: url.path
+            )
+        }
+        let expected = try XCTUnwrap(MediaStorage.revision(for: first))
+        XCTAssertFalse(MediaStorage.matches(expected, url: second))
+    }
+
+    func testAtomicReplacementCommitsOnlyTheExpectedRevision() async throws {
+        let source = temporaryFile(named: "swap-source.wav")
+        let staged = temporaryFile(named: "swap-staged.wav")
+        let backupDirectory = try makeDirectory(named: "swap-backup")
+        let backup = backupDirectory.appendingPathComponent("backup.wav")
+        try Data("original".utf8).write(to: source)
+        try Data("exported".utf8).write(to: staged)
+        let expected = try await MediaStorage.fingerprint(for: source)
+
+        try await MediaStorage.commitStagedReplacement(
+            staged,
+            to: source,
+            expectedFingerprint: expected,
+            expectedSize: 8,
+            backupTo: backup
+        )
+        XCTAssertEqual(try Data(contentsOf: source), Data("exported".utf8))
+        XCTAssertEqual(try Data(contentsOf: backup), Data("original".utf8))
+    }
+
+    func testAtomicReplacementRejectsAConcurrentWriterBeforeSwap() async throws {
+        let source = temporaryFile(named: "swap-source-external.wav")
+        let staged = temporaryFile(named: "swap-staged-external.wav")
+        let backupDirectory = try makeDirectory(named: "swap-backup-external")
+        let backup = backupDirectory.appendingPathComponent("backup.wav")
+        try Data("original".utf8).write(to: source)
+        try Data("exported".utf8).write(to: staged)
+        let expected = try await MediaStorage.fingerprint(for: source)
+        try Data("external".utf8).write(to: source)
+
+        do {
+            try await MediaStorage.commitStagedReplacement(
+                staged,
+                to: source,
+                expectedFingerprint: expected,
+                expectedSize: 8,
+                backupTo: backup
+            )
+            XCTFail("a changed fingerprint must be rejected")
+        } catch {
+            // Expected.
+        }
+        XCTAssertEqual(try Data(contentsOf: source), Data("external".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testAtomicReplacementPreservesTheOldSourceWhenValidationFails() async throws {
+        let source = temporaryFile(named: "swap-source-invalid.wav")
+        let staged = temporaryFile(named: "swap-staged-invalid.wav")
+        let backupDirectory = try makeDirectory(named: "swap-backup-invalid")
+        let backup = backupDirectory.appendingPathComponent("backup.wav")
+        try Data("original".utf8).write(to: source)
+        try Data("exported".utf8).write(to: staged)
+        let expected = try await MediaStorage.fingerprint(for: source)
+
+        do {
+            try await MediaStorage.commitStagedReplacement(
+                staged,
+                to: source,
+                expectedFingerprint: expected,
+                expectedSize: 999,
+                backupTo: backup
+            )
+            XCTFail("a destination that is not the staged export must be rejected")
+        } catch {
+            // Expected.
+        }
+        // The exchange happened, so the old source must survive at the backup
+        // instead of being deleted by a rollback.
+        XCTAssertEqual(try Data(contentsOf: backup), Data("original".utf8))
+        XCTAssertEqual(try Data(contentsOf: source), Data("exported".utf8))
+    }
+
+    func testAtomicReplacementRestoresASaveThatLandsJustBeforeTheSwap() async throws {
+        let source = temporaryFile(named: "swap-source-window.wav")
+        let staged = temporaryFile(named: "swap-staged-window.wav")
+        let backupDirectory = try makeDirectory(named: "swap-backup-window")
+        let backup = backupDirectory.appendingPathComponent("backup.wav")
+        try Data("original".utf8).write(to: source)
+        try Data("exported".utf8).write(to: staged)
+        let expected = try await MediaStorage.fingerprint(for: source)
+        let swapCount = Atomic<Int>(0)
+
+        do {
+            try await MediaStorage.commitStagedReplacement(
+                staged,
+                to: source,
+                expectedFingerprint: expected,
+                expectedSize: 8,
+                backupTo: backup,
+                swapping: { first, second in
+                    let count = swapCount.wrappingAdd(
+                        1,
+                        ordering: .relaxed
+                    ).newValue
+                    if count == 1 {
+                        try? Data("external2".utf8).write(to: source)
+                    }
+                    return MediaStorage.swapFiles(first, second)
+                }
+            )
+            XCTFail("a save in the commit window must be restored")
+        } catch {
+            // Expected.
+        }
+        XCTAssertEqual(swapCount.load(ordering: .relaxed), 2)
+        XCTAssertEqual(try Data(contentsOf: source), Data("external2".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    func testFileSnapshotDetectsInPlaceWritesAndReplacements() throws {
+        let first = temporaryFile(named: "snapshot-a.wav")
+        let second = temporaryFile(named: "snapshot-b.wav")
+        try Data("aaaa".utf8).write(to: first)
+        let original = try XCTUnwrap(MediaStorage.snapshot(for: first))
+
+        try Data("bbbb".utf8).write(to: first)
+        let rewritten = try XCTUnwrap(MediaStorage.snapshot(for: first))
+        XCTAssertFalse(rewritten.sameRevision(as: original))
+
+        try Data("cccc".utf8).write(to: second)
+        _ = try FileManager.default.replaceItemAt(first, withItemAt: second)
+        let replaced = try XCTUnwrap(MediaStorage.snapshot(for: first))
+        XCTAssertNotEqual(replaced.inode, rewritten.inode)
+        XCTAssertFalse(replaced.sameRevision(as: rewritten))
+    }
+
+    func testClosingAnUnrelatedMediaTabKeepsTheExportOwner() {
+        let workspace = MediaEditWorkspace()
+        let first = workspace.document(
+            for: makeAsset(
+                url: temporaryFile(named: "owner-a.wav"),
+                kind: .audio
+            )
+        )
+        let second = workspace.document(
+            for: makeAsset(
+                url: temporaryFile(named: "owner-b.wav"),
+                kind: .audio
+            )
+        )
+        XCTAssertTrue(workspace.beginExport(first))
+
+        workspace.close(url: second.asset.url)
+
+        XCTAssertEqual(workspace.exportingDocumentID, first.id)
+        workspace.close(url: first.asset.url)
+        XCTAssertNil(workspace.exportingDocumentID)
+    }
+
     func testRecordingSettingsClampToMonoOrStereo() {
         XCTAssertEqual(AudioRecordingSettings(channelCount: 0).channelCount, 1)
         XCTAssertEqual(AudioRecordingSettings(channelCount: 1).channelCount, 1)
@@ -601,6 +939,17 @@ final class MediaEditingTests: XCTestCase {
         }
         return condition()
     }
+
+    private func waitForGate(
+        _ gate: PermissionGate,
+        count: Int = 1
+    ) async -> Bool {
+        for _ in 0..<100 {
+            if await gate.waitingCount >= count { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await gate.waitingCount >= count
+    }
 }
 
 @MainActor
@@ -608,12 +957,14 @@ private final class FakeRecordingEngine: AudioRecordingEngine {
     var isRecording = false
     var currentTime: TimeInterval = 0
     var averagePower: Float = -20
+    var lastError: String?
     private(set) var startedAt: URL?
     private(set) var settings: AudioRecordingSettings?
 
     func start(to url: URL, settings: AudioRecordingSettings) throws {
         startedAt = url
         self.settings = settings
+        lastError = nil
         isRecording = true
     }
 
@@ -623,6 +974,30 @@ private final class FakeRecordingEngine: AudioRecordingEngine {
 
     func cancel() {
         isRecording = false
+    }
+}
+
+private actor PermissionGate {
+    private var continuations: [CheckedContinuation<Bool, Never>] = []
+
+    var waitingCount: Int { continuations.count }
+
+    func wait() async -> Bool {
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func resolve(_ value: Bool) {
+        for continuation in continuations {
+            continuation.resume(returning: value)
+        }
+        continuations.removeAll()
+    }
+
+    func resolveNext(_ value: Bool) {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume(returning: value)
     }
 }
 

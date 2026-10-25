@@ -142,10 +142,12 @@ grep -q '^TeamIdentifier=' <<<"$described" || fail "the app has no team identifi
 ! grep -q '^TeamIdentifier=not set$' <<<"$described" || fail "the app has an ad-hoc signature, not a Developer ID"
 grep -q 'flags=0x10000(runtime)' <<<"$described" || fail "the app is not signed with the hardened runtime"
 grep -q '^Timestamp=' <<<"$described" || fail "the app is not signed with a secure timestamp"
-if ! codesign -d --entitlements - --xml "$APP" 2>/dev/null \
-    | grep -q 'com.apple.security.device.audio-input'; then
-    fail "the app is missing the audio-input entitlement"
-fi
+audio_input_entitlement="$(
+    codesign -d --entitlements - --xml "$APP" 2>/dev/null \
+        | plutil -extract 'com\.apple\.security\.device\.audio-input' raw -expect bool -o - - 2>/dev/null
+)" || fail "could not read the app's audio-input entitlement"
+[ "$audio_input_entitlement" = "true" ] \
+    || fail "the app does not enable the audio-input entitlement"
 ! grep -q 'get-task-allow' <<<"$(codesign -d --entitlements - --xml "$APP" 2>/dev/null || true)" \
     || fail "get-task-allow is set; the notary would refuse it"
 

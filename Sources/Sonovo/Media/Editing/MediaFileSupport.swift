@@ -1,4 +1,6 @@
 import AVFoundation
+import CryptoKit
+import Darwin
 import Foundation
 
 struct MediaAudioDescription: Equatable, Sendable {
@@ -64,9 +66,13 @@ enum MediaAudioMetadata {
 enum MediaStorageError: LocalizedError, Equatable {
     case applicationSupportUnavailable
     case destinationExists(String)
+    case destinationMissing(String)
     case sourceChanged(String)
     case emptyExport
     case replaceVerificationFailed
+    case replacementConflict(keptAt: String)
+    case atomicSwapFailed(String)
+    case backupFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -74,13 +80,44 @@ enum MediaStorageError: LocalizedError, Equatable {
             "Application Support is unavailable."
         case let .destinationExists(name):
             "A file named “\(name)” already exists."
+        case let .destinationMissing(name):
+            "The file “\(name)” is missing."
         case let .sourceChanged(name):
             "“\(name)” changed on disk while it was being edited."
         case .emptyExport:
             "The export produced an empty file."
         case .replaceVerificationFailed:
-            "The replacement could not be verified; the backup was restored."
+            "The replacement could not be verified; no file was deleted."
+        case let .replacementConflict(path):
+            "The source changed while it was being replaced. The conflicting file was kept at “\(path)”."
+        case let .atomicSwapFailed(message):
+            "This volume cannot replace the file atomically: \(message)"
+        case let .backupFailed(message):
+            "The backup could not be saved: \(message)"
         }
+    }
+}
+
+/// Identity and timestamps of one file revision, read with `stat` so it cannot
+/// be served from the URL resource cache. A rename changes `ctime` while
+/// preserving `mtime`; an in-place write changes both.
+struct MediaFileSnapshot: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let size: Int64
+    let modifiedSeconds: Int64
+    let modifiedNanoseconds: Int64
+    let changedSeconds: Int64
+    let changedNanoseconds: Int64
+
+    /// The same file with the same bytes, ignoring the `ctime` update that a
+    /// rename itself performs.
+    func sameRevision(as other: MediaFileSnapshot) -> Bool {
+        device == other.device
+            && inode == other.inode
+            && size == other.size
+            && modifiedSeconds == other.modifiedSeconds
+            && modifiedNanoseconds == other.modifiedNanoseconds
     }
 }
 
@@ -220,26 +257,274 @@ enum MediaStorage {
         }
     }
 
-    /// Large exports must not copy on the main actor. The install itself is
-    /// still atomic; only its file I/O moves to a background task.
+    /// Copy through a hidden sibling off the main actor, then publish with a
+    /// synchronous rename. The destination never names a partial file.
     static func installAtomicallyAsync(
         from source: URL,
         to destination: URL,
         replacing: Bool
     ) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            try installAtomically(
-                from: source,
-                to: destination,
-                replacing: replacing
-            )
-        }.value
+        let staged = try await stageAtomicallyAsync(
+            from: source,
+            to: destination
+        )
+        do {
+            try Task.checkCancellation()
+            if FileManager.default.fileExists(atPath: destination.path) {
+                guard replacing else {
+                    throw MediaStorageError.destinationExists(
+                        destination.lastPathComponent
+                    )
+                }
+                _ = try FileManager.default.replaceItemAt(
+                    destination,
+                    withItemAt: staged,
+                    backupItemName: nil,
+                    options: []
+                )
+            } else {
+                guard !replacing else {
+                    throw MediaStorageError.destinationMissing(
+                        destination.lastPathComponent
+                    )
+                }
+                try FileManager.default.moveItem(
+                    at: staged,
+                    to: destination
+                )
+            }
+        } catch {
+            removeIfPresent(staged)
+            throw error
+        }
     }
 
-    static func copyItemAsync(from source: URL, to destination: URL) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            try FileManager.default.copyItem(at: source, to: destination)
-        }.value
+    /// Stage a complete copy next to the destination without publishing it.
+    /// Cancellation is observed before and after the copy; a cancelled stage
+    /// never leaves a hidden file behind.
+    static func stageAtomicallyAsync(
+        from source: URL,
+        to destination: URL
+    ) async throws -> URL {
+        let directory = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let hidden = directory.appendingPathComponent(
+            ".sonovo-\(UUID().uuidString).tmp"
+        )
+        do {
+            try await runFileTask {
+                try FileManager.default.copyItem(at: source, to: hidden)
+            }
+            return hidden
+        } catch {
+            removeIfPresent(hidden)
+            throw error
+        }
+    }
+
+    /// Atomically exchange two existing files. This is the compare-and-swap
+    /// primitive for replace-original: after the exchange, the old
+    /// destination is at `staged`, so a concurrent writer's bytes can be
+    /// detected and put back instead of being deleted.
+    @discardableResult
+    static func swapFiles(_ first: URL, _ second: URL) -> Bool {
+        let result = first.withUnsafeFileSystemRepresentation { firstPath in
+            second.withUnsafeFileSystemRepresentation { secondPath in
+                guard let firstPath, let secondPath else {
+                    errno = EINVAL
+                    return Int32(-1)
+                }
+                return renameatx_np(
+                    AT_FDCWD,
+                    firstPath,
+                    AT_FDCWD,
+                    secondPath,
+                    UInt32(RENAME_SWAP)
+                )
+            }
+        }
+        return result == 0
+    }
+
+    /// Streams a content fingerprint off the main actor. Raw media can be
+    /// large, so this is reserved for destructive replacement, where a
+    /// same-size/same-mtime in-place write must not be mistaken for the
+    /// source the user edited.
+    static func fingerprint(for url: URL) async throws -> String {
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            var hasher = SHA256()
+            while let data = try handle.read(upToCount: 1_048_576),
+                  !data.isEmpty {
+                try Task.checkCancellation()
+                hasher.update(data: data)
+            }
+            try Task.checkCancellation()
+            return hasher.finalize().map {
+                String(format: "%02x", $0)
+            }.joined()
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    static func commitStagedReplacement(
+        _ staged: URL,
+        to destination: URL,
+        expectedFingerprint: String,
+        expectedSize: Int64,
+        backupTo backup: URL,
+        fileManager: FileManager = .default,
+        swapping: @Sendable (URL, URL) -> Bool = { swapFiles($0, $1) }
+    ) async throws {
+        guard fileManager.fileExists(atPath: staged.path),
+              fileManager.fileExists(atPath: destination.path) else {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw MediaStorageError.destinationMissing(
+                destination.lastPathComponent
+            )
+        }
+        guard let exportBeforeSwap = snapshot(for: staged),
+              let sourceBeforeHash = snapshot(for: destination) else {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw MediaStorageError.replaceVerificationFailed
+        }
+
+        // Hash the current source before the exchange. All asynchronous work
+        // in this transaction happens here.
+        let currentFingerprint: String
+        do {
+            currentFingerprint = try await fingerprint(for: destination)
+        } catch {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw error
+        }
+        guard currentFingerprint == expectedFingerprint else {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw MediaStorageError.sourceChanged(
+                destination.lastPathComponent
+            )
+        }
+        // A save that lands while the hash runs can be read only partially, or
+        // missed after the reader passed that byte. Require the exact file and
+        // timestamps to be unchanged across the whole hash.
+        guard let sourceAfterHash = snapshot(for: destination),
+              sourceAfterHash == sourceBeforeHash,
+              let exportNow = snapshot(for: staged),
+              exportNow == exportBeforeSwap else {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw MediaStorageError.sourceChanged(
+                destination.lastPathComponent
+            )
+        }
+        // No suspension remains after this point: the exchange, validation and
+        // backup are synchronous. Honour cancellation before touching the
+        // source, but never interrupt the commit once it has happened.
+        do {
+            try Task.checkCancellation()
+        } catch {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw error
+        }
+        guard swapping(staged, destination) else {
+            removeIfPresent(staged, fileManager: fileManager)
+            throw MediaStorageError.atomicSwapFailed(
+                String(cString: strerror(errno))
+            )
+        }
+
+        let destinationAfterSwap = snapshot(for: destination)
+        let displaced = snapshot(for: staged)
+        let destinationIsOurExport = destinationAfterSwap.map {
+            $0.sameRevision(as: exportBeforeSwap)
+        } ?? false
+        let displacedIsHashedSource = displaced.map {
+            $0.sameRevision(as: sourceAfterHash)
+        } ?? false
+
+        if destinationIsOurExport, displacedIsHashedSource {
+            do {
+                try fileManager.moveItem(at: staged, to: backup)
+            } catch {
+                throw MediaStorageError.backupFailed(
+                    "\(error.localizedDescription). The previous file was left at “\(staged.path)”."
+                )
+            }
+            // The caller's expected size and the staged export disagree: the
+            // exchange is intact, so keep both files and fail the operation.
+            guard expectedSize == exportBeforeSwap.size else {
+                throw MediaStorageError.replaceVerificationFailed
+            }
+            guard snapshot(for: destination)?.sameRevision(
+                as: exportBeforeSwap
+            ) == true else {
+                throw MediaStorageError.sourceChanged(
+                    destination.lastPathComponent
+                )
+            }
+            return
+        }
+
+        // A save landed between the stability check and the exchange, or the
+        // destination changed after the exchange. Restore the displaced file
+        // only while the destination is provably still our export. Anything
+        // this transaction cannot identify is preserved, never deleted.
+        if destinationIsOurExport {
+            if swapping(staged, destination) {
+                if let restored = snapshot(for: staged),
+                   restored.sameRevision(as: exportBeforeSwap) {
+                    removeIfPresent(staged, fileManager: fileManager)
+                    throw MediaStorageError.sourceChanged(
+                        destination.lastPathComponent
+                    )
+                }
+                do {
+                    try fileManager.moveItem(at: staged, to: backup)
+                } catch {
+                    throw MediaStorageError.backupFailed(
+                        "\(error.localizedDescription). The conflicting file was left at “\(staged.path)”."
+                    )
+                }
+                throw MediaStorageError.replacementConflict(
+                    keptAt: backup.path
+                )
+            }
+        }
+        // The destination is not ours, or the restore failed. Preserve the
+        // displaced bytes; never delete a file this transaction did not make.
+        do {
+            try fileManager.moveItem(at: staged, to: backup)
+        } catch {
+            throw MediaStorageError.backupFailed(
+                "\(error.localizedDescription). The conflicting file was left at “\(staged.path)”."
+            )
+        }
+        throw MediaStorageError.replacementConflict(keptAt: backup.path)
+    }
+
+    /// Detached file work does not inherit cancellation. Bridge it explicitly
+    /// and leave the final commit to the caller after the last check.
+    private static func runFileTask(
+        _ body: @escaping @Sendable () throws -> Void
+    ) async throws {
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            try body()
+            try Task.checkCancellation()
+        }
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     static func revision(for url: URL) -> AssetRevision? {
@@ -262,10 +547,22 @@ enum MediaStorage {
     }
 
     /// Compares the identity the editor opened against the file on disk.
-    /// File identifiers differ between scanner and sample-built assets, so
-    /// the contract is size plus modification time.
+    /// Resource identifiers catch same-size/same-mtime replacements; size and
+    /// modification time remain the fallback when an identifier is absent.
     static func matches(_ expected: AssetRevision, url: URL) -> Bool {
         guard let current = revision(for: url) else { return false }
+        return matches(expected, revision: current)
+    }
+
+    static func matches(
+        _ expected: AssetRevision,
+        revision current: AssetRevision
+    ) -> Bool {
+        if let expectedID = expected.fileIdentifier,
+           let currentID = current.fileIdentifier,
+           expectedID != currentID {
+            return false
+        }
         guard expected.size == current.size else { return false }
         guard let expectedDate = expected.modified,
               let currentDate = current.modified else {
@@ -274,9 +571,34 @@ enum MediaStorage {
         return abs(expectedDate.timeIntervalSince(currentDate)) < 0.001
     }
 
+    /// Fresh identity and timestamps from `stat`. URL resource values can lag
+    /// behind a rename/swap, so the atomic commit uses this instead.
+    static func snapshot(for url: URL) -> MediaFileSnapshot? {
+        var info = stat()
+        let result = url.withUnsafeFileSystemRepresentation {
+            path -> Int32 in
+            guard let path else { return Int32(-1) }
+            return stat(path, &info)
+        }
+        guard result == 0 else { return nil }
+        return MediaFileSnapshot(
+            device: UInt64(info.st_dev),
+            inode: UInt64(info.st_ino),
+            size: Int64(info.st_size),
+            modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
+            modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+            changedSeconds: Int64(info.st_ctimespec.tv_sec),
+            changedNanoseconds: Int64(info.st_ctimespec.tv_nsec)
+        )
+    }
+
     static func fileSize(for url: URL) -> Int64 {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
-            .map(Int64.init) ?? 0
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        ), let size = attributes[.size] as? NSNumber else {
+            return 0
+        }
+        return size.int64Value
     }
 
     static func removeIfPresent(

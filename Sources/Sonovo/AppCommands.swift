@@ -65,7 +65,7 @@ struct MediaCommands: Commands {
             Button("Reset Edit") {
                 state.resetMediaEdit()
             }
-            .disabled(state.activeMediaEditDocument?.canReset != true)
+            .disabled(!state.canResetMediaEdit)
 
             Divider()
 

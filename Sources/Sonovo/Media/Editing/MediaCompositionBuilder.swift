@@ -28,6 +28,7 @@ struct MediaCompositionBuild {
     let hasAudio: Bool
     let duration: Double
     let audioChannelCount: Int?
+    let audioTrackCount: Int
 }
 
 /// Builds the preview and export asset from the kept source ranges. One
@@ -107,11 +108,19 @@ enum MediaCompositionBuilder {
                         seconds: effectiveEnd - effectiveStart,
                         preferredTimescale: MediaEditLimits.timescale
                     )
+                    // A track that begins after the asset timeline keeps its
+                    // offset. Inserting everything at `cursor` would shift a
+                    // late audio track onto time zero and break A/V sync.
+                    let offset = effectiveStart - range.start
+                    let insertAt = cursor + CMTime(
+                        seconds: offset,
+                        preferredTimescale: MediaEditLimits.timescale
+                    )
                     do {
                         try compositionTrack.insertTimeRange(
                             CMTimeRange(start: start, duration: duration),
                             of: sourceTrack,
-                            at: cursor
+                            at: insertAt
                         )
                     } catch {
                         throw MediaCompositionError.rangeOutsideTrack
@@ -132,7 +141,8 @@ enum MediaCompositionBuilder {
             hasVideo: !(videoTracks ?? []).isEmpty,
             hasAudio: !(audioTracks ?? []).isEmpty,
             duration: composition.duration.seconds,
-            audioChannelCount: audioChannelCount
+            audioChannelCount: audioChannelCount,
+            audioTrackCount: audioTracks?.count ?? 0
         )
     }
 }

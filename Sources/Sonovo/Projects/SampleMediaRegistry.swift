@@ -53,12 +53,19 @@ final class SampleMediaRegistry {
         guard url.deletingLastPathComponent().standardizedFileURL
                 == directory.standardizedFileURL,
               let values = try? url.resourceValues(
-                  forKeys: [.fileSizeKey, .contentModificationDateKey]
+                  forKeys: [
+                      .fileSizeKey,
+                      .contentModificationDateKey,
+                      .fileResourceIdentifierKey
+                  ]
               ) else {
             return nil
         }
         let size = Int64(values.fileSize ?? 0)
         let modified = values.contentModificationDate
+        let identifier = values.fileResourceIdentifier.map {
+            String(describing: $0)
+        }
         let name = url.lastPathComponent
         return ProjectAsset(
             id: "recording-\(name)",
@@ -69,9 +76,9 @@ final class SampleMediaRegistry {
             size: size,
             modified: modified,
             revision: AssetRevision(
-                fileIdentifier: nil,
+                fileIdentifier: identifier,
                 size: size,
-                modified: modified
+                modified: modified,
             )
         )
     }

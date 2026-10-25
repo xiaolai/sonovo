@@ -2,6 +2,13 @@ import Foundation
 import Observation
 import SonovoCore
 
+/// A replace-original request is addressed to one project document. Retained
+/// editors for other projects must not consume it through a shared boolean.
+struct MediaReplaceRequest: Equatable, Sendable {
+    let projectID: String
+    let documentID: String
+}
+
 /// One non-destructive edit session for one source path. It owns the edit
 /// decision and its undo history, not the file and not the player: switching
 /// tabs may release the decoder, but the kept ranges and selection survive
