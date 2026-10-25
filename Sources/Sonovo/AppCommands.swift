@@ -292,6 +292,45 @@ struct Model3DCommands: Commands {
     }
 }
 
+/// Project timeline commands. The timeline stays optional: it never replaces
+/// source playback for ordinary media tabs.
+@MainActor
+struct TimelineCommands: Commands {
+    @Bindable var state: AppState
+
+    private var timeline: TimelineDocument? {
+        state.liveProject.timelines.document
+    }
+
+    var body: some Commands {
+        CommandMenu("Timeline") {
+            Button("New Timeline") {
+                state.newTimeline()
+            }
+            .disabled(state.liveProject.isDemo)
+            Divider()
+            Button("Save Timeline") {
+                state.liveProject.timelines.save()
+            }
+            .keyboardShortcut("s", modifiers: [.command, .option])
+            .disabled(timeline?.hasUnsavedChanges != true)
+            Button("Undo Timeline Edit") {
+                _ = timeline?.undo()
+            }
+            .keyboardShortcut("z", modifiers: [.command, .option])
+            .disabled(timeline?.canUndo != true)
+            Button("Redo Timeline Edit") {
+                _ = timeline?.redo()
+            }
+            .keyboardShortcut(
+                "z",
+                modifiers: [.command, .option, .shift]
+            )
+            .disabled(timeline?.canRedo != true)
+        }
+    }
+}
+
 /// Embedded terminal commands.
 @MainActor
 struct TerminalCommands: Commands {

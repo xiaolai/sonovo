@@ -2,149 +2,387 @@ import CoreMedia
 import Foundation
 import SwiftUI
 
-/// B1's timeline document surface: identity, save state, and the three
-/// frozen tracks. B2 replaces the track list with the interactive workspace.
+/// B2's project timeline surface. The ruler, tracks, clips, and playhead all
+/// read the same document; drag and trim commit one undoable edit.
 struct TimelineDocumentView: View {
     let workspace: TimelineWorkspace
     let assets: [ProjectAsset]
+    let selectedAsset: ProjectAsset?
+
+    @State private var selectedClipID: String?
+    @State private var playhead = CMTime.zero
+    @State private var pixelsPerSecond = AppTheme.Size.timelinePixelsPerSecond
+    @State private var editError: String?
+    @State private var dragClipID: String?
+    @State private var dragOrigin = CMTime.zero
+    @State private var dragDelta: CGFloat = AppTheme.Spacing.zero
+
+    private var document: TimelineDocument? { workspace.document }
+
+    private var currentTimeline: ProjectTimeline? {
+        document?.timeline
+    }
 
     var body: some View {
-        Group {
-            if let document = workspace.document,
-               let timeline = document.timeline {
-                content(document: document, timeline: timeline)
-            } else if let message = workspace.lastError
-                ?? workspace.document?.errorMessage {
-                errorContent(message)
+        VStack(spacing: AppTheme.Spacing.zero) {
+            toolbar
+            Divider()
+            if let timeline = currentTimeline {
+                timelineContent(timeline)
             } else {
-                EmptyEditorView()
+                errorContent(
+                    workspace.lastError
+                        ?? document?.errorMessage
+                        ?? "No timeline is open."
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onDeleteCommand {
+            deleteSelected()
+        }
     }
 
-    private func content(
-        document: TimelineDocument,
-        timeline: ProjectTimeline
-    ) -> some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.lg) {
-            header(document: document, timeline: timeline)
+    private var toolbar: some View {
+        HStack(spacing: AppTheme.Spacing.sm) {
+            Button {
+                workspace.save()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .help("Save timeline")
+            .disabled(document?.hasUnsavedChanges != true)
+
+            Button {
+                _ = document?.undo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .help("Undo")
+            .disabled(document?.canUndo != true)
+
+            Button {
+                _ = document?.redo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .help("Redo")
+            .disabled(document?.canRedo != true)
+
             Divider()
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.md) {
-                ForEach(timeline.tracks, id: \.0) { track in
-                    trackRow(kind: track.0, clips: track.1)
+                .frame(height: AppTheme.Size.toolbarDividerHeight)
+
+            Button {
+                splitSelected()
+            } label: {
+                Image(systemName: "scissors")
+            }
+            .help("Split the selected clip at the playhead")
+            .disabled(selectedClipID == nil)
+
+            Button {
+                deleteSelected()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .help("Delete the selected clip")
+            .disabled(selectedClipID == nil)
+
+            addMenu
+
+            Divider()
+                .frame(height: AppTheme.Size.toolbarDividerHeight)
+
+            Button {
+                zoom(by: 1 / AppTheme.Size.timelineZoomFactor)
+            } label: {
+                Image(systemName: "minus.magnifyingglass")
+            }
+            .help("Zoom out")
+            Button {
+                zoom(by: AppTheme.Size.timelineZoomFactor)
+            } label: {
+                Image(systemName: "plus.magnifyingglass")
+            }
+            .help("Zoom in")
+
+            Spacer()
+
+            if let editError {
+                Text(editError)
+                    .font(.system(size: AppTheme.TypeScale.xs))
+                    .foregroundStyle(AppTheme.Palette.error)
+            } else {
+                statusLabel
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, AppTheme.Spacing.md)
+        .padding(.vertical, AppTheme.Spacing.sm)
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if let document {
+            switch document.status {
+            case .idle:
+                if document.hasUnsavedChanges {
+                    Text("Unsaved")
+                        .foregroundStyle(.secondary)
+                }
+            case .loading:
+                Text("Loading…")
+                    .foregroundStyle(.secondary)
+            case .saving:
+                Text("Saving…")
+                    .foregroundStyle(.secondary)
+            case .saved:
+                Text("Saved")
+                    .foregroundStyle(.secondary)
+            case let .failed(message):
+                Text(message)
+                    .foregroundStyle(AppTheme.Palette.error)
+            }
+        }
+    }
+
+    private var addMenu: some View {
+        Menu {
+            Button("Voice Track") {
+                addSelectedAsset(to: .voice)
+            }
+            Button("Music Track") {
+                addSelectedAsset(to: .music)
+            }
+            Button("Video Track") {
+                addSelectedAsset(to: .video)
+            }
+        } label: {
+            Image(systemName: "plus.rectangle.on.rectangle")
+        }
+        .help("Add the selected project asset at the playhead")
+        .disabled(selectedAsset == nil)
+    }
+
+    private func timelineContent(_ timeline: ProjectTimeline) -> some View {
+        GeometryReader { proxy in
+            let seconds = max(
+                timeline.duration.seconds,
+                AppTheme.Size.timelineMinimumSeconds
+            )
+            let laneWidth = CGFloat(seconds) * pixelsPerSecond
+            let contentWidth = AppTheme.Size.metadataLabelWidth + laneWidth
+            ScrollView([.horizontal]) {
+                ZStack(alignment: .topLeading) {
+                    VStack(spacing: AppTheme.Spacing.zero) {
+                        ruler(seconds: seconds, laneWidth: laneWidth)
+                        ForEach(TimelineTrackKind.allCases, id: \.self) { kind in
+                            trackRow(
+                                kind: kind,
+                                clips: timeline.clips(for: kind),
+                                laneWidth: laneWidth
+                            )
+                        }
+                    }
+                    Rectangle()
+                        .fill(AppTheme.Palette.selection)
+                        .frame(
+                            width: AppTheme.Size.timelinePlayheadWidth,
+                            height: AppTheme.Size.timelineRulerHeight
+                                + AppTheme.Size.timelineTrackHeight
+                                * CGFloat(TimelineTrackKind.allCases.count)
+                        )
+                        .offset(
+                            x: AppTheme.Size.metadataLabelWidth
+                                + CGFloat(playhead.seconds) * pixelsPerSecond
+                        )
+                        .allowsHitTesting(false)
+                }
+                .frame(
+                    width: max(contentWidth, proxy.size.width),
+                    alignment: .leading
+                )
+            }
+        }
+    }
+
+    private func ruler(seconds: Double, laneWidth: CGFloat) -> some View {
+        HStack(spacing: AppTheme.Spacing.zero) {
+            Color.clear
+                .frame(width: AppTheme.Size.metadataLabelWidth)
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(AppTheme.Palette.card)
+                // token-exempt: one-second ruler steps are content spacing
+                let steps = Int(ceil(seconds / AppTheme.Size.timelineRulerStepSeconds))
+                ForEach(0...steps, id: \.self) { step in
+                    let value = Double(step)
+                        * AppTheme.Size.timelineRulerStepSeconds
+                    Text(timeLabel(value))
+                        .font(.system(size: AppTheme.TypeScale.xxs))
+                        .foregroundStyle(.secondary)
+                        .offset(
+                            x: CGFloat(step)
+                                * CGFloat(AppTheme.Size.timelineRulerStepSeconds)
+                                * pixelsPerSecond
+                                + AppTheme.Spacing.xs
+                        )
                 }
             }
-            sourceIssues(timeline.sourceIssues(assets: assets))
-            Spacer(minLength: AppTheme.Spacing.zero)
-            footer(document: document)
+            .frame(width: laneWidth, height: AppTheme.Size.timelineRulerHeight)
+            .contentShape(Rectangle())
+            .gesture(
+                SpatialTapGesture()
+                    .onEnded { value in
+                        playhead = time(value.location.x / pixelsPerSecond)
+                    }
+            )
         }
-        .padding(AppTheme.Spacing.xl)
-    }
-
-    private func header(
-        document: TimelineDocument,
-        timeline: ProjectTimeline
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: AppTheme.Spacing.md) {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
-                Text(timeline.name)
-                    .font(.system(size: AppTheme.TypeScale.hero, weight: .semibold))
-                Text(document.url.lastPathComponent)
-                    .font(.system(size: AppTheme.TypeScale.sm))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Save") {
-                workspace.save()
-            }
-            .disabled(!document.hasUnsavedChanges)
-            Button("Undo") {
-                _ = document.undo()
-            }
-            .disabled(!document.canUndo)
-            Button("Redo") {
-                _ = document.redo()
-            }
-            .disabled(!document.canRedo)
-        }
+        .frame(height: AppTheme.Size.timelineRulerHeight)
     }
 
     private func trackRow(
         kind: TimelineTrackKind,
-        clips: [TimelineClip]
+        clips: [TimelineClip],
+        laneWidth: CGFloat
     ) -> some View {
-        HStack(spacing: AppTheme.Spacing.md) {
+        HStack(spacing: AppTheme.Spacing.zero) {
             Text(kind.displayName)
-                .font(.system(size: AppTheme.TypeScale.body, weight: .medium))
+                .font(.system(size: AppTheme.TypeScale.sm, weight: .medium))
+                .foregroundStyle(.secondary)
                 .frame(
                     width: AppTheme.Size.metadataLabelWidth,
                     alignment: .leading
                 )
-            Text(clipSummary(clips))
-                .font(.system(size: AppTheme.TypeScale.sm))
-                .foregroundStyle(.secondary)
-            Spacer()
+                .padding(.leading, AppTheme.Spacing.sm)
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(AppTheme.Palette.card)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        SpatialTapGesture()
+                            .onEnded { value in
+                                selectedClipID = nil
+                                playhead = time(
+                                    value.location.x / pixelsPerSecond
+                                )
+                            }
+                    )
+                ForEach(clips) { clip in
+                    clipView(clip, kind: kind)
+                }
+            }
+            .frame(width: laneWidth, height: AppTheme.Size.timelineTrackHeight)
+            .dropDestination(for: String.self) { identifiers, location in
+                guard let identifier = identifiers.first,
+                      let asset = assets.first(
+                          where: { $0.id == identifier }
+                      ) else {
+                    return false
+                }
+                add(
+                    asset: asset,
+                    to: kind,
+                    at: time(location.x / pixelsPerSecond)
+                )
+                return true
+            }
         }
-        .padding(.vertical, AppTheme.Spacing.sm)
-        .padding(.horizontal, AppTheme.Spacing.md)
-        .background(
-            AppTheme.Palette.card,
-            in: RoundedRectangle(cornerRadius: AppTheme.Radius.panel)
+        .frame(height: AppTheme.Size.timelineTrackHeight)
+    }
+
+    private func clipView(
+        _ clip: TimelineClip,
+        kind: TimelineTrackKind
+    ) -> some View {
+        let width = max(
+            CGFloat(clip.sourceDuration.seconds) * pixelsPerSecond,
+            AppTheme.Size.timelineClipMinWidth
         )
-    }
-
-    @ViewBuilder
-    private func sourceIssues(_ issues: [TimelineSourceIssue]) -> some View {
-        if !issues.isEmpty {
-            VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
-                Text("Source problems")
-                    .font(.system(size: AppTheme.TypeScale.body, weight: .semibold))
-                ForEach(issues) { issue in
-                    Text(issue.message)
-                        .font(.system(size: AppTheme.TypeScale.sm))
-                        .foregroundStyle(AppTheme.Palette.warning)
-                }
-            }
-            .padding(AppTheme.Spacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                AppTheme.Palette.card,
-                in: RoundedRectangle(cornerRadius: AppTheme.Radius.panel)
+        let isSelected = selectedClipID == clip.id
+        let offset = isSelected && dragClipID == clip.id
+            ? CGFloat(dragOrigin.seconds) * pixelsPerSecond + dragDelta
+            : CGFloat(clip.timelineStart.seconds) * pixelsPerSecond
+        return RoundedRectangle(cornerRadius: AppTheme.Radius.control)
+            .fill(
+                isSelected
+                    ? AppTheme.Palette.selection.opacity(AppTheme.Opacity.tint)
+                    : AppTheme.Palette.cueTracks[
+                        TimelineTrackKind.allCases.firstIndex(of: kind) ?? 0
+                    ].opacity(AppTheme.Opacity.faint)
             )
-        }
+            .overlay(alignment: .leading) {
+                Text(clip.relativePath)
+                    .font(.system(size: AppTheme.TypeScale.xxs, weight: .medium))
+                    .lineLimit(1)
+                    .padding(.horizontal, AppTheme.Spacing.xs)
+            }
+            .overlay(alignment: .leading) {
+                trimHandle(clip: clip, leading: true)
+            }
+            .overlay(alignment: .trailing) {
+                trimHandle(clip: clip, leading: false)
+            }
+            .frame(
+                width: width,
+                height: AppTheme.Size.timelineClipHeight
+            )
+            .offset(x: offset, y: AppTheme.Spacing.s10)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                selectedClipID = clip.id
+                playhead = clip.timelineStart.cmTime
+            }
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        if dragClipID != clip.id {
+                            dragClipID = clip.id
+                            dragOrigin = clip.timelineStart.cmTime
+                        }
+                        dragDelta = value.translation.width
+                    }
+                    .onEnded { value in
+                        let proposed = dragOrigin
+                            + seconds(value.translation.width / pixelsPerSecond)
+                        commitMove(clipID: clip.id, to: snapTime(proposed))
+                        dragClipID = nil
+                        dragOrigin = .zero
+                        dragDelta = AppTheme.Spacing.zero
+                    }
+            )
     }
 
-    private func footer(document: TimelineDocument) -> some View {
-        HStack(spacing: AppTheme.Spacing.sm) {
-            statusLabel(document: document)
-            Spacer()
-            if document.errorMessage != nil {
-                Button("Reload") {
-                    workspace.reload()
-                }
-            }
-        }
-        .font(.system(size: AppTheme.TypeScale.sm))
-    }
-
-    @ViewBuilder
-    private func statusLabel(document: TimelineDocument) -> some View {
-        switch document.status {
-        case .idle:
-            if document.hasUnsavedChanges {
-                Text("Unsaved changes")
-            }
-        case .loading:
-            Text("Loading…")
-        case .saving:
-            Text("Saving…")
-        case .saved:
-            Text("Saved")
-        case let .failed(message):
-            Text(message)
-                .foregroundStyle(AppTheme.Palette.error)
-        }
+    private func trimHandle(
+        clip: TimelineClip,
+        leading: Bool
+    ) -> some View {
+        Rectangle()
+            .fill(AppTheme.Palette.selection)
+            .frame(width: AppTheme.Size.timelineTrimHandleWidth)
+            .opacity(
+                selectedClipID == clip.id
+                    ? AppTheme.Opacity.tint
+                    : AppTheme.Opacity.zero
+            )
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onEnded { value in
+                        let delta = seconds(
+                            value.translation.width / pixelsPerSecond
+                        )
+                        let base = leading
+                            ? clip.timelineStart.cmTime
+                            : clip.timelineEnd
+                        let target = snapTime(base + delta)
+                        commitTrim(
+                            clipID: clip.id,
+                            leading: leading,
+                            to: target
+                        )
+                    }
+            )
     }
 
     private func errorContent(_ message: String) -> some View {
@@ -162,20 +400,129 @@ struct TimelineDocumentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func clipSummary(_ clips: [TimelineClip]) -> String {
-        let count = clips.count
-        if count == 0 {
-            return "No clips"
-        }
-        let total = clips.reduce(CMTime.zero) { result, clip in
-            result + clip.sourceDuration.cmTime
-        }
-        return "\(count) clip\(count == 1 ? "" : "s") · \(timeText(total))"
+    private func addSelectedAsset(to kind: TimelineTrackKind) {
+        guard let selectedAsset else { return }
+        add(asset: selectedAsset, to: kind, at: playhead)
     }
 
-    private func timeText(_ time: CMTime) -> String {
-        let seconds = max(time.seconds, 0)
-        let whole = Int(seconds)
+    private func add(
+        asset: ProjectAsset,
+        to kind: TimelineTrackKind,
+        at start: CMTime
+    ) {
+        Task { @MainActor in
+            do {
+                let duration = try await TimelineAssetProbe.duration(for: asset)
+                try document?.mutate { timeline in
+                    try timeline.addClip(
+                        asset: asset,
+                        track: kind,
+                        at: start,
+                        duration: duration
+                    )
+                }
+                editError = nil
+            } catch {
+                editError = error.localizedDescription
+            }
+        }
+    }
+
+    private func commitMove(clipID: String, to time: CMTime) {
+        do {
+            try document?.mutate { timeline in
+                try timeline.moveClip(id: clipID, to: time)
+            }
+            editError = nil
+        } catch {
+            editError = error.localizedDescription
+        }
+    }
+
+    private func commitTrim(
+        clipID: String,
+        leading: Bool,
+        to time: CMTime
+    ) {
+        do {
+            try document?.mutate { timeline in
+                if leading {
+                    try timeline.trimStart(id: clipID, to: time)
+                } else {
+                    try timeline.trimEnd(id: clipID, to: time)
+                }
+            }
+            editError = nil
+        } catch {
+            editError = error.localizedDescription
+        }
+    }
+
+    private func splitSelected() {
+        guard let selectedClipID else { return }
+        do {
+            try document?.mutate { timeline in
+                _ = try timeline.splitClip(
+                    id: selectedClipID,
+                    at: playhead
+                )
+            }
+            editError = nil
+        } catch {
+            editError = error.localizedDescription
+        }
+    }
+
+    private func deleteSelected() {
+        guard let selectedClipID else { return }
+        do {
+            try document?.mutate { timeline in
+                try timeline.deleteClip(id: selectedClipID)
+            }
+            self.selectedClipID = nil
+            editError = nil
+        } catch {
+            editError = error.localizedDescription
+        }
+    }
+
+    private func zoom(by factor: Double) {
+        pixelsPerSecond = min(
+            max(
+                pixelsPerSecond * factor,
+                AppTheme.Size.timelineMinimumPixelsPerSecond
+            ),
+            AppTheme.Size.timelineMaximumPixelsPerSecond
+        )
+    }
+
+    private func snapTime(_ time: CMTime) -> CMTime {
+        guard let timeline = currentTimeline else { return time }
+        var candidates = timeline.allClips.flatMap {
+            [$0.timelineStart.cmTime, $0.timelineEnd]
+        }
+        candidates.append(playhead)
+        candidates.append(.zero)
+        return timeline.snap(
+            time,
+            candidates: candidates,
+            tolerance: seconds(AppTheme.Spacing.s10 / pixelsPerSecond)
+        )
+    }
+
+    private func time(_ seconds: Double) -> CMTime {
+        CMTime(seconds: max(seconds, 0), preferredTimescale: 600_000)
+    }
+
+    private func seconds(_ pixels: CGFloat) -> CMTime {
+        CMTime(
+            seconds: Double(pixels) / pixelsPerSecond,
+            preferredTimescale: 600_000
+        )
+    }
+
+    private func timeLabel(_ seconds: Double) -> String {
+        let whole = Int(max(seconds, 0))
         let minutes = whole / 60
         let remainder = whole % 60
         return String(format: "%d:%02d", minutes, remainder)

@@ -43,7 +43,8 @@ struct EditorContentView: View {
         case .timeline:
             TimelineDocumentView(
                 workspace: project.timelines,
-                assets: project.assets
+                assets: project.assets,
+                selectedAsset: project.selectedAsset
             )
         case .document, .image, .archive, .other:
             EmptyEditorView()
@@ -64,7 +65,8 @@ struct EditorContentView: View {
         case .timeline:
             TimelineDocumentView(
                 workspace: project.timelines,
-                assets: project.assets
+                assets: project.assets,
+                selectedAsset: project.selectedAsset
             )
         case .audio, .video:
             if let asset = project.selectedAsset {

@@ -24,7 +24,7 @@ struct TimelineTimeDTO: Codable, Hashable, Sendable, Equatable {
     var seconds: Double { cmTime.seconds }
 }
 
-enum TimelineTrackKind: String, Codable, Sendable, CaseIterable {
+enum TimelineTrackKind: String, Codable, Sendable, Hashable, CaseIterable {
     case video
     case voice
     case music

@@ -40,6 +40,7 @@ struct SonovoApp: App {
             SubtitleCommands(state: state)
             Model3DCommands(state: state)
             MediaCommands(state: state)
+            TimelineCommands(state: state)
             TerminalCommands(state: state)
             ProjectCommands(state: state)
         }

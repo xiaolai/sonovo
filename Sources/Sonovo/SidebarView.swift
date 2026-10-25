@@ -579,6 +579,12 @@ private struct FileTreeNodeRow: View {
                 }
             }
             .help(node.assetID == nil ? node.name : "Open \(node.name)")
+            .onDrag {
+                guard let assetID = node.assetID else {
+                    return NSItemProvider()
+                }
+                return NSItemProvider(object: assetID as NSString)
+            }
 
             if isExpanded, let children = node.children {
                 ForEach(children) { child in

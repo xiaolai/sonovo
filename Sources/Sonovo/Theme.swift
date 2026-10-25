@@ -513,6 +513,20 @@ enum AppTheme {
         static let mediaTimelineThumbnailTileWidth: CGFloat = 72
         static let mediaSilencePopoverWidth: CGFloat = 320
         static let mediaTranscriptPaneWidth: CGFloat = 360
+        /// Project timeline geometry. Pixels per second is a content zoom,
+        /// not a chrome dimension, but it is shared by the ruler and clips.
+        static let timelineRulerHeight: CGFloat = 24
+        static let timelineTrackHeight: CGFloat = 72
+        static let timelineClipHeight: CGFloat = 52
+        static let timelineClipMinWidth: CGFloat = 6
+        static let timelinePixelsPerSecond: Double = 80
+        static let timelineMinimumPixelsPerSecond: Double = 20
+        static let timelineMaximumPixelsPerSecond: Double = 400
+        static let timelineMinimumSeconds: Double = 10
+        static let timelineRulerStepSeconds: Double = 1
+        static let timelineZoomFactor: Double = 1.5
+        static let timelinePlayheadWidth: CGFloat = 1
+        static let timelineTrimHandleWidth: CGFloat = 8
         static let letterBadge: CGFloat = 17
         static let thumbnailWidth: CGFloat = 116
         static let thumbnailHeight: CGFloat = 65

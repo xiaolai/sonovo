@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Observation
@@ -791,6 +792,52 @@ final class AppState {
 
     func showModel3DWorkspace() {
         showWorkspace(.model3d, demoAssetID: "model-3d")
+    }
+
+    /// Creates a visible timeline document in a folder project, waits for the
+    /// scan to index it, and opens it. The file is written before the scan so
+    /// the tab names a real asset rather than a synthetic workspace.
+    func newTimeline() {
+        let project = liveProject
+        guard !project.isDemo, let root = project.root else { return }
+        let base = "Untitled"
+        var url = root.appendingPathComponent("\(base).timeline.json")
+        var index = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = root.appendingPathComponent(
+                "\(base) \(index).timeline.json"
+            )
+            index += 1
+        }
+        let timeline = ProjectTimeline(name: base)
+        do {
+            try TimelineFileStore(url: url).save(timeline)
+        } catch {
+            presentTimelineError(error)
+            return
+        }
+        Task { @MainActor [weak self] in
+            await project.refreshNow()
+            guard let self else { return }
+            if let asset = project.assets.first(where: {
+                MarkdownSecurity.canonical($0.url)
+                    == MarkdownSecurity.canonical(url)
+            }) {
+                project.openAsset(asset)
+            } else {
+                self.presentTimelineError(
+                    CocoaError(.fileReadNoSuchFile)
+                )
+            }
+        }
+    }
+
+    private func presentTimelineError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not create the timeline"
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     private func showWorkspace(_ kind: AssetKind, demoAssetID: String) {
