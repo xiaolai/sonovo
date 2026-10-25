@@ -57,6 +57,20 @@ struct MainWindow: View {
         .navigationTitle(state.windowTitle)
         .navigationSubtitle(state.activityText)
         .alert(
+            state.appAlert?.title ?? "",
+            isPresented: Binding(
+                get: { state.appAlert != nil },
+                set: { if !$0 { state.appAlert = nil } }
+            ),
+            presenting: state.appAlert
+        ) { _ in
+            Button("OK", role: .cancel) {
+                state.appAlert = nil
+            }
+        } message: { alert in
+            Text(alert.message)
+        }
+        .alert(
             "Unsaved Changes",
             isPresented: Binding(
                 get: { state.hasPendingCloseDecision },

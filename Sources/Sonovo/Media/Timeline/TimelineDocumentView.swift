@@ -1,4 +1,3 @@
-import AppKit
 import CoreMedia
 import Foundation
 import SonovoCore
@@ -32,6 +31,8 @@ struct TimelineDocumentView: View {
     @State private var recheckTask: Task<Void, Never>?
     @State private var recheckGeneration: UInt64 = 0
     @State private var previewFailed = false
+    @State private var relinkIssue: TimelineSourceIssue?
+    @State private var showingRelinkImporter = false
 
     private var document: TimelineDocument? { workspace.document }
 
@@ -80,6 +81,19 @@ struct TimelineDocumentView: View {
                 previewTask?.cancel()
                 playback.pause()
             }
+        }
+        .fileImporter(
+            isPresented: $showingRelinkImporter,
+            allowedContentTypes: relinkContentTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            guard let issue = relinkIssue else { return }
+            relinkIssue = nil
+            guard case let .success(urls) = result,
+                  let url = urls.first else {
+                return
+            }
+            performRelink(issue, url: url)
         }
         .onChange(of: playback.elapsed) { _, seconds in
             if playback.isPlaying {
@@ -370,7 +384,8 @@ struct TimelineDocumentView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("Relink…") {
-                        relink(issue)
+                        relinkIssue = issue
+                        showingRelinkImporter = true
                     }
                     .font(.system(size: AppTheme.TypeScale.xs))
                 }
@@ -697,19 +712,16 @@ struct TimelineDocumentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func relink(_ issue: TimelineSourceIssue) {
+    private var relinkContentTypes: [UTType] {
+        relinkIssue?.track == .video ? [.movie, .video] : [.audio]
+    }
+
+    private func performRelink(
+        _ issue: TimelineSourceIssue,
+        url: URL
+    ) {
         guard let root = project.root, let document else { return }
         let targetDocument = document
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = root
-        panel.allowedContentTypes = issue.track == .video
-            ? [.movie, .video]
-            : [.audio]
-        guard panel.runModal() == .OK, let url = panel.url else {
-            return
-        }
         Task { @MainActor in
             await project.refreshNow()
             guard MarkdownSecurity.canonical(url).path

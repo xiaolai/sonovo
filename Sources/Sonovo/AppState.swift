@@ -40,6 +40,12 @@ enum AppStateRegistry {
     static weak var active: AppState?
 }
 
+struct AppAlert: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -52,6 +58,7 @@ final class AppState {
     let sessionsWindow: TmuxSessionsWindowModel
     private(set) var cleanupScheduler: TmuxCleanupScheduler?
 
+    var appAlert: AppAlert?
     var navigatorMode: NavigatorMode = .production
     var columnVisibility: NavigationSplitViewVisibility = .all
     private var storedEditorMode: EditorMode = .player
@@ -833,11 +840,10 @@ final class AppState {
     }
 
     private func presentTimelineError(_ error: Error) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Could not create the timeline"
-        alert.informativeText = error.localizedDescription
-        alert.runModal()
+        appAlert = AppAlert(
+            title: "Could not create the timeline",
+            message: error.localizedDescription
+        )
     }
 
     private func showWorkspace(_ kind: AssetKind, demoAssetID: String) {

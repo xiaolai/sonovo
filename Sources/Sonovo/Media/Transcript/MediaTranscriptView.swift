@@ -13,6 +13,9 @@ struct MediaTranscriptView: View {
 
     @State private var captionDraft = ""
     @State private var errorMessage: String?
+    @State private var isImporting = false
+    @State private var isExporting = false
+    @State private var exportFile = CaptionTextFile()
 
     var body: some View {
         VStack(spacing: AppTheme.Spacing.zero) {
@@ -39,7 +42,33 @@ struct MediaTranscriptView: View {
         .onChange(of: session.document) { _, _ in
             syncCaptionDraft()
         }
+        .fileImporter(
+            isPresented: $isImporting,
+            allowedContentTypes: Self.captionTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            guard case let .success(urls) = result,
+                  let url = urls.first else {
+                return
+            }
+            Task { await session.importSubtitle(from: url) }
+        }
+        .fileExporter(
+            isPresented: $isExporting,
+            document: exportFile,
+            contentType: Self.srtType,
+            defaultFilename: "Transcribed Captions"
+        ) { result in
+            if case let .failure(error) = result {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
+
+    private static let srtType =
+        UTType(filenameExtension: "srt") ?? .plainText
+    private static let captionTypes: [UTType] = ["srt", "vtt", "ass", "ssa"]
+        .compactMap { UTType(filenameExtension: $0) }
 
     private var header: some View {
         HStack(spacing: AppTheme.Spacing.xxs) {
@@ -317,28 +346,15 @@ struct MediaTranscriptView: View {
     }
 
     private func presentImport() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = ["srt", "vtt", "ass", "ssa"]
-            .compactMap { UTType(filenameExtension: $0) }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await session.importSubtitle(from: url) }
+        isImporting = true
     }
 
     private func exportCaptions() {
         guard let state = document.editState else { return }
         do {
             let text = try session.exportCaptions(in: state)
-            let panel = NSSavePanel()
-            panel.allowedContentTypes = [
-                UTType(filenameExtension: "srt")
-            ].compactMap { $0 }
-            panel.nameFieldStringValue = "Transcribed Captions.srt"
-            guard panel.runModal() == .OK, let url = panel.url else {
-                return
-            }
-            try Data(text.utf8).write(to: url, options: .atomic)
+            exportFile = CaptionTextFile(text: text)
+            isExporting = true
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -420,5 +436,31 @@ struct TranscriptFlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+
+/// A plain-text caption document for SwiftUI's file exporter.
+struct CaptionTextFile: FileDocument {
+    static var readableContentTypes: [UTType] {
+        [UTType(filenameExtension: "srt") ?? .plainText]
+    }
+
+    var text: String
+
+    init(text: String = "") {
+        self.text = text
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents,
+              let text = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.text = text
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
     }
 }
