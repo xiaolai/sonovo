@@ -35,6 +35,23 @@ struct MediaTimelineThumbnailPlan: Equatable, Sendable {
         }
         return MediaTimelineThumbnailPlan(count: count, times: times)
     }
+
+    /// A fixed 100 ms tolerance collapses every tile to the same frame when
+    /// the visible window is only 100 ms wide. Keep the tolerance within half
+    /// a tile so deep zoom still shows distinct frames.
+    static func tolerance(
+        viewport: MediaTimelineViewport,
+        count: Int
+    ) -> Double {
+        let tileDuration = viewport.duration / Double(max(count, 1))
+        return min(
+            MediaEditLimits.thumbnailTimeTolerance,
+            max(
+                tileDuration * MediaEditLimits.thumbnailTileCenterFraction,
+                MediaEditLimits.minimumRangeDuration
+            )
+        )
+    }
 }
 
 /// Visible-range video thumbnails above the audio waveform. Presentation
@@ -165,7 +182,10 @@ struct MediaTimelineThumbnailStrip: View {
             height: height * displayScale
         )
         let tolerance = CMTime(
-            seconds: MediaEditLimits.thumbnailTimeTolerance,
+            seconds: MediaTimelineThumbnailPlan.tolerance(
+                viewport: viewport,
+                count: plan.count
+            ),
             preferredTimescale: 600
         )
         generator.requestedTimeToleranceBefore = tolerance

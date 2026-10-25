@@ -40,6 +40,20 @@ final class MediaTimelineThumbnailPlanTests: XCTestCase {
         }
     }
 
+    func testToleranceShrinksWithDeepZoom() {
+        let full = MediaTimelineThumbnailPlan.tolerance(
+            viewport: MediaTimelineViewport(start: 0, duration: 10),
+            count: 12
+        )
+        let deep = MediaTimelineThumbnailPlan.tolerance(
+            viewport: MediaTimelineViewport(start: 0, duration: 0.1),
+            count: 12
+        )
+        XCTAssertEqual(full, 0.1, accuracy: 0.0001)
+        XCTAssertGreaterThan(deep, 0)
+        XCTAssertLessThan(deep, 0.01)
+    }
+
     func testInvalidSourceDurationStillProducesAFinitePlan() {
         let plan = MediaTimelineThumbnailPlan.make(
             viewport: MediaTimelineViewport(start: 0, duration: 1),
