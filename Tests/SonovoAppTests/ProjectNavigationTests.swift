@@ -113,6 +113,9 @@ final class ProjectNavigationTests: XCTestCase {
         let state = AppState()
         state.activateProject(state.workspace.demoProject)
         state.openAsset("vo-take-03")
+        XCTAssertFalse(state.canUseMediaModes)
+
+        state.openAsset("take-03")
         state.editorMode = .compare
         XCTAssertEqual(state.editorMode, .compare)
 
@@ -121,7 +124,7 @@ final class ProjectNavigationTests: XCTestCase {
 
         // A direct Project call bypasses AppState.openAsset; the getter must
         // still clamp against the active tab.
-        state.liveProject.openAsset(id: "vo-take-03")
+        state.liveProject.openAsset(id: "take-03")
         XCTAssertEqual(state.editorMode, .compare)
         state.liveProject.openAsset(id: "script-md")
         XCTAssertEqual(state.editorMode, .player)

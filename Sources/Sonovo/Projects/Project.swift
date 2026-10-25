@@ -1439,6 +1439,36 @@ final class Project: Identifiable {
         onSelectionChanged?()
     }
 
+    /// The Sample project's audio takes are real WAV files shipped in the
+    /// bundle. They are copied into Application Support on first use so the
+    /// real MediaAssetView can read them like any other project asset.
+    func sampleAudioAsset(for id: String) -> ProjectAsset? {
+        guard isDemo, let sampleDocuments else { return nil }
+        let name = "\(id).wav"
+        guard let url = try? sampleDocuments.documentURL(named: name) else {
+            return nil
+        }
+        let values = try? url.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]
+        )
+        let size = Int64(values?.fileSize ?? 0)
+        let modified = values?.contentModificationDate
+        return ProjectAsset(
+            id: id,
+            url: url,
+            name: name,
+            relativePath: name,
+            kind: .audio,
+            size: size,
+            modified: modified,
+            revision: AssetRevision(
+                fileIdentifier: nil,
+                size: size,
+                modified: modified
+            )
+        )
+    }
+
     private func sampleDocumentURL(for tab: EditorTab) -> URL? {
         guard isDemo,
               let assetID = tab.sampleAsset?.id,

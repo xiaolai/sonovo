@@ -299,6 +299,38 @@ struct InspectorView: View {
         }
     }
 
+    private func demoAudioMetadataRows(
+        for asset: ProductionAsset
+    ) -> [MetadataItem] {
+        let parts = asset.detail.components(separatedBy: " · ")
+        let sample = state.liveProject.sampleAudioAsset(for: asset.id)
+        return [
+            MetadataItem(label: "Kind", value: "WAV audio"),
+            MetadataItem(
+                label: "Duration",
+                value: parts.indices.contains(0) ? parts[0] : "—"
+            ),
+            MetadataItem(
+                label: "Sample rate",
+                value: parts.indices.contains(1) ? parts[1] : "—"
+            ),
+            MetadataItem(
+                label: "Channels",
+                value: parts.indices.contains(2) ? parts[2] : "—"
+            ),
+            MetadataItem(label: "Bit depth", value: "16-bit"),
+            MetadataItem(
+                label: "Size",
+                value: sample.map {
+                    ByteCountFormatter.string(
+                        fromByteCount: $0.size,
+                        countStyle: .file
+                    )
+                } ?? "—"
+            )
+        ]
+    }
+
     private func metadataRows(for asset: ProductionAsset) -> [MetadataItem] {
         if asset.kind == .script,
            state.selectedTab?.kind == .script,
@@ -346,15 +378,7 @@ struct InspectorView: View {
             ]
         }
         return switch asset.kind {
-        case .audio:
-            [
-                MetadataItem(label: "Kind", value: "WAV audio"),
-                MetadataItem(label: "Duration", value: "00:12.40"),
-                MetadataItem(label: "Sample rate", value: "48 kHz"),
-                MetadataItem(label: "Channels", value: "Stereo"),
-                MetadataItem(label: "Bit depth", value: "24-bit"),
-                MetadataItem(label: "Size", value: "2.4 MB")
-            ]
+        case .audio: demoAudioMetadataRows(for: asset)
         case .video:
             [
                 MetadataItem(label: "Kind", value: "H.264 video"),

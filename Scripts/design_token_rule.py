@@ -15,10 +15,6 @@ CONTENT_RENDERERS: tuple[tuple[str, str], ...] = (
         "procedural scene artwork",
     ),
     (
-        "Sources/Sonovo/WaveformView.swift",
-        "audio waveform geometry and amplitude",
-    ),
-    (
         "Sources/Sonovo/Media/MediaWaveformView.swift",
         "media waveform geometry and amplitude",
     ),

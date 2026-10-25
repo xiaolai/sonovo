@@ -11,10 +11,10 @@ enum SampleDocumentError: LocalizedError, Equatable {
     }
 }
 
-/// The sample production names real documents, so those assets need real
-/// files behind them. The documents ship read-only in the app bundle; the
-/// first open copies them into Application Support, where the normal editor,
-/// file watcher, and autosave paths can write to them.
+/// The sample production names real files, so those assets need real files
+/// behind them. The samples ship read-only in the app bundle; the first open
+/// copies them into Application Support, where the normal editor, media
+/// player, file watcher, and autosave paths can read and write them.
 struct SampleProjectDocuments {
     let sourceDirectory: URL
     let destinationDirectory: URL

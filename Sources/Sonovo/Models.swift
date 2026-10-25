@@ -120,13 +120,13 @@ struct Production: Hashable, Sendable {
                 ProductionAsset(
                     id: "vo-take-03",
                     name: "vo-take-03.wav",
-                    detail: "00:12.4 · 48 kHz · Stereo",
+                    detail: "00:11.4 · 22.05 kHz · Mono",
                     kind: .audio
                 ),
                 ProductionAsset(
                     id: "vo-take-02",
                     name: "vo-take-02.wav",
-                    detail: "00:12.8 · 48 kHz · Stereo",
+                    detail: "00:12.3 · 22.05 kHz · Mono",
                     kind: .audio
                 )
             ]),

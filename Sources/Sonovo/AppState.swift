@@ -620,12 +620,11 @@ final class AppState {
     }
 
     var canUseMediaModes: Bool {
-        // Compare and Transcript are demo surfaces; folder projects open
-        // media in the player. Enabling the controls there changed state
-        // without changing the editor.
+        // Compare and Transcript remain demo surfaces for video. Audio uses
+        // the real MediaAssetView and has no synthetic mode switch.
         guard liveProject.isDemo,
               let kind = selectedTab?.kind else { return false }
-        return kind == .audio || kind == .video
+        return kind == .video
     }
 
     var filteredStages: [ProductionStage] {

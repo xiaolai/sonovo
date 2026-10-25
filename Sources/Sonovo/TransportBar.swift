@@ -9,7 +9,9 @@ struct TransportBar: View {
               let kind = state.selectedTab?.kind else {
             return false
         }
-        return kind == .audio || kind == .video
+        // Audio now has a real MediaAssetView transport. Only the demo video
+        // still uses the shared sample transport.
+        return kind == .video
     }
 
     var body: some View {
@@ -267,7 +269,7 @@ struct TransportBar: View {
         return switch tab.kind {
         case .script: "0 words"
         case .stills: "8 frames"
-        case .audio: "00:12.4"
+        case .audio: state.selectedAsset?.shortDetail ?? "Audio"
         case .video: "00:12.4"
         case .subtitle: "No subtitle open"
         case .model3d: "No model open"
@@ -279,6 +281,16 @@ struct TransportBar: View {
         case .archive: "Archive"
         case .other: "File"
         }
+    }
+
+    /// The sample audio detail is already the real file's duration, sample
+    /// rate, and channel count; keep the context bar in step with it.
+    private var selectedAudioRight: String {
+        guard let detail = state.selectedAsset?.detail else { return "WAV" }
+        let parts = detail.components(separatedBy: " · ")
+        return parts.count > 1
+            ? parts.dropFirst().joined(separator: " · ")
+            : "WAV"
     }
 
     private func contextRight(for tab: EditorTab) -> String {
@@ -314,7 +326,7 @@ struct TransportBar: View {
         return switch tab.kind {
         case .script: "Markdown"
         case .stills: "2048 px · 8 frames"
-        case .audio: "48 kHz · Stereo"
+        case .audio: selectedAudioRight
         case .video: "1920×1080 · H.264"
         case .subtitle: "SRT · WebVTT · ASS"
         case .model3d: "GLB · STL · 3MF · USDZ"

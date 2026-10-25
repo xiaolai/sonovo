@@ -499,7 +499,6 @@ enum AppTheme {
         static let scrubberThumbRadius: CGFloat = 5
         static let scrubberHitHeight: CGFloat = 14
         static let waveformHeight: CGFloat = 208
-        static let compareWaveformHeight: CGFloat = 108
         static let letterBadge: CGFloat = 17
         static let thumbnailWidth: CGFloat = 116
         static let thumbnailHeight: CGFloat = 65

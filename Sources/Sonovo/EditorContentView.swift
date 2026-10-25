@@ -125,12 +125,16 @@ struct EditorContentView: View {
             }
         case .compare:
             if tab.kind == .audio {
-                AudioCompareView(state: state, project: project)
+                AudioPlayerView(state: state, project: project)
             } else {
                 VideoCompareView(state: state, project: project)
             }
         case .transcript:
-            TranscriptView(state: state, project: project)
+            if tab.kind == .audio {
+                AudioPlayerView(state: state, project: project)
+            } else {
+                TranscriptView(state: state, project: project)
+            }
         }
     }
 }
