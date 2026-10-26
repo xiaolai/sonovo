@@ -202,15 +202,20 @@ public struct MarkdownFileStore: Sendable {
         return current == snapshot.bytes ? .unchanged : .changed
     }
 
-    static func readBoundedData(at url: URL) throws -> Data {
+    /// A bounded read for callers that only need the bytes: the same size
+    /// and line caps as `read`, without decoding.
+    public static func readBoundedData(
+        at url: URL,
+        maximumBytes: Int = MarkdownLimits.maxReadBytes
+    ) throws -> Data {
         if let size = try? url.resourceValues(
             forKeys: [.fileSizeKey]
-        ).fileSize, size > MarkdownLimits.maxReadBytes {
+        ).fileSize, size > maximumBytes {
             throw MarkdownFileStoreError.fileTooLarge(byteCount: size)
         }
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        let cap = MarkdownLimits.maxReadBytes + 1
+        let cap = maximumBytes + 1
         var data = Data()
         var lineCount = 0
         while data.count < cap {
@@ -226,7 +231,7 @@ public struct MarkdownFileStore: Sendable {
             }
             data.append(chunk)
         }
-        guard data.count <= MarkdownLimits.maxReadBytes else {
+        guard data.count <= maximumBytes else {
             throw MarkdownFileStoreError.fileTooLarge(byteCount: data.count)
         }
         return data

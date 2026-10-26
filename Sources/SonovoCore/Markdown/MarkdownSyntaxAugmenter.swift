@@ -1,10 +1,18 @@
 import Foundation
 
+/// A raw-source span that replaces the text it covers.
+protocol InlineSpanMatch {
+    var range: Range<Int> { get }
+}
+
+extension WikiLinkMatch: InlineSpanMatch {}
+extension FootnoteReferenceMatch: InlineSpanMatch {}
+
 /// Applies Sonovo's custom syntax to the base tree.
 ///
-/// The passes run in a fixed order: details pairing, `[TOC]`, then wiki links.
-/// The augmenter never writes source; it only replaces matched spans with typed
-/// nodes that carry exact UTF-16 ranges.
+/// The passes run in a fixed order: details pairing, `[TOC]`, wiki links,
+/// math, then footnotes. The augmenter never writes source; it only replaces
+/// matched spans with typed nodes that carry exact UTF-16 ranges.
 public struct MarkdownSyntaxAugmenter: Sendable {
     public init() {}
 
@@ -13,6 +21,7 @@ public struct MarkdownSyntaxAugmenter: Sendable {
         var ast = parsed.ast
 
         ast.blocks = DetailsParser.augment(blocks: ast.blocks, parsed: parsed, depth: 0)
+        ast.blocks = DefinitionListParser.augment(blocks: ast.blocks, parsed: parsed)
         ast.blocks = ast.blocks.map { block in
             if Self.isTableOfContentsMarker(block, source: parsed.source) {
                 return .tableOfContents(range: block.range)
@@ -22,6 +31,18 @@ public struct MarkdownSyntaxAugmenter: Sendable {
         ast.blocks = ast.blocks.map {
             augmentWikiLinks($0, parsed: parsed)
         }
+        ast.blocks = ast.blocks.map {
+            augmentMath($0, parsed: parsed)
+        }
+        ast = FootnoteAugmenter.apply(
+            to: ast,
+            parsed: parsed,
+            augmenter: self
+        )
+        // Footnote content is parsed from the definition source after the
+        // block passes, so it needs its own math pass over the collected
+        // entries.
+        ast = augmentMathInFootnotes(ast, parsed: parsed)
 
         return ast
     }
@@ -47,32 +68,169 @@ public struct MarkdownSyntaxAugmenter: Sendable {
             .lowercased() == "[toc]"
     }
 
-    // MARK: - Wiki links
+    // MARK: - Inline syntax
 
-    private func augmentWikiLinks(_ block: Block, parsed: ParsedMarkdown) -> Block {
+    private func augmentWikiLinks(
+        _ block: Block,
+        parsed: ParsedMarkdown
+    ) -> Block {
+        replaceInlineTree(
+            block,
+            parsed: parsed,
+            scan: { span, excluded in
+                WikiLinkScanner.scan(
+                    source: parsed.source,
+                    span: span,
+                    excluding: excluded
+                )
+            },
+            makeInline: { makeWikiInline($0, parsed: parsed) }
+        )
+    }
+
+    private func augmentMath(
+        _ block: Block,
+        parsed: ParsedMarkdown
+    ) -> Block {
+        replaceInlineTree(
+            block,
+            parsed: parsed,
+            scan: { span, excluded in
+                MathScanner.scan(
+                    source: parsed.source,
+                    span: span,
+                    excluding: excluded
+                )
+            },
+            makeInline: { makeMathInline($0, parsed: parsed) }
+        )
+    }
+
+    private func augmentMathInFootnotes(
+        _ ast: SonovoAST,
+        parsed: ParsedMarkdown
+    ) -> SonovoAST {
+        let hasFootnotes = ast.blocks.contains { block in
+            if case .footnotes = block { return true }
+            return false
+        }
+        guard hasFootnotes else { return ast }
+
+        var result = ast
+        result.blocks = ast.blocks.map { block in
+            guard case let .footnotes(section, range) = block else {
+                return block
+            }
+            let entries = section.entries.map { entry in
+                FootnoteEntry(
+                    number: entry.number,
+                    label: entry.label,
+                    inlines: replaceInlineSpans(
+                        entry.inlines,
+                        span: entry.contentRange,
+                        parsed: parsed,
+                        scan: { span, excluded in
+                            MathScanner.scan(
+                                source: parsed.source,
+                                span: span,
+                                excluding: excluded
+                            )
+                        },
+                        makeInline: { makeMathInline($0, parsed: parsed) }
+                    ),
+                    contentRange: entry.contentRange,
+                    referenceRanges: entry.referenceRanges
+                )
+            }
+            return .footnotes(FootnoteSection(entries: entries), range: range)
+        }
+        return result
+    }
+
+    private func makeMathInline(
+        _ match: MathMatch,
+        parsed: ParsedMarkdown
+    ) -> Inline {
+        let range = parsed.fullSourceMap.position(
+            atUTF16Offset: match.range.lowerBound
+        ).flatMap { start in
+            parsed.fullSourceMap.position(
+                atUTF16Offset: match.range.upperBound
+            ).map { end in SourceRange(start: start, end: end) }
+        }
+        return .math(
+            source: match.source,
+            raw: match.raw,
+            display: match.display,
+            range: range
+        )
+    }
+
+    /// Rewrites every inline container in a block tree.
+    ///
+    /// The scan is injected so a pass can claim spans the base parser never
+    /// produced nodes for, while the style and range handling stays in one
+    /// place.
+    func replaceInlineTree<Match: InlineSpanMatch>(
+        _ block: Block,
+        parsed: ParsedMarkdown,
+        scan: (SourceRange, [SourceRange]) -> [Match],
+        include: (Match) -> Bool = { _ in true },
+        makeInline: (Match) -> Inline
+    ) -> Block {
         switch block {
         case let .paragraph(inlines, range):
             guard let range else { return block }
             return .paragraph(
-                inlines: augmentInlines(inlines, span: range, parsed: parsed),
+                inlines: replaceInlineSpans(
+                    inlines,
+                    span: range,
+                    parsed: parsed,
+                    scan: scan,
+                    include: include,
+                    makeInline: makeInline
+                ),
                 range: range
             )
         case let .heading(level, inlines, range):
             guard let range else { return block }
             return .heading(
                 level: level,
-                inlines: augmentInlines(inlines, span: range, parsed: parsed),
+                inlines: replaceInlineSpans(
+                    inlines,
+                    span: range,
+                    parsed: parsed,
+                    scan: scan,
+                    include: include,
+                    makeInline: makeInline
+                ),
                 range: range
             )
         case let .blockQuote(blocks, range):
             return .blockQuote(
-                blocks: blocks.map { augmentWikiLinks($0, parsed: parsed) },
+                blocks: blocks.map {
+                    replaceInlineTree(
+                        $0,
+                        parsed: parsed,
+                        scan: scan,
+                        include: include,
+                        makeInline: makeInline
+                    )
+                },
                 range: range
             )
         case let .list(list, range):
             let items = list.items.map { item in
                 ListItem(
-                    blocks: item.blocks.map { augmentWikiLinks($0, parsed: parsed) },
+                    blocks: item.blocks.map {
+                        replaceInlineTree(
+                            $0,
+                            parsed: parsed,
+                            scan: scan,
+                            include: include,
+                            makeInline: makeInline
+                        )
+                    },
                     checked: item.checked,
                     range: item.range
                 )
@@ -83,20 +241,86 @@ public struct MarkdownSyntaxAugmenter: Sendable {
             )
         case let .table(table, range):
             let header = table.header.map { cell in
-                augmentCell(cell, parsed: parsed)
+                replaceInlineTree(
+                    cell: cell,
+                    parsed: parsed,
+                    scan: scan,
+                    include: include,
+                    makeInline: makeInline
+                )
             }
             let rows = table.rows.map { row in
-                row.map { cell in augmentCell(cell, parsed: parsed) }
+                row.map { cell in
+                    replaceInlineTree(
+                        cell: cell,
+                        parsed: parsed,
+                        scan: scan,
+                        include: include,
+                        makeInline: makeInline
+                    )
+                }
             }
             return .table(
-                TableBlock(header: header, rows: rows, alignments: table.alignments),
+                TableBlock(
+                    header: header,
+                    rows: rows,
+                    alignments: table.alignments
+                ),
                 range: range
             )
+        case let .definitionList(list, range):
+            let items = list.items.map { item in
+                DefinitionList.Item(
+                    terms: item.terms.map { term in
+                        DefinitionList.Term(
+                            inlines: replaceInlineSpans(
+                                term.inlines,
+                                span: term.range,
+                                parsed: parsed,
+                                scan: scan,
+                                include: include,
+                                makeInline: makeInline
+                            ),
+                            range: term.range
+                        )
+                    },
+                    definitions: item.definitions.map { definition in
+                        DefinitionList.Definition(
+                            inlines: replaceInlineSpans(
+                                definition.inlines,
+                                span: definition.range,
+                                parsed: parsed,
+                                scan: scan,
+                                include: include,
+                                makeInline: makeInline
+                            ),
+                            range: definition.range
+                        )
+                    },
+                    range: item.range
+                )
+            }
+            return .definitionList(DefinitionList(items: items), range: range)
         case let .details(details, range):
             let summary = details.summaryRange.map { summaryRange in
-                augmentInlines(details.summary, span: summaryRange, parsed: parsed)
+                replaceInlineSpans(
+                    details.summary,
+                    span: summaryRange,
+                    parsed: parsed,
+                    scan: scan,
+                    include: include,
+                    makeInline: makeInline
+                )
             } ?? details.summary
-            let blocks = details.blocks.map { augmentWikiLinks($0, parsed: parsed) }
+            let blocks = details.blocks.map {
+                replaceInlineTree(
+                    $0,
+                    parsed: parsed,
+                    scan: scan,
+                    include: include,
+                    makeInline: makeInline
+                )
+            }
             return .details(
                 DetailsBlock(
                     summary: summary,
@@ -112,20 +336,43 @@ public struct MarkdownSyntaxAugmenter: Sendable {
         }
     }
 
-    private func augmentCell(_ cell: TableCell, parsed: ParsedMarkdown) -> TableCell {
+    private func replaceInlineTree<Match: InlineSpanMatch>(
+        cell: TableCell,
+        parsed: ParsedMarkdown,
+        scan: (SourceRange, [SourceRange]) -> [Match],
+        include: (Match) -> Bool,
+        makeInline: (Match) -> Inline
+    ) -> TableCell {
         guard let range = cell.range else { return cell }
         return TableCell(
-            inlines: augmentInlines(cell.inlines, span: range, parsed: parsed),
+            inlines: replaceInlineSpans(
+                cell.inlines,
+                span: range,
+                parsed: parsed,
+                scan: scan,
+                include: include,
+                makeInline: makeInline
+            ),
             colspan: cell.colspan,
             rowspan: cell.rowspan,
             range: range
         )
     }
 
-    private func augmentInlines(
+    /// Replaces raw-source spans with typed inlines, preserving the authored
+    /// style ancestry around each span.
+    ///
+    /// `scan` receives the container's span and the inline ranges that must
+    /// be excluded; `include` filters a scanned match before it claims source
+    /// text; `makeInline` builds the replacement and is called once per match
+    /// in document order.
+    func replaceInlineSpans<Match: InlineSpanMatch>(
         _ inlines: [Inline],
         span: SourceRange,
-        parsed: ParsedMarkdown
+        parsed: ParsedMarkdown,
+        scan: (SourceRange, [SourceRange]) -> [Match],
+        include: (Match) -> Bool = { _ in true },
+        makeInline: (Match) -> Inline
     ) -> [Inline] {
         let leaves = InlineLeaves.flatten(inlines)
         let excluded = leaves.compactMap { leaf -> SourceRange? in
@@ -140,16 +387,13 @@ public struct MarkdownSyntaxAugmenter: Sendable {
             }
         }
 
-        var matches = WikiLinkScanner.scan(
-            source: parsed.source,
-            span: span,
-            excluding: excluded
-        )
-        guard !matches.isEmpty else { return inlines }
+        var found = scan(span, excluded).filter(include)
+        guard !found.isEmpty else { return inlines }
 
-        matches.sort { $0.range.lowerBound < $1.range.lowerBound }
-        matches = applicableMatches(matches, leaves: leaves)
-        guard !matches.isEmpty else { return inlines }
+        found.sort { $0.range.lowerBound < $1.range.lowerBound }
+        let applicable = applicableMatches(found, leaves: leaves)
+        guard !applicable.isEmpty else { return inlines }
+        found = applicable
 
         // Keeping one cursor across the ordered leaves avoids rescanning the
         // whole match list per leaf.
@@ -169,16 +413,16 @@ public struct MarkdownSyntaxAugmenter: Sendable {
                 continue
             }
 
-            while windowStart < matches.count,
-                  matches[windowStart].range.upperBound <= leafRange.lowerBound {
+            while windowStart < found.count,
+                  found[windowStart].range.upperBound <= leafRange.lowerBound {
                 windowStart += 1
             }
 
             var intersecting: [Int] = []
             var probe = windowStart
-            while probe < matches.count,
-                  matches[probe].range.lowerBound < leafRange.upperBound {
-                if matches[probe].range.upperBound > leafRange.lowerBound {
+            while probe < found.count,
+                  found[probe].range.lowerBound < leafRange.upperBound {
+                if found[probe].range.upperBound > leafRange.lowerBound {
                     intersecting.append(probe)
                 }
                 probe += 1
@@ -197,7 +441,7 @@ public struct MarkdownSyntaxAugmenter: Sendable {
 
             var cursor = leafRange.lowerBound
             for index in intersecting {
-                let match = matches[index]
+                let match = found[index]
                 let lower = max(match.range.lowerBound, leafRange.lowerBound)
                 let upper = min(match.range.upperBound, leafRange.upperBound)
 
@@ -213,11 +457,11 @@ public struct MarkdownSyntaxAugmenter: Sendable {
 
                 if !emitted.contains(index) {
                     emitted.insert(index)
-                    // Keep the style ancestry shared by every leaf the link
-                    // spans, so `**[[Page]]**` stays bold while formatting
-                    // authored inside the wiki syntax is still discarded.
+                    // Keep the style ancestry shared by every leaf the span
+                    // covers, so `**[[Page]]**` stays bold while formatting
+                    // authored inside the syntax is still discarded.
                     let style = commonStyle(
-                        for: match,
+                        for: match.range,
                         startingAt: leafIndex,
                         leaves: leaves
                     )
@@ -225,7 +469,7 @@ public struct MarkdownSyntaxAugmenter: Sendable {
                         InlineLeaf(
                             path: style.path,
                             styleRanges: style.ranges,
-                            inline: makeWikiInline(match, parsed: parsed)
+                            inline: makeInline(match)
                         )
                     )
                 }
@@ -252,10 +496,10 @@ public struct MarkdownSyntaxAugmenter: Sendable {
     /// A match may span several leaves. A partial overlap is only allowed on
     /// a text leaf; partial overlap with emphasis, code, or another structured
     /// leaf would split that structure.
-    private func applicableMatches(
-        _ matches: [WikiLinkMatch],
+    private func applicableMatches<Match: InlineSpanMatch>(
+        _ matches: [Match],
         leaves: [InlineLeaf]
-    ) -> [WikiLinkMatch] {
+    ) -> [Match] {
         guard !matches.isEmpty else { return [] }
         var applicable = Array(repeating: true, count: matches.count)
         var windowStart = 0
@@ -268,7 +512,12 @@ public struct MarkdownSyntaxAugmenter: Sendable {
             }
 
             var isTextLeaf = false
-            if case .text = leaf.inline { isTextLeaf = true }
+            switch leaf.inline {
+            case .text, .softBreak, .lineBreak:
+                isTextLeaf = true
+            default:
+                isTextLeaf = false
+            }
 
             var index = windowStart
             while index < matches.count,
@@ -295,7 +544,7 @@ public struct MarkdownSyntaxAugmenter: Sendable {
     /// Style kinds alone are not enough: two adjacent strong nodes are
     /// distinct authored nodes even though both are `.strong`.
     private func commonStyle(
-        for match: WikiLinkMatch,
+        for span: Range<Int>,
         startingAt start: Int,
         leaves: [InlineLeaf]
     ) -> (path: [InlineStyle], ranges: [SourceRange?]) {
@@ -314,10 +563,10 @@ public struct MarkdownSyntaxAugmenter: Sendable {
             var index = start
             while index < leaves.count {
                 guard let leafRange = leaves[index].range,
-                      leafRange.lowerBound < match.range.upperBound else {
+                      leafRange.lowerBound < span.upperBound else {
                     break
                 }
-                if leafRange.upperBound > match.range.lowerBound {
+                if leafRange.upperBound > span.lowerBound {
                     let leaf = leaves[index]
                     let leafRangeValue = leaf.styleRanges.count > depth
                         ? leaf.styleRanges[depth]

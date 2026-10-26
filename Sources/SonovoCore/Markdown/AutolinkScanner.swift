@@ -288,6 +288,39 @@ enum AutolinkScanner {
         guard matchesASCII(characters, from: start, wwwLiteral) else {
             return nil
         }
+        // Reject impossible host characters in place before copying the rest
+        // of the run, and bound the scan by the longest valid host name. A
+        // repeated invalid candidate such as `www._www._www._…` would
+        // otherwise copy and revalidate the whole suffix for every `www.`.
+        // A character outside the host alphabet is allowed only when
+        // everything to the run's end trims off as trailing punctuation
+        // (`www.example.com,`).
+        var probe = start + prefix.count
+        while probe < characters.count {
+            let character = characters[probe]
+            if "/?#\"'<>".contains(character) || character.isWhitespace {
+                break
+            }
+            let isHostCharacter = character.isLetter
+                || character.isNumber
+                || character == "-"
+                || character == "."
+                || character == ":"
+                || character == "_"
+            if isHostCharacter {
+                probe += 1
+                guard probe - (start + prefix.count)
+                    <= maximumHostLength else {
+                    return nil
+                }
+                continue
+            }
+            guard trailingPunctuation.contains(character),
+                  restIsTrailingPunctuation(characters, from: probe) else {
+                return nil
+            }
+            break
+        }
 
         let end = runEnd(characters, from: start + prefix.count)
         guard end > start + prefix.count else { return nil }
@@ -399,6 +432,32 @@ enum AutolinkScanner {
             index += 1
         }
         return index
+    }
+
+    /// Characters `trimTrailingPunctuation` can remove from a link's end.
+    private static let trailingPunctuation: Set<Character> = [
+        "?", "!", ".", ",", ":", "*", "_", "~", ";", ")"
+    ]
+
+    /// GFM's hostname grammar caps a domain at 999 characters.
+    private static let maximumHostLength = 999
+
+    /// True when everything from `start` to the run's end is trailing
+    /// punctuation (or a delimiter), so it trims off the link.
+    private static func restIsTrailingPunctuation(
+        _ characters: [Character],
+        from start: Int
+    ) -> Bool {
+        var index = start
+        while index < characters.count {
+            let character = characters[index]
+            if "/?#\"'<>".contains(character) || character.isWhitespace {
+                return true
+            }
+            guard trailingPunctuation.contains(character) else { return false }
+            index += 1
+        }
+        return true
     }
 
     private static func trimTrailingPunctuation(_ text: String) -> String {

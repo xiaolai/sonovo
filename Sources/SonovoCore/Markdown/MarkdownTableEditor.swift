@@ -124,13 +124,61 @@ public enum MarkdownTableEditor {
             }
         }
         // Last cell of the last row: append a row and select its first cell.
+        let appended = edit(
+            .insertRowBelow,
+            source: source,
+            selection: selection
+        )
+        guard let range = appended.range,
+              let replacement = appended.replacement else {
+            return .edit(appended)
+        }
+        let updated = (source as NSString).replacingCharacters(
+            in: NSRange(location: range.lowerBound, length: range.count),
+            with: replacement
+        )
+        guard let updatedTable = MarkdownTableScanner.table(
+            at: range.lowerBound,
+            in: updated
+        ), let newRow = ([updatedTable.header] + updatedTable.body).last,
+        let firstCell = newRow.cells.first else {
+            return .edit(appended)
+        }
         return .edit(
-            edit(.insertRowBelow, source: source, selection: selection)
+            MarkdownTableEdit(
+                outcome: .handled,
+                range: range,
+                replacement: replacement,
+                selection: cellRange(firstCell)
+            )
         )
     }
 
     private static func cellRange(_ cell: MarkdownTable.Cell) -> Range<Int> {
         cell.range.lowerBound..<cell.range.upperBound
+    }
+
+    /// True when `selection` is exactly one cell's content range — the state
+    /// cell navigation leaves behind. A following Tab must keep navigating
+    /// rather than letting text input replace the selection.
+    public static func selectionIsCell(
+        source: String,
+        selection: Range<Int>
+    ) -> Bool {
+        guard !selection.isEmpty,
+              let table = MarkdownTableScanner.table(
+                  at: selection.lowerBound,
+                  in: source
+              ) else {
+            return false
+        }
+        let rows = [table.header] + table.body
+        return rows.contains { row in
+            row.cells.contains { cell in
+                cell.range.lowerBound == selection.lowerBound
+                    && cell.range.upperBound == selection.upperBound
+            }
+        }
     }
 
     // MARK: - Entry point
@@ -175,45 +223,40 @@ public enum MarkdownTableEditor {
             return insertRow(
                 table: table,
                 target: target,
-                above: true,
-                source: source
+                above: true
             )
         case .insertRowBelow:
             return insertRow(
                 table: table,
                 target: target,
-                above: false,
-                source: source
+                above: false
             )
         case .deleteRow:
-            return deleteRow(table: table, target: target, source: source)
+            return deleteRow(table: table, target: target)
         case .insertColumnLeft:
             return insertColumn(
                 table: table,
                 target: target,
-                leftOf: true,
-                source: source
+                leftOf: true
             )
         case .insertColumnRight:
             return insertColumn(
                 table: table,
                 target: target,
-                leftOf: false,
-                source: source
+                leftOf: false
             )
         case .deleteColumn:
-            return deleteColumn(table: table, target: target, source: source)
+            return deleteColumn(table: table, target: target)
         case .deleteTable:
             return deleteTable(table: table, source: source)
         case .setAlignment(let alignment):
             return setAlignment(
                 table: table,
                 target: target,
-                alignment: alignment,
-                source: source
+                alignment: alignment
             )
         case .format:
-            return format(table: table, target: target, source: source)
+            return format(table: table, target: target)
         }
     }
 
@@ -265,8 +308,7 @@ public enum MarkdownTableEditor {
     private static func insertRow(
         table: MarkdownTable,
         target: Target,
-        above: Bool,
-        source: String
+        above: Bool
     ) -> MarkdownTableEdit {
         // Existing lines stay byte-identical; only a new line is added.
         var lines = [table.header.raw, table.delimiter.raw]
@@ -307,8 +349,7 @@ public enum MarkdownTableEditor {
 
     private static func deleteRow(
         table: MarkdownTable,
-        target: Target,
-        source: String
+        target: Target
     ) -> MarkdownTableEdit {
         guard target.rowIndex > 0 else {
             return .refused(.headerRow)
@@ -346,8 +387,7 @@ public enum MarkdownTableEditor {
     private static func insertColumn(
         table: MarkdownTable,
         target: Target,
-        leftOf: Bool,
-        source: String
+        leftOf: Bool
     ) -> MarkdownTableEdit {
         let widths = columnWidths(table)
         let index = leftOf ? target.column : target.column + 1
@@ -395,8 +435,7 @@ public enum MarkdownTableEditor {
 
     private static func deleteColumn(
         table: MarkdownTable,
-        target: Target,
-        source: String
+        target: Target
     ) -> MarkdownTableEdit {
         let columns = table.header.cells.count
         guard columns > 1 else {
@@ -450,8 +489,7 @@ public enum MarkdownTableEditor {
     private static func setAlignment(
         table: MarkdownTable,
         target: Target,
-        alignment: TableBlock.Alignment,
-        source: String
+        alignment: TableBlock.Alignment
     ) -> MarkdownTableEdit {
         var cells = table.delimiter.cells.map(\.raw)
         guard target.column < cells.count else {
@@ -487,8 +525,7 @@ public enum MarkdownTableEditor {
 
     private static func format(
         table: MarkdownTable,
-        target: Target,
-        source: String
+        target: Target
     ) -> MarkdownTableEdit {
         let widths = columnWidths(table)
         let replacement = rebuiltRows(table, widths: widths)
@@ -507,17 +544,6 @@ public enum MarkdownTableEditor {
     }
 
     // MARK: - Row rebuilding
-
-    private static func blockStart(_ table: MarkdownTable) -> Int {
-        table.range.lowerBound
-    }
-
-    private static func isDelimiterRow(
-        _ row: MarkdownTable.Row,
-        table: MarkdownTable
-    ) -> Bool {
-        row.range == table.delimiter.range
-    }
 
     /// Column widths from the trimmed content, with at least three columns so
     /// a delimiter cell always fits.
@@ -630,9 +656,17 @@ public enum MarkdownTableEditor {
         cells: [String]
     ) -> String {
         var line = template.containerPrefix
-        if template.leadingPipe { line += "|" }
+        var leadingPipe = template.leadingPipe
+        var trailingPipe = template.trailingPipe
+        if cells.count <= 1, !leadingPipe, !trailingPipe {
+            // A one-column row needs at least one pipe, or deleting the
+            // second column of a pipe-less table turns every row into text.
+            leadingPipe = true
+            trailingPipe = true
+        }
+        if leadingPipe { line += "|" }
         line += cells.joined(separator: "|")
-        if template.trailingPipe { line += "|" }
+        if trailingPipe { line += "|" }
         return line
     }
 

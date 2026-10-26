@@ -101,6 +101,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
+        #if SONOVO_E2E_PROBE
+        E2EProbe.run()
+        #endif
+
         switch ProcessInfo.processInfo.environment["SONOVO_APPEARANCE"] {
         case "dark":
             NSApp.appearance = NSAppearance(named: .darkAqua)

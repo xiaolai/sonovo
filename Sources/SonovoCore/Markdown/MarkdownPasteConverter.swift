@@ -11,15 +11,22 @@ public struct MarkdownPasteInput: Sendable, Equatable {
     public let flavors: [Flavor]
     public let selectionText: String
     public let isInsideFence: Bool
+    /// The document around the insertion point, when the caller can supply
+    /// it. Block conversion reads the selection's own line from it so the
+    /// fence starts and ends on line boundaries instead of splitting a
+    /// paragraph.
+    public let documentSource: String?
 
     public init(
         flavors: [Flavor],
         selectionText: String,
-        isInsideFence: Bool = false
+        isInsideFence: Bool = false,
+        documentSource: String? = nil
     ) {
         self.flavors = flavors
         self.selectionText = selectionText
         self.isInsideFence = isInsideFence
+        self.documentSource = documentSource
     }
 
     public var url: String? {
@@ -51,11 +58,13 @@ public enum MarkdownPastePlan: Sendable, Equatable {
     case insert(range: Range<Int>, replacement: String, selection: Range<Int>)
 }
 
-/// The fixed paste chain, minus HTML conversion.
+/// The fixed paste chain: URL over a selection, clipboard HTML, detected
+/// code, then plain text.
 ///
-/// HTML conversion is gated on F0.8b (a runtime measurement on the E2E Mac),
-/// so an HTML-only paste falls back to plain text, exactly as the plan's
-/// fallback specifies. URL over a selection and code detection ship now.
+/// HTML conversion is enabled because the clipboard corpus passes
+/// (`MarkdownHTMLPasteTests`); any failure in it falls back to the plain-text
+/// path, so a malformed payload can never corrupt the document. Paste as
+/// Plain Text remains a separate command and never reaches this chain.
 public enum MarkdownPasteConverter {
     /// Above this size the content is pasted literally.
     public static let maximumConvertedBytes = 100 * 1024
@@ -72,11 +81,23 @@ public enum MarkdownPasteConverter {
            MarkdownSecurity.linkDecision(for: url).isAllowed {
             let text = input.selectionText
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let replacement = "[\(text)](\(url))"
+            let replacement = "[\(linkLabel(text))](\(linkDestination(url)))"
             let caret = selection.lowerBound + (replacement as NSString).length
             return .insert(
                 range: selection,
                 replacement: replacement,
+                selection: caret..<caret
+            )
+        }
+
+        if let html = input.html,
+           html.utf8.count <= maximumConvertedBytes,
+           let converted = MarkdownHTMLPaste.convert(html) {
+            let caret = selection.lowerBound
+                + (converted as NSString).length
+            return .insert(
+                range: selection,
+                replacement: converted,
                 selection: caret..<caret
             )
         }
@@ -87,7 +108,11 @@ public enum MarkdownPasteConverter {
             return .plain
         }
         if let language = codeLanguage(for: text) {
-            let replacement = fenced(text, language: language)
+            let replacement = blockPlacement(
+                fenced(text, language: language),
+                selection: selection,
+                in: input.documentSource
+            )
             let caret = selection.lowerBound
                 + (replacement as NSString).length
             return .insert(
@@ -97,6 +122,50 @@ public enum MarkdownPasteConverter {
             )
         }
         return .plain
+    }
+
+    /// Keeps a block construct on its own lines.
+    ///
+    /// A fence pasted mid-paragraph would otherwise start after prose and
+    /// attach the following text to its closing fence. When the caller
+    /// supplied the document, add the line boundary on each side that the
+    /// selection does not already have.
+    static func blockPlacement(
+        _ block: String,
+        selection: Range<Int>,
+        in source: String?
+    ) -> String {
+        guard let source else { return block }
+        let ns = source as NSString
+        guard selection.lowerBound >= 0,
+              selection.upperBound <= ns.length,
+              selection.lowerBound <= selection.upperBound else {
+            return block
+        }
+        var lineStart = selection.lowerBound
+        while lineStart > 0, ns.character(at: lineStart - 1) != 0x0A {
+            lineStart -= 1
+        }
+        var lineEnd = selection.upperBound
+        while lineEnd < ns.length, ns.character(at: lineEnd) != 0x0A {
+            lineEnd += 1
+        }
+        let before = ns.substring(
+            with: NSRange(
+                location: lineStart,
+                length: selection.lowerBound - lineStart
+            )
+        ).trimmingCharacters(in: .whitespaces)
+        let after = ns.substring(
+            with: NSRange(
+                location: selection.upperBound,
+                length: lineEnd - selection.upperBound
+            )
+        ).trimmingCharacters(in: .whitespaces)
+        var replacement = block
+        if !before.isEmpty { replacement = "\n" + replacement }
+        if !after.isEmpty { replacement += "\n" }
+        return replacement
     }
 
     /// A conservative detector: at least three code-shaped lines, or one
@@ -143,8 +212,40 @@ public enum MarkdownPasteConverter {
         return nil
     }
 
+    /// A selection used as link text must not close the label or start
+    /// markup, and a newline would end the paragraph.
+    static func linkLabel(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+            .replacingOccurrences(of: "\n", with: " ")
+    }
+
+    /// A pasted URL is serialized by the same writer the link popover uses:
+    /// whitespace, parentheses, and angle brackets select the angle form, and
+    /// the bytes each form cannot carry literally are encoded.
+    static func linkDestination(_ url: String) -> String {
+        MarkdownDestination.escaped(
+            url.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
     private static func fenced(_ text: String, language: String) -> String {
         let body = text.hasSuffix("\n") ? text : text + "\n"
-        return "```\(language)\n\(body)```"
+        // The wrapper must be longer than any backtick run in the pasted
+        // code, or a triple-backtick line closes it early.
+        var longest = 0
+        var current = 0
+        for character in body {
+            if character == "`" {
+                current += 1
+                longest = max(longest, current)
+            } else {
+                current = 0
+            }
+        }
+        let fence = String(repeating: "`", count: max(3, longest + 1))
+        return "\(fence)\(language)\n\(body)\(fence)"
     }
 }

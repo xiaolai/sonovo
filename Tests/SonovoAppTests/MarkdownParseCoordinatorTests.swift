@@ -111,7 +111,9 @@ final class MarkdownParseCoordinatorTests: XCTestCase {
     func testADroppedRequestRetriesTheCurrentRevision() async {
         let documentID = UUID()
         let counter = CallCounter()
-        let coordinator = makeCoordinator { input in
+        // `maximumAttempts` counts attempts, not retries: two drops leave
+        // no budget, so this test allows three and expects the third.
+        let coordinator = makeCoordinator(attempts: 3) { input in
             let call = await counter.record()
             if call <= 2 { return nil }
             return Self.makeOutput(input)

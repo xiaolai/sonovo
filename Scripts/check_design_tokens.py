@@ -354,6 +354,14 @@ SELF_TEST_FIXTURES = (
         False,
     ),
     (
+        "SampleView.swift",
+        "struct SampleView: View {\n"
+        "// token-exempt: probe geometry\n"
+        "window.contentRect = NSRect(x: 0, y: 0, width: 900, height: 760)\n"
+        "}",
+        False,
+    ),
+    (
         "Model.swift",
         "nonisolated static let maximumZoom: CGFloat = 16",
         True,
@@ -736,8 +744,13 @@ def scan_text(name: str, text: str) -> list[str]:
     squashed, mapping = squash(masked)
 
     def record(offset: int, fragment: str) -> None:
+        line = line_of(text, offset)
+        # The annotation promises a local, per-line exemption; honor it on
+        # every finding path, not just the literal scans that predate it.
+        if line_exempt(text, line):
+            return
         display = re.sub(r"\s+", " ", fragment).strip()
-        key = (line_of(text, offset), display, offset)
+        key = (line, display, offset)
         if key in seen:
             return
         seen.add(key)

@@ -17,6 +17,14 @@ final class MarkdownEditorTests: XCTestCase {
         return condition()
     }
 
+    private func searchField(in view: NSView) -> NSSearchField? {
+        if let field = view as? NSSearchField { return field }
+        for subview in view.subviews {
+            if let field = searchField(in: subview) { return field }
+        }
+        return nil
+    }
+
     private func makeController(
         source: String = ""
     ) -> (MarkdownDocument, MarkdownEditorCache, MarkdownEditorController) {
@@ -381,5 +389,282 @@ final class MarkdownEditorTests: XCTestCase {
         XCTAssertEqual(document.source, "f")
         document.undoManager.undo()
         XCTAssertEqual(document.source, "f()")
+    }
+
+    // MARK: - Reading anchor
+
+    func testReadingAnchorRoundTripsTheVisibleLine() {
+        let lines = (0..<300)
+            .map { "line \($0) of the reading anchor fixture" }
+            .joined(separator: "\n")
+        let (document, _, controller) = makeController(source: lines)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = controller.scrollView
+        controller.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 320
+        )
+        window.layoutIfNeeded()
+        controller.textView.layoutSubtreeIfNeeded()
+
+        let ns = document.source as NSString
+        let target = ns.range(of: "line 150").location
+        controller.select(range: target..<target)
+        controller.textView.layoutSubtreeIfNeeded()
+
+        guard let anchor = controller.readingAnchor() else {
+            XCTFail("no reading anchor for a laid-out document")
+            return
+        }
+        let origin = controller.scrollView.contentView.bounds.origin.y
+        XCTAssertGreaterThan(origin, 0)
+
+        controller.scrollView.contentView.scroll(to: NSPoint(x: 0, y: 0))
+        XCTAssertEqual(controller.scrollView.contentView.bounds.origin.y, 0)
+
+        controller.restoreReadingAnchor(anchor)
+        // TextKit may refine estimated fragment positions as it lays out the
+        // restored viewport, so the absolute origin can shift by half a line.
+        // The contract is that the same line is visible at the same offset.
+        let restored = controller.readingAnchor()
+        XCTAssertEqual(restored?.lineOffset, anchor.lineOffset)
+        XCTAssertEqual(
+            restored?.viewportOffset ?? .nan,
+            anchor.viewportOffset,
+            accuracy: 1
+        )
+    }
+
+    func testReadingAnchorFallsBackWhenTheLineIsGone() {
+        let lines = (0..<300)
+            .map { "line \($0) of the fixture" }
+            .joined(separator: "\n")
+        let (_, _, controller) = makeController(source: lines)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = controller.scrollView
+        controller.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 320
+        )
+        window.layoutIfNeeded()
+        controller.textView.layoutSubtreeIfNeeded()
+
+        // A reload shrank the file: the offset clamps to the last line, which
+        // is the furthest the viewport can scroll.
+        controller.restoreReadingAnchor(
+            SourceReadingAnchor(lineOffset: 10_000_000, viewportOffset: 0)
+        )
+        let maximum = max(
+            0,
+            controller.textView.bounds.height
+                - controller.scrollView.contentView.bounds.height
+        )
+        XCTAssertGreaterThan(maximum, 0)
+        XCTAssertEqual(
+            controller.scrollView.contentView.bounds.origin.y,
+            maximum,
+            accuracy: 2
+        )
+    }
+
+    func testSourceReplacementRestoresTheReadingPosition() throws {
+        let lines = (0..<300)
+            .map { "line \($0) of the reload fixture" }
+            .joined(separator: "\n")
+        let (document, _, controller) = makeController(source: lines)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = controller.scrollView
+        controller.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 320
+        )
+        window.layoutIfNeeded()
+        controller.textView.layoutSubtreeIfNeeded()
+
+        let ns = document.source as NSString
+        let target = ns.range(of: "line 200").location
+        controller.select(range: target..<target)
+        controller.textView.layoutSubtreeIfNeeded()
+        let anchor = try XCTUnwrap(controller.readingAnchor())
+        XCTAssertGreaterThan(anchor.lineOffset, 0)
+
+        let shorter = (0..<40)
+            .map { "line \($0) of the shorter fixture" }
+            .joined(separator: "\n")
+        try document.replaceSource(shorter)
+        // The workspace arms the anchor after the new source lands and
+        // before the view syncs it.
+        controller.restoreReadingAnchorAfterSourceReplacement(anchor)
+        controller.syncFromDocument()
+        controller.textView.layoutSubtreeIfNeeded()
+
+        let maximum = max(
+            0,
+            controller.textView.bounds.height
+                - controller.scrollView.contentView.bounds.height
+        )
+        XCTAssertGreaterThan(maximum, 0)
+        XCTAssertEqual(
+            controller.scrollView.contentView.bounds.origin.y,
+            maximum,
+            accuracy: 2
+        )
+    }
+
+    // MARK: - Link routing
+
+    func testSourceLinkOpenUsesTheWorkspaceRouting() {
+        let (_, _, controller) = makeController(source: "# Heading\n")
+        var openedLocal: String?
+        var openedMedia: MediaReference?
+        controller.onOpenLocalLink = { openedLocal = $0 }
+        controller.onOpenMediaLink = { openedMedia = $0 }
+
+        controller.openLinkDestination("notes/other.md")
+        XCTAssertEqual(openedLocal, "notes/other.md")
+
+        controller.openLinkDestination("sonovo:take?path=a.mov")
+        XCTAssertEqual(openedMedia?.kind, .take)
+        XCTAssertEqual(openedMedia?.path, "a.mov")
+    }
+
+    // MARK: - Find bar seeding
+
+    func testFindBarSeedSelectsTheMatchWhenMounted() {
+        let (document, _, controller) = makeController(source: "hello world\n")
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = controller.scrollView
+        controller.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 320
+        )
+        window.layoutIfNeeded()
+
+        let offset = (document.source as NSString)
+            .range(of: "world").location
+        controller.seedFindBar(with: "world", at: offset)
+        XCTAssertEqual(
+            controller.textView.selectedRange(),
+            NSRange(location: offset, length: 5)
+        )
+        window.layoutIfNeeded()
+        let field = searchField(in: controller.scrollView)
+        XCTAssertNotNil(field, "the source find bar did not appear")
+        XCTAssertEqual(field?.stringValue, "world")
+    }
+
+    // MARK: - Auto-pair
+
+    func testTypedOpenerPairsAndUndoesAsOneEdit() async throws {
+        let (document, _, controller) = makeController()
+        let textView = controller.textView
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        textView.insertText(
+            "(",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertEqual(document.source, "()")
+        XCTAssertEqual(textView.string, "()")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 1, length: 0))
+        XCTAssertTrue(document.undoManager.canUndo)
+
+        document.undoManager.undo()
+        XCTAssertEqual(document.source, "")
+        let synced = await waitUntil { textView.string == "" }
+        XCTAssertTrue(synced)
+    }
+
+    func testTypedCloserSkipsTheInsertedOne() {
+        let (document, _, controller) = makeController()
+        let textView = controller.textView
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        textView.insertText(
+            "(",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        textView.insertText(
+            ")",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertEqual(document.source, "()")
+        XCTAssertEqual(textView.selectedRange(), NSRange(location: 2, length: 0))
+    }
+
+    func testMarkedTextCommitsWithoutPairing() {
+        let (document, _, controller) = makeController()
+        let textView = controller.textView
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        textView.setMarkedText(
+            "（",
+            selectedRange: NSRange(location: 1, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        textView.insertText(
+            "（",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertEqual(document.source, "（")
+        XCTAssertEqual(textView.string, "（")
+    }
+
+    func testCJKFormattingIsOneUndoStep() async throws {
+        let source = "中文English,中文.中文\n"
+        let (document, _, controller) = makeController(source: source)
+        let revisionBefore = document.revision
+        controller.textView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        XCTAssertTrue(controller.perform(.formatCJK))
+        XCTAssertEqual(document.source, "中文 English,中文。中文\n")
+        XCTAssertEqual(document.revision, revisionBefore + 1)
+        XCTAssertTrue(document.undoManager.canUndo)
+
+        document.undoManager.undo()
+        XCTAssertEqual(document.source, source)
+        let synced = await waitUntil {
+            controller.textView.string == source
+        }
+        XCTAssertTrue(synced)
+    }
+
+    func testCJKFormattingNoOpDoesNotRegisterUndo() {
+        let source = "中文 English\n"
+        let (document, _, controller) = makeController(source: source)
+        document.undoManager.removeAllActions()
+        XCTAssertFalse(document.undoManager.canUndo)
+
+        XCTAssertTrue(controller.perform(.formatCJK))
+        XCTAssertEqual(document.source, source)
+        XCTAssertFalse(document.undoManager.canUndo)
     }
 }

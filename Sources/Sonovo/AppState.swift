@@ -180,6 +180,7 @@ final class AppState {
     var subtitles: SubtitleWorkspace { liveProject.subtitles }
     var models: Model3DWorkspace { liveProject.models }
     var code: CodeWorkspace { liveProject.code }
+    var mdx: MDXWorkspace { liveProject.mdx }
     var terminalSessions: TerminalSessionsStore {
         liveProject.terminalSessions
     }
@@ -904,6 +905,8 @@ final class AppState {
             return subtitles.selectedDocument != nil
         case .code:
             return code.selectedDocument?.canAttemptSave == true
+        case .mdx:
+            return mdx.selectedDocument?.isDirty == true
         default:
             return false
         }
@@ -917,6 +920,8 @@ final class AppState {
             await subtitles.saveSelected()
         case .code:
             await code.saveSelected()
+        case .mdx:
+            await mdx.saveSelected()
         default:
             break
         }
@@ -990,6 +995,17 @@ final class AppState {
                         return false
                     }
                 }
+                if project.mdx.hasDirtyDocuments {
+                    let saved = await project.mdx.flushAllForTermination()
+                    guard saved else {
+                        activateProject(project)
+                        if let document = project.mdx.pendingClose
+                            ?? project.mdx.selectedDocument {
+                            revealMDXDocument(document)
+                        }
+                        return false
+                    }
+                }
                 if project.timelines.hasDirtyDocuments {
                     let saved = await project.timelines.flushAllForTermination()
                     guard saved else {
@@ -1027,8 +1043,17 @@ final class AppState {
         pendingCodeCloseOwner?.code.pendingClose
     }
 
+    var pendingMDXCloseOwner: Project? {
+        workspace.allProjects.first { $0.mdx.pendingClose != nil }
+    }
+
+    var pendingMDXCloseDocument: MDXDocument? {
+        pendingMDXCloseOwner?.mdx.pendingClose
+    }
+
     var hasPendingCloseDecision: Bool {
         pendingCloseDocument != nil || pendingCodeCloseDocument != nil
+            || pendingMDXCloseDocument != nil
     }
 
     func savePendingClose() {
@@ -1042,6 +1067,12 @@ final class AppState {
            let document = owner.code.pendingClose {
             revealCodeDocument(document)
             Task { await owner.code.saveAndClose(document) }
+            return
+        }
+        if let owner = pendingMDXCloseOwner,
+           let document = owner.mdx.pendingClose {
+            revealMDXDocument(document)
+            Task { await owner.mdx.saveAndClose(document) }
         }
     }
 
@@ -1054,6 +1085,11 @@ final class AppState {
         if let owner = pendingCodeCloseOwner,
            let document = owner.code.pendingClose {
             owner.code.discardAndClose(document)
+            return
+        }
+        if let owner = pendingMDXCloseOwner,
+           let document = owner.mdx.pendingClose {
+            owner.mdx.discardAndClose(document)
         }
     }
 
@@ -1067,6 +1103,10 @@ final class AppState {
         }
         if let owner = pendingCodeCloseOwner {
             owner.code.cancelPendingClose()
+            owner.cancelBulkClose()
+        }
+        if let owner = pendingMDXCloseOwner {
+            owner.mdx.cancelPendingClose()
             owner.cancelBulkClose()
         }
     }
@@ -1108,6 +1148,20 @@ final class AppState {
             owner: owner
         ) { project in
             project.code.select(document)
+        }
+    }
+
+    /// Brings an MDX document to the front for the same reason.
+    func revealMDXDocument(_ document: MDXDocument) {
+        let owner = workspace.allProjects.first { project in
+            project.mdx.documents.contains { $0 === document }
+        }
+        revealDocument(
+            kind: .mdx,
+            url: document.fileURL,
+            owner: owner
+        ) { project in
+            project.mdx.select(document)
         }
     }
 

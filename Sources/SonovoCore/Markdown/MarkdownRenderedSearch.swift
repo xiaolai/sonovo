@@ -108,7 +108,7 @@ public enum MarkdownRenderedSearch {
         switch block {
         case .paragraph(let inlines, _),
              .heading(_, let inlines, _):
-            return HeadingIndex.renderedText(inlines)
+            return HeadingIndex.renderedText(inlines, includingMath: false)
         case .blockQuote(let children, _):
             return children.map(text(of:)).joined(separator: "\n")
         case .list(let list, _):
@@ -121,17 +121,33 @@ public enum MarkdownRenderedSearch {
             return code.code
         case .table(let table, _):
             let header = table.header.map {
-                HeadingIndex.renderedText($0.inlines)
+                HeadingIndex.renderedText($0.inlines, includingMath: false)
             }
             let rows = table.rows.map { row in
-                row.map { HeadingIndex.renderedText($0.inlines) }
+                row.map { HeadingIndex.renderedText($0.inlines, includingMath: false) }
                     .joined(separator: " ")
             }
             return (header.joined(separator: " ") + " " + rows.joined(separator: " "))
                 .trimmingCharacters(in: .whitespaces)
+        case .definitionList(let list, _):
+            return list.items.map { item in
+                let terms = item.terms.map {
+                    HeadingIndex.renderedText(
+                        $0.inlines,
+                        includingMath: false
+                    )
+                }
+                let definitions = item.definitions.map {
+                    HeadingIndex.renderedText(
+                        $0.inlines,
+                        includingMath: false
+                    )
+                }
+                return (terms + definitions).joined(separator: "\n")
+            }.joined(separator: "\n")
         case .details(let details, _):
             return (
-                [HeadingIndex.renderedText(details.summary)]
+                [HeadingIndex.renderedText(details.summary, includingMath: false)]
                     + details.blocks.map(text(of:))
             ).joined(separator: "\n")
         default:

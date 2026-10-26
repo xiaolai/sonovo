@@ -69,8 +69,17 @@ public indirect enum Block: Sendable, Equatable {
     case htmlBlock(raw: String, range: SourceRange?)
     case thematicBreak(range: SourceRange?)
     case table(TableBlock, range: SourceRange?)
+    case definitionList(DefinitionList, range: SourceRange?)
     case details(DetailsBlock, range: SourceRange?)
     case tableOfContents(range: SourceRange?)
+    /// A `[^label]:` paragraph whose label resolves. The reader hides it in
+    /// place; the collected content renders in the document's footnotes
+    /// section. Unresolved, duplicate, and unreferenced definitions stay
+    /// ordinary literal paragraphs.
+    case footnoteDefinition(label: String, range: SourceRange?)
+    /// The synthesized section appended to the rendered document. Its range
+    /// is nil because it has no authored bytes of its own.
+    case footnotes(FootnoteSection, range: SourceRange?)
 
     /// The source range, when upstream reported one.
     public var range: SourceRange? {
@@ -83,8 +92,11 @@ public indirect enum Block: Sendable, Equatable {
              .htmlBlock(_, let range),
              .thematicBreak(let range),
              .table(_, let range),
+             .definitionList(_, let range),
              .details(_, let range),
-             .tableOfContents(let range):
+             .tableOfContents(let range),
+             .footnoteDefinition(_, let range),
+             .footnotes(_, let range):
             return range
         }
     }
@@ -173,6 +185,55 @@ public struct TableCell: Sendable, Equatable {
     }
 }
 
+/// A definition list: one or more terms followed by one or more definitions.
+///
+/// The block augments a raw paragraph whose lines have the shape `Term`
+/// followed by `: definition`; a paragraph that does not parse completely
+/// stays an ordinary paragraph.
+public struct DefinitionList: Sendable, Equatable {
+    public struct Term: Sendable, Equatable {
+        public let inlines: [Inline]
+        public let range: SourceRange
+
+        public init(inlines: [Inline], range: SourceRange) {
+            self.inlines = inlines
+            self.range = range
+        }
+    }
+
+    public struct Definition: Sendable, Equatable {
+        public let inlines: [Inline]
+        public let range: SourceRange
+
+        public init(inlines: [Inline], range: SourceRange) {
+            self.inlines = inlines
+            self.range = range
+        }
+    }
+
+    public struct Item: Sendable, Equatable {
+        public let terms: [Term]
+        public let definitions: [Definition]
+        public let range: SourceRange
+
+        public init(
+            terms: [Term],
+            definitions: [Definition],
+            range: SourceRange
+        ) {
+            self.terms = terms
+            self.definitions = definitions
+            self.range = range
+        }
+    }
+
+    public let items: [Item]
+
+    public init(items: [Item]) {
+        self.items = items
+    }
+}
+
 /// A `<details>` block. The body is ordinary Markdown.
 public struct DetailsBlock: Sendable, Equatable {
     public let summary: [Inline]
@@ -212,6 +273,12 @@ public indirect enum Inline: Sendable, Equatable {
     case image(destination: String, title: String?, description: [Inline], range: SourceRange?)
     case inlineHTML(String, range: SourceRange?)
     case wikiLink(WikiLink, range: SourceRange?)
+    /// A resolved `[^label]` reference; unresolved references stay text.
+    case footnoteReference(FootnoteReference, range: SourceRange?)
+    /// A resolved math span. `source` is the TeX between delimiters, `raw`
+    /// is the authored slice including them, and `display` marks a
+    /// `$$…$$` paragraph. Rendering failure falls back to `raw`.
+    case math(source: String, raw: String, display: Bool, range: SourceRange?)
 
     /// The source range, when upstream reported one.
     public var range: SourceRange? {
@@ -226,9 +293,58 @@ public indirect enum Inline: Sendable, Equatable {
              .link(_, _, _, let range),
              .image(_, _, _, let range),
              .inlineHTML(_, let range),
-             .wikiLink(_, let range):
+             .wikiLink(_, let range),
+             .footnoteReference(_, let range),
+             .math(_, _, _, let range):
             return range
         }
+    }
+}
+
+/// A resolved footnote reference, numbered by first reference in the
+/// document.
+public struct FootnoteReference: Sendable, Equatable {
+    /// The case-folded, whitespace-normalized label.
+    public let label: String
+    /// The 1-based number the reader sees.
+    public let number: Int
+
+    public init(label: String, number: Int) {
+        self.label = label
+        self.number = number
+    }
+}
+
+/// One rendered footnote: the definition's content and every reference that
+/// points at it, so the reader can jump back.
+public struct FootnoteEntry: Sendable, Equatable {
+    public let number: Int
+    public let label: String
+    public let inlines: [Inline]
+    public let contentRange: SourceRange
+    public let referenceRanges: [SourceRange]
+
+    public init(
+        number: Int,
+        label: String,
+        inlines: [Inline],
+        contentRange: SourceRange,
+        referenceRanges: [SourceRange]
+    ) {
+        self.number = number
+        self.label = label
+        self.inlines = inlines
+        self.contentRange = contentRange
+        self.referenceRanges = referenceRanges
+    }
+}
+
+/// The document's collected footnotes, in number order.
+public struct FootnoteSection: Sendable, Equatable {
+    public let entries: [FootnoteEntry]
+
+    public init(entries: [FootnoteEntry]) {
+        self.entries = entries
     }
 }
 

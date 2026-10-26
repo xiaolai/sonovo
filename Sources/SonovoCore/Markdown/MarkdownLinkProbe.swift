@@ -38,7 +38,9 @@ public actor MarkdownLinkProbeService {
     ) async -> [String: MarkdownProbeOutcome] {
         var outcomes: [String: MarkdownProbeOutcome] = [:]
         var unique: [String] = []
-        for destination in destinations where outcomes[destination] == nil {
+        var seen: Set<String> = []
+        for destination in destinations {
+            guard seen.insert(destination).inserted else { continue }
             guard unique.count < maximumPaths else {
                 outcomes[destination] = .notChecked
                 continue
@@ -49,7 +51,9 @@ public actor MarkdownLinkProbeService {
         let resolver = MarkdownPathResolver(
             documentURL: documentURL,
             root: root,
-            exists: MarkdownPathResolver.liveExists,
+            // The injected probe is the only existence oracle: a test that
+            // substitutes it must see the same answer the resolver uses.
+            exists: exists,
             canonicalize: MarkdownPathResolver.liveCanonical,
             isLocalMount: MarkdownPathResolver.liveIsLocalMount
         )

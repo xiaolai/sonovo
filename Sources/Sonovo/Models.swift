@@ -16,6 +16,7 @@ enum AssetKind: String, Hashable, Sendable {
     case other
     case code
     case timeline
+    case mdx
 
     var icon: String {
         switch self {
@@ -33,6 +34,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .other: "questionmark.square.dashed"
         case .code: "chevron.left.forwardslash.chevron.right"
         case .timeline: "rectangle.3.group"
+        case .mdx: "curlybraces.square"
         }
     }
 
@@ -43,6 +45,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .html: "globe"
         case .code: "chevron.left.forwardslash.chevron.right"
         case .timeline: "rectangle.3.group"
+        case .mdx: "curlybraces.square"
         default: icon
         }
     }
@@ -53,6 +56,7 @@ enum AssetKind: String, Hashable, Sendable {
         case .subtitle: "Subtitles"
         case .model3d: "3D"
         case .timeline: "Timeline"
+        case .mdx: "MDX"
         default: "Workspace"
         }
     }

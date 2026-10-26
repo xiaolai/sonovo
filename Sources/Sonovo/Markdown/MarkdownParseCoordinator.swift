@@ -31,9 +31,13 @@ final class MarkdownParseCoordinator {
         var latestRevision: UInt64 = 0
         var pending: Request?
         var worker: Task<Void, Never>?
+        var workerToken: UInt64 = 0
         var observers: [UUID: (MarkdownParseState) -> Void] = [:]
         var awaiters: [Awaiter] = []
         var lastSuccess: MarkdownParseOutput?
+        /// The parser option the successful output was produced with. A
+        /// repeat request with a different option is a different parse.
+        var lastEnableAutolinks: Bool?
         var closed = false
     }
 
@@ -96,6 +100,7 @@ final class MarkdownParseCoordinator {
             // A new identity invalidates every result from the old one.
             book.identityGeneration = identityGeneration
             book.lastSuccess = nil
+            book.lastEnableAutolinks = nil
             book.pending = nil
             book.worker?.cancel()
             book.worker = nil
@@ -109,7 +114,8 @@ final class MarkdownParseCoordinator {
 
         if case .ready(let output)? = states[documentID],
            output.revision == revision,
-           output.documentID == documentID {
+           output.documentID == documentID,
+           book.lastEnableAutolinks == enableAutolinks {
             bookkeeping[documentID] = book
             return
         }
@@ -137,6 +143,14 @@ final class MarkdownParseCoordinator {
            settled >= revision,
            !state.isParsing {
             return state
+        }
+        // A document parked by `giveUp` or reset by a new identity is idle
+        // with no pending request; nothing will publish a revision for it, so
+        // suspending here would leak the continuation for the rest of the
+        // session.
+        if case .idle? = states[documentID],
+           bookkeeping[documentID]?.pending == nil {
+            return .idle
         }
         return await withCheckedContinuation { continuation in
             var book = bookkeeping[documentID] ?? Bookkeeping()
@@ -184,15 +198,26 @@ final class MarkdownParseCoordinator {
 
     private func startWorker(_ documentID: UUID) {
         guard bookkeeping[documentID]?.worker == nil else { return }
+        var book = bookkeeping[documentID] ?? Bookkeeping()
+        book.workerToken &+= 1
+        let token = book.workerToken
         let task = Task { @MainActor [weak self] in
             await self?.drain(documentID)
-            self?.workerDidFinish(documentID)
+            self?.workerDidFinish(documentID, token: token)
         }
-        bookkeeping[documentID]?.worker = task
+        book.worker = task
+        bookkeeping[documentID] = book
     }
 
-    private func workerDidFinish(_ documentID: UUID) {
-        guard var book = bookkeeping[documentID] else { return }
+    /// Only the worker that is still current may clear the handle or start a
+    /// replacement. A cancelled worker can outlive its cancellation while an
+    /// in-flight parse ignores it; without the token it would clear a newer
+    /// worker's handle and allow concurrent drains.
+    private func workerDidFinish(_ documentID: UUID, token: UInt64) {
+        guard var book = bookkeeping[documentID],
+              book.workerToken == token else {
+            return
+        }
         book.worker = nil
         bookkeeping[documentID] = book
         // A request that arrived between the last drain and this line must
@@ -234,13 +259,17 @@ final class MarkdownParseCoordinator {
                    output.revision == request.revision {
                     if current.identityGeneration
                         == request.identityGeneration {
-                        publish(output, for: documentID)
+                        publish(
+                            output,
+                            for: documentID,
+                            enableAutolinks: request.enableAutolinks
+                        )
                     }
                     continue outer
                 }
 
                 attempt += 1
-                if attempt > maximumAttempts {
+                if attempt >= maximumAttempts {
                     giveUp(documentID)
                     continue outer
                 }
@@ -255,7 +284,8 @@ final class MarkdownParseCoordinator {
 
     private func publish(
         _ output: MarkdownParseOutput,
-        for documentID: UUID
+        for documentID: UUID,
+        enableAutolinks: Bool
     ) {
         guard var book = bookkeeping[documentID] else { return }
         let state: MarkdownParseState
@@ -264,6 +294,7 @@ final class MarkdownParseCoordinator {
             state = .refused(.nestingLimit, revision: output.revision)
         } else {
             book.lastSuccess = output
+            book.lastEnableAutolinks = enableAutolinks
             state = .ready(output)
         }
         states[documentID] = state

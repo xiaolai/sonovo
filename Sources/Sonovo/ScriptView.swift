@@ -7,7 +7,7 @@ struct ScriptView: View {
     let project: Project
 
     var body: some View {
-        MarkdownWorkspaceView(workspace: project.markdown)
+        MarkdownWorkspaceView(project: project)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

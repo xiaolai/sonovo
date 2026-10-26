@@ -22,7 +22,10 @@ struct CommandTests {
 
     @Test("A table command rewrites only the table block")
     func tableCommand() throws {
-        let source = "before\n| a | b |\n| --- | --- |\n| 1 | 2 |\nafter"
+        // A blank line ends the table. Without it the trailing `after` line
+        // is a valid one-cell GFM body row, and its width legitimately
+        // changes the inserted row's padding.
+        let source = "before\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nafter"
         let caret = (source as NSString).range(of: "1").location
         let result = try apply(
             .insertTableRowBelow,

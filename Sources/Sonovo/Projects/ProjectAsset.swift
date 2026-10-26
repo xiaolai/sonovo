@@ -83,7 +83,7 @@ extension AssetKind {
                 title: "Subtitles",
                 order: 2
             )
-        case .code:
+        case .code, .mdx:
             ProjectGroupDescriptor(
                 id: "code",
                 title: "Code",

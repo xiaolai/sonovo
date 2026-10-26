@@ -38,7 +38,7 @@ struct EditorContentView: View {
             HTMLPreviewView()
         case .delivery:
             DeliveryView(state: state, project: project)
-        case .code:
+        case .code, .mdx:
             EmptyEditorView()
         case .timeline:
             TimelineDocumentView(
@@ -58,13 +58,15 @@ struct EditorContentView: View {
     private func projectContent(for tab: EditorTab) -> some View {
         switch tab.kind {
         case .script:
-            MarkdownWorkspaceView(workspace: project.markdown)
+            MarkdownWorkspaceView(project: project)
         case .subtitle:
             SubtitleWorkspaceView(project: project)
         case .model3d:
             Model3DWorkspaceView(project: project)
         case .code:
             CodeWorkspaceView(workspace: project.code, project: project)
+        case .mdx:
+            MDXWorkspaceView(workspace: project.mdx, project: project)
         case .timeline:
             TimelineDocumentView(
                 workspace: project.timelines,

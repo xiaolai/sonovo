@@ -446,12 +446,59 @@ public actor MarkdownSnapshotStore {
         guard case let .bytes(before, _) = load(id: transition.beforeID) else {
             return .evidenceUnavailable
         }
+        // Record the decision only after the caller has actually replaced
+        // the file. A failed restore must leave the transition undecided.
+        guard commitRevert(transitionID: transitionID) else {
+            return .alreadyDecided
+        }
+        return .revert(before)
+    }
+
+    /// Validates a revert and returns its bytes without recording anything.
+    /// The caller restores the file, then calls `commitRevert`.
+    public func prepareRevert(
+        transitionID: UUID,
+        currentDiskBytes: Data
+    ) -> MarkdownReviewDecision {
+        let index = readIndex()
+        guard var transitions = index.transitions,
+              let position = transitions.firstIndex(where: {
+                  $0.id == transitionID
+              }) else {
+            return .evidenceUnavailable
+        }
+        let transition = transitions[position]
+        guard transition.decision == nil else {
+            return .alreadyDecided
+        }
+        guard Self.sha256(currentDiskBytes) == transition.afterSha else {
+            return .staleDisk
+        }
+        guard case let .bytes(before, _) = load(id: transition.beforeID) else {
+            return .evidenceUnavailable
+        }
+        return .revert(before)
+    }
+
+    /// Records a validated revert after the file replacement succeeded.
+    @discardableResult
+    public func commitRevert(transitionID: UUID) -> Bool {
+        var index = readIndex()
+        guard var transitions = index.transitions,
+              let position = transitions.firstIndex(where: {
+                  $0.id == transitionID
+              }) else {
+            return false
+        }
+        guard transitions[position].decision == nil else { return false }
+        var baselines = index.baselines ?? [:]
+        let transition = transitions[position]
         baselines[transition.relativePath] = transition.beforeID
         transitions[position].decision = "reverted"
         index.transitions = transitions
         index.baselines = baselines
         writeIndexQuietly(index)
-        return .revert(before)
+        return true
     }
 
     /// Capture without re-reading the index; the caller already holds it.

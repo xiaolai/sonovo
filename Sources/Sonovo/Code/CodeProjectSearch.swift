@@ -13,6 +13,25 @@ struct CodeSearchMatch: Identifiable, Equatable, Sendable {
     var id: String { "\(url.path):\(line):\(column)" }
 }
 
+/// Which files a project search may open.
+enum CodeSearchScope: Sendable {
+    /// Code files only, for the Code viewer's Find in Files.
+    case code
+    /// Markdown documents, for the Markdown workspace's Find in Files.
+    case markdown
+
+    func includes(_ filename: String) -> Bool {
+        switch self {
+        case .code:
+            return CodeLanguage.language(forFilename: filename) != nil
+        case .markdown:
+            return ProjectScanner.markdownExtensions.contains(
+                (filename as NSString).pathExtension.lowercased()
+            )
+        }
+    }
+}
+
 struct CodeSearchResult: Equatable, Sendable {
     let matches: [CodeSearchMatch]
     let filesSearched: Int
@@ -63,6 +82,7 @@ struct CodeProjectSearch: Sendable {
     func search(
         root: URL,
         query: String,
+        scope: CodeSearchScope = .code,
         caseSensitive: Bool = false
     ) async -> CodeSearchResult {
         let trimmed = query
@@ -88,6 +108,7 @@ struct CodeProjectSearch: Sendable {
             Self.run(
                 root: root,
                 query: trimmed,
+                scope: scope,
                 options: options,
                 limit: limit,
                 perFileBytes: perFile,
@@ -104,6 +125,7 @@ struct CodeProjectSearch: Sendable {
     private static func run(
         root: URL,
         query: String,
+        scope: CodeSearchScope,
         options: NSString.CompareOptions,
         limit: Int,
         perFileBytes: Int,
@@ -186,9 +208,7 @@ struct CodeProjectSearch: Sendable {
             guard values.isRegularFile == true || isSymbolicLink else {
                 continue
             }
-            guard CodeLanguage.language(
-                forFilename: entry.lastPathComponent
-            ) != nil else {
+            guard scope.includes(entry.lastPathComponent) else {
                 continue
             }
 

@@ -92,9 +92,10 @@ enum ReferenceDefinitionScanner {
             if destination.hasPrefix("<"), destination.hasSuffix(">"), destination.count >= 2 {
                 destination = String(destination.dropFirst().dropLast())
             }
-            // Store the semantic value: one backslash escape removed and no
-            // container continuation markers. Serializers escape it once.
-            destination = decodeBackslashEscapes(destination)
+            // Store the semantic value: backslash escapes and character
+            // references decoded, and no container continuation markers.
+            // Serializers escape it once.
+            destination = decodeEscapesAndEntities(destination)
 
             var title: String?
             for group in 3...5 where match.range(at: group).location != NSNotFound {
@@ -148,14 +149,17 @@ enum ReferenceDefinitionScanner {
         // Keep the line endings: a space would change the parsed title.
         // The definition serializer emits the title across lines exactly as
         // stored.
-        return decodeBackslashEscapes(lines.joined(separator: "\n"))
+        return decodeEscapesAndEntities(lines.joined(separator: "\n"))
     }
 
-    private static let escapablePunctuation = Set(
-        "!\\\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
-    )
-
-    static func decodeBackslashEscapes(_ text: String) -> String {
+    /// Decodes backslash escapes and character references in one pass.
+    ///
+    /// The order matters: decoding escapes first turns `\&copy;` into
+    /// `&copy;`, which a later entity pass rewrites to `©`, so an escaped
+    /// ampersand would silently become an entity introducer. Processing the
+    /// source left to right keeps an escaped `&` literal and lets the
+    /// serializer escape it on the way out.
+    static func decodeEscapesAndEntities(_ text: String) -> String {
         var result = ""
         result.reserveCapacity(text.count)
         var index = text.startIndex
@@ -164,9 +168,16 @@ enum ReferenceDefinitionScanner {
             let nextIndex = text.index(after: index)
             if character == "\\",
                nextIndex < text.endIndex,
-               escapablePunctuation.contains(text[nextIndex]) {
+               MarkdownEscaping.punctuation.contains(text[nextIndex]) {
                 result.append(text[nextIndex])
                 index = text.index(after: nextIndex)
+            } else if character == "&",
+                      let reference = HTMLEntities.decodeReference(
+                          in: text,
+                          at: index
+                      ) {
+                result.append(reference.character)
+                index = reference.end
             } else {
                 result.append(character)
                 index = nextIndex
@@ -187,21 +198,50 @@ enum ReferenceDefinitionSerializer {
         return line
     }
 
+    /// Serializes a decoded destination so it re-parses to the same value.
+    ///
+    /// The bare form has no escape of its own beyond backslash escapes and
+    /// must keep parentheses balanced; the angle form takes its text
+    /// literally but cannot contain `<`, `>`, or a line ending. A literal
+    /// ampersand is escaped in both forms: the semantic `&copy;` would
+    /// otherwise reparse as `©`.
     static func destination(_ value: String) -> String {
-        if value.rangeOfCharacter(from: .whitespacesAndNewlines) != nil
-            || value.contains("<") || value.contains(">") {
-            let escaped = value
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "<", with: "\\<")
-                .replacingOccurrences(of: ">", with: "\\>")
-            return "<\(escaped)>"
+        let needsAngle = value.isEmpty
+            || value.rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+            || value.contains("<")
+            || value.contains(">")
+            || value.contains("\\")
+            || !parenthesesBalanced(value)
+        let escaped = value.replacingOccurrences(of: "&", with: "&amp;")
+        guard needsAngle else { return escaped }
+        // Angle destinations still process backslash escapes: a literal
+        // backslash must be doubled or the reparse changes the value.
+        let encoded = escaped
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "<", with: "%3C")
+            .replacingOccurrences(of: ">", with: "%3E")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        return "<\(encoded)>"
+    }
+
+    private static func parenthesesBalanced(_ value: String) -> Bool {
+        var depth = 0
+        for character in value {
+            if character == "(" {
+                depth += 1
+            } else if character == ")" {
+                depth -= 1
+                if depth < 0 { return false }
+            }
         }
-        return value
+        return depth == 0
     }
 
     static func escapedTitle(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

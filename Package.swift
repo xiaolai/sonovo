@@ -24,6 +24,14 @@ let package = Package(
         .package(
             url: "https://github.com/swiftlang/swift-cmark.git",
             branch: "release/6.4.x"
+        ),
+        // Math typesetting is native: TeX is laid out by SwiftMath's Core
+        // Graphics typesetter, with no JavaScript and no network. Pinned to
+        // an exact release; the bundled math fonts carry their own
+        // GUST/OFL/STIX licenses (see THIRD_PARTY_NOTICES.md).
+        .package(
+            url: "https://github.com/mgriebling/SwiftMath.git",
+            exact: "1.7.3"
         )
     ],
     targets: [
@@ -37,6 +45,18 @@ let package = Package(
                 .product(name: "Markdown", package: "swift-markdown")
             ],
             path: "Sources/SonovoCore"
+        ),
+        // The MDX compiler runs only in the helper process; the kit is linked
+        // by that helper and by tests. The app target links it for the shared
+        // request, response, import-graph, and page-building types.
+        .target(
+            name: "SonovoMDXKit",
+            path: "Sources/SonovoMDXKit"
+        ),
+        .executableTarget(
+            name: "SonovoMDXHelper",
+            dependencies: ["SonovoMDXKit"],
+            path: "Sources/SonovoMDXHelper"
         ),
         .target(
             name: "ReferenceAst",
@@ -55,7 +75,9 @@ let package = Package(
             name: "Sonovo",
             dependencies: [
                 "GhosttyKit",
-                "SonovoCore"
+                "SonovoCore",
+                "SonovoMDXKit",
+                "SwiftMath"
             ],
             path: "Sources/Sonovo",
             resources: [
@@ -66,7 +88,12 @@ let package = Package(
                 .copy("Resources/AppIcon.png"),
                 .copy("Resources/ModelViewer"),
                 .copy("Resources/ReadingThemes"),
-                .copy("Resources/SampleProject")
+                .copy("Resources/SampleProject"),
+                .copy("Resources/mermaid-12.2.0.min.js"),
+                .copy("Resources/viz-global-3.31.0.min.js"),
+                .copy("Resources/markmap-0.18.12.min.js"),
+                .copy("Resources/mdx-compiler-3.1.1.js"),
+                .copy("Resources/mdx-runtime-19.3.1.js")
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),
@@ -92,6 +119,11 @@ let package = Package(
             resources: [
                 .copy("Fixtures")
             ]
+        ),
+        .testTarget(
+            name: "SonovoMDXKitTests",
+            dependencies: ["SonovoMDXKit"],
+            path: "Tests/SonovoMDXKitTests"
         ),
         .testTarget(
             name: "SonovoAppTests",

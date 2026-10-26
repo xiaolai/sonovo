@@ -72,12 +72,15 @@ public struct MarkdownPathResolver: Sendable {
 
         var firstMissing: URL?
         for candidate in lexical.candidates {
+            // Classify the volume before any filesystem-backed resolution:
+            // canonicalizing a path on a network mount can block far past
+            // the probe's deadline.
+            guard isLocalMount(candidate) else {
+                return .refused(.nonLocalMount)
+            }
             let canonical = canonicalize(candidate)
             guard MarkdownSecurity.contains(canonical, in: lexical.effectiveRoot) else {
                 return .refused(.outsideRoot)
-            }
-            guard isLocalMount(canonical) else {
-                return .refused(.nonLocalMount)
             }
             if exists(canonical) {
                 return .resolved(canonical)
@@ -123,7 +126,8 @@ public struct MarkdownPathResolver: Sendable {
         switch MarkdownSecurity.linkDecision(for: trimmed) {
         case .denied:
             throw MarkdownPathRefusal.notLocal
-        case .allowed(.external), .allowed(.mailto), .allowed(.fragment):
+        case .allowed(.external), .allowed(.mailto), .allowed(.fragment),
+             .allowed(.media):
             throw MarkdownPathRefusal.notLocal
         case .allowed(.local):
             break
@@ -149,7 +153,11 @@ public struct MarkdownPathResolver: Sendable {
         let projectRoot = root?.standardizedFileURL
         let documentIsInRoot: Bool
         if let documentDirectory, let projectRoot {
-            documentIsInRoot = MarkdownSecurity.contains(
+            // Lexical only: this phase must not touch the filesystem. A
+            // document that reaches the root through a symlink resolves
+            // against its own directory instead; the filesystem phase still
+            // rejects a candidate that canonicalizes outside the root.
+            documentIsInRoot = lexicallyContains(
                 documentDirectory,
                 in: projectRoot
             )
@@ -175,7 +183,7 @@ public struct MarkdownPathResolver: Sendable {
             let candidate = documentDirectory
                 .appendingPathComponent(path)
                 .standardizedFileURL
-            guard MarkdownSecurity.contains(candidate, in: effectiveRoot) else {
+            guard lexicallyContains(candidate, in: effectiveRoot) else {
                 throw MarkdownPathRefusal.outsideRoot
             }
             results.append(candidate)
@@ -184,7 +192,7 @@ public struct MarkdownPathResolver: Sendable {
             let candidate = projectRoot
                 .appendingPathComponent(path)
                 .standardizedFileURL
-            guard MarkdownSecurity.contains(candidate, in: projectRoot) else {
+            guard lexicallyContains(candidate, in: projectRoot) else {
                 throw MarkdownPathRefusal.outsideRoot
             }
             results.append(candidate)
@@ -193,12 +201,9 @@ public struct MarkdownPathResolver: Sendable {
                 .appendingPathComponent(path)
                 .standardizedFileURL
             // A relative path that climbs out of the project is not a
-            // root-relative candidate. A candidate that is lexically inside
-            // but canonicalizes outside is a symlink escape and refuses.
+            // root-relative candidate. Symlink containment is checked in the
+            // filesystem phase, after the mount is known to be local.
             if lexicallyContains(candidate, in: projectRoot) {
-                guard MarkdownSecurity.contains(candidate, in: projectRoot) else {
-                    throw MarkdownPathRefusal.outsideRoot
-                }
                 if !results.contains(candidate) {
                     results.append(candidate)
                 }
@@ -230,16 +235,30 @@ public struct MarkdownPathResolver: Sendable {
     }
 
     public static func liveIsLocalMount(_ url: URL) -> Bool {
-        // A missing leaf has no resource values. Classify the deepest
-        // existing ancestor instead: the volume is what decides locality, not
-        // whether the target file already exists.
-        var probe = url.standardizedFileURL
-        while !FileManager.default.fileExists(atPath: probe.path) {
-            let parent = probe.deletingLastPathComponent()
-            if parent.path == probe.path { break }
-            probe = parent
+        let path = url.standardizedFileURL.path
+        // Classify from the mounted-volume table, not by probing the
+        // destination: `fileExists` on a path inside an unresponsive network
+        // mount blocks until the transport times out, which a synchronous
+        // resolver cannot interrupt. The mount table is local kernel state.
+        let volumes = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: [.volumeIsLocalKey],
+            options: []
+        ) ?? []
+        var match: (path: String, url: URL)?
+        for volume in volumes {
+            let volumePath = volume.standardizedFileURL.path
+            let prefix = volumePath == "/" ? "/" : volumePath + "/"
+            guard path == volumePath || path.hasPrefix(prefix) else {
+                continue
+            }
+            if match == nil || volumePath.count > match!.path.count {
+                match = (volumePath, volume)
+            }
         }
-        guard let values = try? probe.resourceValues(
+        // The root volume is always mounted; a path with no matching mount
+        // is denied rather than probed.
+        guard let match else { return false }
+        guard let values = try? match.url.resourceValues(
             forKeys: [.volumeIsLocalKey]
         ) else {
             return false

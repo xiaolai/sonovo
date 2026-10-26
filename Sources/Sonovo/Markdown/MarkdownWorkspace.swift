@@ -10,6 +10,12 @@ extension Notification.Name {
     )
 }
 
+/// Which of the two visible Markdown panes a document occupies.
+enum MarkdownPane: Sendable, Equatable {
+    case primary
+    case secondary
+}
+
 /// Owns the open Markdown documents, their tabs, autosave, and watchers.
 @MainActor
 @Observable
@@ -19,12 +25,44 @@ final class MarkdownWorkspace {
     let editorCache: MarkdownEditorCache
     let linkProbe = MarkdownLinkProbeService()
     private(set) var lintResults: [UUID: MarkdownLintResult] = [:]
+
+    /// Lint diagnostics only while they describe the current revision. A
+    /// result from before an edit would mark ranges that have moved.
+    func lintDiagnostics(for document: MarkdownDocument) -> [MarkdownDiagnostic] {
+        guard let result = lintResults[document.id],
+              result.revision == document.revision else {
+            return []
+        }
+        return result.diagnostics
+    }
     var isPaletteVisible = false
     var isOutlineVisible = false
     var isQuickOpenVisible = false
     var isHistoryVisible = false
-    let renderedFind = RenderedFindController()
+    /// Rendered find is per document: two panes each keep their own query,
+    /// matches, and current index, so neither replaces the other's results.
+    private var renderedFinds: [UUID: RenderedFindController] = [:]
+    /// Review comments live in a sidecar beside each document; this
+    /// controller owns their state and every write.
+    let reviewComments = ReviewCommentsController()
     var isReviewVisible = false
+
+    /// The proposal currently previewed in the diff sheet. Nil when no sheet
+    /// is open. The proposal file is the only source of truth; nothing about
+    /// it is cached beyond this preview.
+    struct ProposalPreview: Identifiable {
+        let fileURL: URL
+        let proposal: MarkdownProposal
+        /// The exact source the preview validated against, so a stale sheet
+        /// can refuse instead of applying to a changed document.
+        let expectedSource: String
+
+        var id: String { fileURL.path }
+    }
+
+    var proposalPreview: ProposalPreview?
+    var isProposalVisible = false
+    var proposalError: String?
     /// Bumped whenever snapshots or transitions change, so panels refresh.
     private(set) var historyRevision = 0
     /// The owning project routes a local asset link to its viewer. Returns
@@ -35,7 +73,12 @@ final class MarkdownWorkspace {
     private let store: MarkdownFileStore
 
     private(set) var documents: [MarkdownDocument] = []
+    /// The primary (left) pane's document.
     var selectedDocumentID: UUID?
+    /// The second pane's document; nil when only one pane is open.
+    var secondaryDocumentID: UUID?
+    /// The document whose pane owns commands and the project's active tab.
+    var focusedDocumentID: UUID?
     private(set) var workspaceRoot: URL?
     /// Incremented when the effective root changes, so a captured action
     /// target can refuse after a project switch.
@@ -72,15 +115,45 @@ final class MarkdownWorkspace {
     }
     var scrollTargets: [UUID: String] = [:]
 
+    /// Documents showing Source and Rendered side by side. Session-only by
+    /// design: the saved `mode` is the surface a document reopens in.
+    private(set) var splitDocuments: Set<UUID> = []
+    /// Source offsets the rendered pane wants the source pane to reveal.
+    var sourceScrollTargets: [UUID: Int] = [:]
+    /// Whether split scrolling follows the other pane.
+    var isSplitScrollSynced = true
+    /// The clock behind split-scroll echo suppression. Tests replace it.
+    @ObservationIgnored
+    var splitSyncNow: () -> Date = { Date() }
+
+    private enum SplitSyncDirection {
+        case source
+        case rendered
+    }
+
+    private struct SplitSyncIgnore {
+        let direction: SplitSyncDirection
+        let until: Date
+    }
+
+    @ObservationIgnored
+    private var splitReturnModes: [UUID: MarkdownDocumentMode] = [:]
+    @ObservationIgnored
+    private var splitSyncIgnore: [UUID: SplitSyncIgnore] = [:]
+
     /// Per-document reading state for the current session. Source keeps the
     /// selection and the scroll origin; Rendered keeps its last scroll ID.
     struct ReadingPosition {
         var selection: Range<Int>?
-        var sourceScrollY: CGFloat?
-        var renderedAnchor: String?
+        var source: SourceReadingAnchor?
+        var rendered: RenderedReadingAnchor?
     }
 
+    @ObservationIgnored
     private var readingPositions: [UUID: ReadingPosition] = [:]
+    /// A rendered anchor waiting for the viewer to mount after a surface or
+    /// tab switch. The viewer clears its entry once it has scrolled there.
+    var pendingRenderedAnchors: [UUID: RenderedReadingAnchor] = [:]
     private var watchers: [UUID: MarkdownFileWatcher] = [:]
     @ObservationIgnored
     private var autosave: AutosaveDriver<MarkdownDocument>!
@@ -121,7 +194,16 @@ final class MarkdownWorkspace {
         }
         documents.removeAll()
         watchers.removeAll()
+        reviewComments.discardAll()
         scrollTargets.removeAll()
+        splitDocuments.removeAll()
+        sourceScrollTargets.removeAll()
+        splitReturnModes.removeAll()
+        splitSyncIgnore.removeAll()
+        secondaryDocumentID = nil
+        focusedDocumentID = nil
+        readingPositions.removeAll()
+        pendingRenderedAnchors.removeAll()
         pendingClose = nil
         workspaceWatcher?.stop()
         workspaceWatcher = nil
@@ -131,9 +213,47 @@ final class MarkdownWorkspace {
         watcherRetryTask = nil
     }
 
-    var selectedDocument: MarkdownDocument? {
+    /// The document in the primary (left) pane.
+    var primaryDocument: MarkdownDocument? {
         guard let selectedDocumentID else { return nil }
         return documents.first { $0.id == selectedDocumentID }
+    }
+
+    /// The document in the second pane, when one is open.
+    var secondaryDocument: MarkdownDocument? {
+        guard let secondaryDocumentID else { return nil }
+        return documents.first { $0.id == secondaryDocumentID }
+    }
+
+    /// The pane that owns commands, formatting, find, save, and the project's
+    /// active tab. It defaults to the primary pane and follows the last
+    /// focused pane in a two-document split.
+    var focusedDocument: MarkdownDocument? {
+        if let focusedDocumentID,
+           let focused = documents.first(where: { $0.id == focusedDocumentID }) {
+            return focused
+        }
+        return primaryDocument
+    }
+
+    /// Command-facing selection. In a two-document split this is the focused
+    /// pane's document, so every existing command path follows focus without
+    /// a second routing table.
+    var selectedDocument: MarkdownDocument? { focusedDocument }
+
+    var focusedPane: MarkdownPane {
+        if let secondaryDocumentID, focusedDocumentID == secondaryDocumentID {
+            return .secondary
+        }
+        return .primary
+    }
+
+    /// The pane currently showing `document`, or nil when it is open but not
+    /// on screen.
+    func pane(of document: MarkdownDocument) -> MarkdownPane? {
+        if document.id == selectedDocumentID { return .primary }
+        if document.id == secondaryDocumentID { return .secondary }
+        return nil
     }
 
     var hasDirtyDocuments: Bool {
@@ -207,6 +327,7 @@ final class MarkdownWorkspace {
         let document = MarkdownDocument(untitledWith: store)
         document.mode = .source
         documents.append(document)
+        ensureRenderedFind(for: document)
         setSelectedDocument(document)
         return document
     }
@@ -242,6 +363,7 @@ final class MarkdownWorkspace {
             let document = try MarkdownDocument(loading: target, store: store)
             document.mode = Self.defaultOpenMode
             documents.append(document)
+            ensureRenderedFind(for: document)
             setSelectedDocument(document)
             startWatcher(for: document)
             if workspaceRoot == nil {
@@ -256,14 +378,49 @@ final class MarkdownWorkspace {
     }
 
     func select(_ document: MarkdownDocument) {
+        if let current = selectedDocument, current.id != document.id {
+            captureReadingPosition(for: current)
+        }
+        if document.mode == .rendered,
+           let anchor = readingPositions[document.id]?.rendered {
+            pendingRenderedAnchors[document.id] = anchor
+        }
         setSelectedDocument(document)
     }
 
     private func setSelectedDocument(_ document: MarkdownDocument) {
-        selectedDocumentID = document.id
+        if secondaryDocumentID != nil {
+            // The focused pane receives the new document. A document already
+            // visible in the other pane is focused, never duplicated.
+            switch focusedPane {
+            case .primary:
+                if document.id == secondaryDocumentID {
+                    focusedDocumentID = document.id
+                } else {
+                    selectedDocumentID = document.id
+                    focusedDocumentID = document.id
+                }
+            case .secondary:
+                if document.id == selectedDocumentID {
+                    focusedDocumentID = document.id
+                } else {
+                    secondaryDocumentID = document.id
+                    focusedDocumentID = document.id
+                }
+            }
+        } else {
+            selectedDocumentID = document.id
+            focusedDocumentID = document.id
+        }
         // An untitled document still changes the identity on screen; the
         // owning tab must stop naming the previously selected file.
         onDocumentActivated?(document.fileURL)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.reviewComments.load(document)
+            self.editorCache.cachedEntry(for: document.id)?
+                .controller.refreshReviewMarkers()
+        }
     }
 
     /// Returns true only when the document was actually closed. A document
@@ -332,6 +489,9 @@ final class MarkdownWorkspace {
 
     private func remove(_ document: MarkdownDocument) {
         let id = document.id
+        let secondarySurvivor = secondaryDocumentID.flatMap { secondaryID in
+            documents.first { $0.id == secondaryID }
+        }
         document.markClosed()
         // A pending decision whose document closed through another path is
         // no longer pending. Keeping it would make the next close report a
@@ -343,15 +503,39 @@ final class MarkdownWorkspace {
         watchers[id]?.stop()
         watchers.removeValue(forKey: id)
         editorCache.remove(for: id)
+        reviewComments.discard(documentID: id)
+        renderedFinds.removeValue(forKey: id)
         documents.removeAll { $0.id == id }
         scrollTargets.removeValue(forKey: id)
+        splitDocuments.remove(id)
+        sourceScrollTargets.removeValue(forKey: id)
+        splitReturnModes.removeValue(forKey: id)
+        splitSyncIgnore.removeValue(forKey: id)
+        readingPositions.removeValue(forKey: id)
+        pendingRenderedAnchors.removeValue(forKey: id)
         autosave.forget(id)
         // The parse service otherwise retains this document's AST, heading
         // index, and source for the life of the process.
         parseCoordinator.release(documentID: id)
 
+        if secondaryDocumentID == id {
+            secondaryDocumentID = nil
+        }
         if selectedDocumentID == id {
-            selectedDocumentID = documents.first?.id
+            // The surviving secondary pane becomes the primary, so closing
+            // the left document never leaves an empty editor.
+            if let survivor = secondarySurvivor, survivor.id != id {
+                selectedDocumentID = survivor.id
+                secondaryDocumentID = nil
+            } else {
+                selectedDocumentID = documents.first?.id
+            }
+        }
+        if focusedDocumentID == id || focusedDocumentID == nil {
+            focusedDocumentID = selectedDocumentID
+        }
+        if let focused = focusedDocument {
+            onDocumentActivated?(focused.fileURL)
         }
         // An untitled document has no file to remove tabs for, but its
         // removal still completes a deferred close (and must resume a bulk
@@ -419,6 +603,12 @@ final class MarkdownWorkspace {
             startWatcher(for: document)
             registerWorkspaceFile(target)
             lastError = nil
+            // Comments belong to the file identity: a Save As adopts the new
+            // path's sidecar, not the old file's threads.
+            reviewComments.discard(documentID: document.id)
+            await reviewComments.load(document)
+            editorCache.cachedEntry(for: document.id)?
+                .controller.refreshReviewMarkers()
             await recordSaveHistory(for: document, kind: .explicit)
             if let previousURL {
                 onDocumentMoved?(previousURL, target)
@@ -491,13 +681,13 @@ final class MarkdownWorkspace {
     // MARK: - Mode
 
     func toggleMode() {
-        renderedFind.close()
-        guard let document = selectedDocument else { return }
-        if document.isSourceOnly {
-            document.mode = .source
+        if let current = selectedDocument {
+            renderedFind(for: current).close()
+        }
+        guard let document = selectedDocument, !document.isSourceOnly else {
             return
         }
-        document.mode = document.mode == .source ? .rendered : .source
+        setMode(document.mode == .source ? .rendered : .source, for: document)
     }
 
     /// Select the source range of a rendered block. The slice the viewer
@@ -556,44 +746,388 @@ final class MarkdownWorkspace {
             lastError = "This block changed. Switch to Source and try again."
             return
         }
-        document.mode = .source
+        setMode(.source, for: document)
+        setSourceAnchor(for: document, selection: target.range)
         controller(for: document).select(range: target.range)
     }
 
+    /// Sets the authored `open` default of a rendered details block. The
+    /// slice the viewer parsed is compared with the current bytes first; a
+    /// changed block refuses rather than editing the wrong tag.
+    func setDetailsOpenDefault(
+        at range: SourceRange,
+        expectedSource: String,
+        open: Bool,
+        in document: MarkdownDocument
+    ) {
+        guard !document.isReadOnly else {
+            lastError = "This document is read-only."
+            return
+        }
+        let expected = expectedSource as NSString
+        let current = document.source as NSString
+        let length = range.upperBound - range.lowerBound
+        guard range.lowerBound >= 0,
+              range.upperBound <= expected.length,
+              range.upperBound <= current.length else {
+            lastError = "This block is no longer available."
+            return
+        }
+        let expectedSlice = expected.substring(
+            with: NSRange(location: range.lowerBound, length: length)
+        )
+        let currentSlice = current.substring(
+            with: NSRange(location: range.lowerBound, length: length)
+        )
+        guard currentSlice == expectedSlice else {
+            lastError = "This block changed. Switch to Source and try again."
+            return
+        }
+        // The command locates the opening tag strictly before the caret, so
+        // the caret goes just inside the block's own tag. An indented block
+        // starts with whitespace; skip it to the `<`.
+        var tagStart = range.lowerBound
+        while tagStart < range.upperBound,
+              current.character(at: tagStart) == 0x20
+                || current.character(at: tagStart) == 0x09 {
+            tagStart += 1
+        }
+        let prefixLength = "<details".utf16.count
+        guard tagStart + prefixLength <= current.length,
+              current.substring(
+                  with: NSRange(location: tagStart, length: prefixLength)
+              ).lowercased() == "<details" else {
+            lastError = "This details block could not be located in the source."
+            return
+        }
+        controller(for: document).setDetailsOpenDefault(
+            open: open,
+            at: tagStart + 1
+        )
+    }
+
     /// Capture the current surface's reading state before a tab or mode
-    /// switch. Source keeps the selection and the scroll origin; Rendered
-    /// keeps its last scroll ID. Selection changes are view state, not undo.
+    /// switch. The source surface computes its anchor on demand; the rendered
+    /// surface reports its anchor while scrolling, so only the selection
+    /// needs copying here. Selection changes are view state, not undo.
     func captureReadingPosition(for document: MarkdownDocument) {
+        guard document.mode == .source || isSplitView(document) else {
+            return
+        }
         var position = readingPositions[document.id] ?? ReadingPosition()
         position.selection = document.selection
-        if document.mode == .source,
-           let entry = editorCache.cachedEntry(for: document.id) {
-            position.sourceScrollY = entry.scrollView.contentView.bounds.origin.y
+        if let entry = editorCache.cachedEntry(for: document.id),
+           let anchor = entry.controller.readingAnchor() {
+            position.source = anchor
         }
-        position.renderedAnchor = scrollTargets[document.id]
         readingPositions[document.id] = position
     }
 
     /// Restore a captured position without changing the document or its
-    /// undo history.
+    /// undo history. The source surface restores from `sourceReadingAnchor`
+    /// when it mounts; the rendered surface consumes a pending anchor.
     func restoreReadingPosition(for document: MarkdownDocument) {
         guard let position = readingPositions[document.id] else { return }
-        if document.mode == .source,
-           let entry = editorCache.cachedEntry(for: document.id) {
+        if isSplitView(document) {
+            // Both surfaces are mounted; each restores its own position.
             if let selection = position.selection {
                 document.selection = selection
             }
-            if let y = position.sourceScrollY {
-                entry.scrollView.contentView.scroll(
-                    to: NSPoint(x: 0, y: y)
-                )
-                entry.scrollView.reflectScrolledClipView(
-                    entry.scrollView.contentView
-                )
+            if let anchor = position.rendered {
+                pendingRenderedAnchors[document.id] = anchor
             }
-        } else if let anchor = position.renderedAnchor {
-            scrollTargets[document.id] = anchor
+        } else if document.mode == .source, let selection = position.selection {
+            document.selection = selection
+        } else if document.mode == .rendered, let anchor = position.rendered {
+            pendingRenderedAnchors[document.id] = anchor
         }
+    }
+
+    /// The anchor the source surface should restore when it mounts.
+    func sourceReadingAnchor(for document: MarkdownDocument) -> SourceReadingAnchor? {
+        readingPositions[document.id]?.source
+    }
+
+    /// The stored anchors for a document, for diagnostics and acceptance
+    /// checks. Reading them has no side effects.
+    func storedReadingAnchors(
+        for document: MarkdownDocument
+    ) -> (source: SourceReadingAnchor?, rendered: RenderedReadingAnchor?) {
+        let position = readingPositions[document.id]
+        return (position?.source, position?.rendered)
+    }
+
+    /// Records the rendered surface's visible position. The viewer calls this
+    /// while scrolling; the storage is not observed, so a scroll does not
+    /// invalidate any view.
+    func recordRenderedAnchor(
+        _ anchor: RenderedReadingAnchor,
+        for document: MarkdownDocument
+    ) {
+        var position = readingPositions[document.id] ?? ReadingPosition()
+        position.rendered = anchor
+        readingPositions[document.id] = position
+    }
+
+    // MARK: - Two-document split
+
+    /// Makes `document` the focused pane without changing the pane layout.
+    /// A document that is not visible is selected into the focused pane.
+    func focus(_ document: MarkdownDocument) {
+        guard documents.contains(where: { $0.id == document.id }) else {
+            return
+        }
+        guard document.id != focusedDocumentID else { return }
+        guard document.id == selectedDocumentID
+                || document.id == secondaryDocumentID else {
+            setSelectedDocument(document)
+            return
+        }
+        focusedDocumentID = document.id
+        onDocumentActivated?(document.fileURL)
+    }
+
+    /// Shows a document in a named pane. Choosing the document already in the
+    /// other pane focuses it instead of duplicating it.
+    func show(_ document: MarkdownDocument, inPane pane: MarkdownPane) {
+        guard documents.contains(where: { $0.id == document.id }) else {
+            return
+        }
+        switch pane {
+        case .primary:
+            guard document.id != secondaryDocumentID else {
+                focus(document)
+                return
+            }
+            if selectedDocumentID != document.id {
+                if let current = primaryDocument {
+                    captureReadingPosition(for: current)
+                }
+                selectedDocumentID = document.id
+            }
+            focusedDocumentID = document.id
+        case .secondary:
+            guard document.id != selectedDocumentID else {
+                focus(document)
+                return
+            }
+            if secondaryDocumentID == nil {
+                // Two document panes and the source/rendered split are
+                // mutually exclusive: the contract is at most two Markdown
+                // surfaces per project.
+                collapseDocumentSplitViews()
+            }
+            if secondaryDocumentID != document.id {
+                if let current = secondaryDocument {
+                    captureReadingPosition(for: current)
+                }
+                secondaryDocumentID = document.id
+            }
+            focusedDocumentID = document.id
+        }
+        onDocumentActivated?(document.fileURL)
+    }
+
+    /// Opens a second document pane, refusing to duplicate the primary.
+    func openInSecondPane(_ document: MarkdownDocument) {
+        show(document, inPane: .secondary)
+    }
+
+    /// Closes the second pane. The document stays open and remains reachable
+    /// from the document menu; only the pane goes away.
+    func closeSplitPane() {
+        guard secondaryDocumentID != nil else { return }
+        let wasFocused = focusedDocumentID == secondaryDocumentID
+        secondaryDocumentID = nil
+        if wasFocused || focusedDocumentID == nil {
+            focusedDocumentID = selectedDocumentID
+            if let primary = primaryDocument {
+                onDocumentActivated?(primary.fileURL)
+            }
+        }
+    }
+
+    private func collapseDocumentSplitViews() {
+        let ids = splitDocuments
+        for id in ids {
+            guard let document = documents.first(where: { $0.id == id })
+            else { continue }
+            setSplitView(false, for: document)
+        }
+    }
+
+    /// Switches surfaces, capturing the one being left and handing the new
+    /// surface its stored anchor. An explicit navigation that sets its own
+    /// target can call this and then override the scroll.
+    func setMode(_ mode: MarkdownDocumentMode, for document: MarkdownDocument) {
+        // A single-surface mode and the split view are mutually exclusive.
+        if isSplitView(document) {
+            setSplitView(false, for: document)
+        }
+        guard document.mode != mode else { return }
+        captureReadingPosition(for: document)
+        document.mode = mode
+        restoreReadingPosition(for: document)
+    }
+
+    // MARK: - Split view
+
+    func isSplitView(_ document: MarkdownDocument) -> Bool {
+        splitDocuments.contains(document.id)
+    }
+
+    /// Shows or hides Source and Rendered side by side for one document.
+    ///
+    /// Split is layered on Source: `document.mode` becomes `.source` while it
+    /// is on, so commands, find, and the palette keep their source behavior,
+    /// and the mode the document came from is restored when split closes.
+    /// The state is session-only; reopening the document shows its saved mode.
+    func setSplitView(_ enabled: Bool, for document: MarkdownDocument) {
+        if enabled {
+            guard !document.isSourceOnly,
+                  secondaryDocumentID == nil,
+                  !splitDocuments.contains(document.id) else {
+                return
+            }
+            captureReadingPosition(for: document)
+            splitReturnModes[document.id] = document.mode
+            splitDocuments.insert(document.id)
+            document.mode = .source
+            restoreReadingPosition(for: document)
+        } else {
+            guard splitDocuments.remove(document.id) != nil else { return }
+            captureReadingPosition(for: document)
+            sourceScrollTargets.removeValue(forKey: document.id)
+            splitSyncIgnore.removeValue(forKey: document.id)
+            let mode = splitReturnModes.removeValue(forKey: document.id)
+                ?? .source
+            document.mode = mode
+            restoreReadingPosition(for: document)
+        }
+    }
+
+    func toggleSplitView(for document: MarkdownDocument) {
+        setSplitView(!isSplitView(document), for: document)
+    }
+
+    /// Why split scrolling cannot follow the anchor right now, or nil when
+    /// every visible position maps exactly. The toggle shows this as help.
+    func splitSyncRefusalReason(
+        for document: MarkdownDocument
+    ) -> String? {
+        guard isSplitView(document) else { return "Split view is off." }
+        guard !document.isSourceOnly else {
+            return "Rendered is unavailable for this document."
+        }
+        guard let output = currentSplitOutput(for: document) else {
+            return "Scroll sync needs a current render."
+        }
+        guard output.ast.blocks.contains(where: { $0.range != nil }) else {
+            return "This document has no mapped blocks."
+        }
+        return nil
+    }
+
+    /// The source pane moved: scroll the rendered pane to the block that
+    /// contains the top line, when the mapping is exact.
+    func sourceDidScroll(
+        _ anchor: SourceReadingAnchor,
+        in document: MarkdownDocument
+    ) {
+        guard isSplitView(document),
+              isSplitScrollSynced,
+              !ignoresSplitSync(.source, for: document),
+              let output = currentSplitOutput(for: document),
+              let index = MarkdownSplitSync.renderedBlockIndex(
+                  forSourceOffset: anchor.lineOffset,
+                  in: output.ast.blocks
+              ),
+              let target = MarkdownSplitSync.renderedScrollAnchor(
+                  forBlockIndex: index,
+                  in: output.ast.blocks,
+                  headings: output.headings.headings
+              ) else {
+            return
+        }
+        suppressSplitSync(.rendered, for: document)
+        scrollTargets[document.id] = target
+    }
+
+    /// The rendered pane moved: record its reading anchor and, when split is
+    /// on and the anchor is exact, reveal the block's source line.
+    func renderedDidScroll(
+        _ anchor: RenderedReadingAnchor,
+        in document: MarkdownDocument
+    ) {
+        recordRenderedAnchor(anchor, for: document)
+        guard isSplitView(document),
+              isSplitScrollSynced,
+              !ignoresSplitSync(.rendered, for: document),
+              let output = currentSplitOutput(for: document),
+              let offset = MarkdownSplitSync.sourceOffset(
+                  for: anchor,
+                  in: output.ast.blocks
+              ) else {
+            return
+        }
+        suppressSplitSync(.source, for: document)
+        sourceScrollTargets[document.id] = offset
+    }
+
+    private func currentSplitOutput(
+        for document: MarkdownDocument
+    ) -> MarkdownParseOutput? {
+        guard case let .ready(output) = parseCoordinator.state(
+            for: document.id
+        ), output.documentID == document.id,
+           output.revision == document.revision else {
+            return nil
+        }
+        return output
+    }
+
+    private func ignoresSplitSync(
+        _ direction: SplitSyncDirection,
+        for document: MarkdownDocument
+    ) -> Bool {
+        guard let entry = splitSyncIgnore[document.id] else { return false }
+        if splitSyncNow() >= entry.until {
+            splitSyncIgnore.removeValue(forKey: document.id)
+            return false
+        }
+        return entry.direction == direction
+    }
+
+    private func suppressSplitSync(
+        _ direction: SplitSyncDirection,
+        for document: MarkdownDocument
+    ) {
+        splitSyncIgnore[document.id] = SplitSyncIgnore(
+            direction: direction,
+            until: splitSyncNow().addingTimeInterval(0.35)
+        )
+    }
+
+    /// Records where an explicit source navigation should land, so the mount
+    /// restore reproduces it instead of the previous reading position.
+    private func setSourceAnchor(
+        for document: MarkdownDocument,
+        selection: Range<Int>
+    ) {
+        let ns = document.source as NSString
+        guard ns.length > 0 else { return }
+        var lineStart = min(max(selection.lowerBound, 0), ns.length - 1)
+        while lineStart > 0, ns.character(at: lineStart - 1) != 0x0A {
+            lineStart -= 1
+        }
+        var position = readingPositions[document.id] ?? ReadingPosition()
+        position.selection = selection
+        position.source = SourceReadingAnchor(
+            lineOffset: lineStart,
+            viewportOffset: 0,
+            selection: selection
+        )
+        readingPositions[document.id] = position
     }
 
     /// Re-parse before offering Rendered after a nesting refusal. The reason
@@ -620,7 +1154,7 @@ final class MarkdownWorkspace {
         case .ready:
             document.setNestingLimit(false)
             if !document.isSourceOnly {
-                document.mode = .rendered
+                setMode(.rendered, for: document)
             }
         case .refused:
             document.setNestingLimit(true)
@@ -630,6 +1164,16 @@ final class MarkdownWorkspace {
     }
 
     // MARK: - Commands
+
+    /// The source controller Find should act on: the focused document when
+    /// it shows Source. A key-window lookup is unsafe with retained editors,
+    /// so the workspace resolves the target instead.
+    func sourceFindTarget() -> MarkdownEditorController? {
+        guard let document = focusedDocument, document.mode == .source else {
+            return nil
+        }
+        return editorCache.cachedEntry(for: document.id)?.controller
+    }
 
     func controller(for document: MarkdownDocument) -> MarkdownEditorController {
         let controller = editorCache.entry(
@@ -642,7 +1186,300 @@ final class MarkdownWorkspace {
         controller.rootGenerationProvider = { [weak self] in
             self?.rootGeneration ?? 0
         }
+        controller.reviewMarkerProvider = { [weak self] in
+            guard let self else { return [] }
+            return self.reviewComments.placements(for: document)
+                .compactMap { placement in
+                    guard let range = placement.range else { return nil }
+                    return ReviewMarkerRulerView.Marker(
+                        id: placement.id,
+                        offset: range.lowerBound,
+                        resolved: !placement.isOpen,
+                        anchored: true
+                    )
+                }
+        }
+        controller.onReviewMarkerSelected = { [weak self] threadID in
+            self?.revealReviewComment(threadID, in: document)
+        }
+        controller.refreshReviewMarkers()
         return controller
+    }
+
+    // MARK: - Review comments
+
+    func loadReviewComments(for document: MarkdownDocument) async {
+        await reviewComments.load(document)
+        editorCache.cachedEntry(for: document.id)?
+            .controller.refreshReviewMarkers()
+    }
+
+    @discardableResult
+    func addReviewComment(
+        to document: MarkdownDocument,
+        selection: Range<Int>? = nil,
+        body: String
+    ) async -> Bool {
+        let target = selection ?? document.selection
+        let added = await reviewComments.addComment(
+            to: document,
+            selection: target,
+            body: body
+        )
+        didChangeReviewComments(for: document)
+        return added
+    }
+
+    @discardableResult
+    func replyToReviewComment(
+        _ threadID: UUID,
+        in document: MarkdownDocument,
+        body: String
+    ) async -> Bool {
+        let replied = await reviewComments.reply(
+            to: threadID,
+            in: document,
+            body: body
+        )
+        didChangeReviewComments(for: document)
+        return replied
+    }
+
+    @discardableResult
+    func setReviewCommentResolved(
+        _ resolved: Bool,
+        threadID: UUID,
+        in document: MarkdownDocument
+    ) async -> Bool {
+        let changed = await reviewComments.setResolved(
+            resolved,
+            threadID: threadID,
+            in: document
+        )
+        didChangeReviewComments(for: document)
+        return changed
+    }
+
+    @discardableResult
+    func deleteReviewComment(
+        _ threadID: UUID,
+        from document: MarkdownDocument
+    ) async -> Bool {
+        let deleted = await reviewComments.delete(
+            threadID: threadID,
+            from: document
+        )
+        didChangeReviewComments(for: document)
+        return deleted
+    }
+
+    @discardableResult
+    func reloadReviewComments(for document: MarkdownDocument) async -> Bool {
+        let reloaded = await reviewComments.reload(document)
+        didChangeReviewComments(for: document)
+        return reloaded
+    }
+
+    @discardableResult
+    func overwriteReviewComments(for document: MarkdownDocument) async -> Bool {
+        let overwritten = await reviewComments.overwrite(document)
+        didChangeReviewComments(for: document)
+        return overwritten
+    }
+
+    /// Reveals a thread's anchored range in Source. An unanchored thread has
+    /// no range to show; the panel keeps it visible instead.
+    func revealReviewComment(
+        _ threadID: UUID,
+        in document: MarkdownDocument
+    ) {
+        reviewComments.selectedThreadID = threadID
+        guard let placement = reviewComments.placements(for: document)
+            .first(where: { $0.id == threadID }),
+              let range = placement.range else {
+            return
+        }
+        setMode(.source, for: document)
+        setSourceAnchor(for: document, selection: range)
+        controller(for: document).select(range: range)
+    }
+
+    private func didChangeReviewComments(for document: MarkdownDocument) {
+        editorCache.cachedEntry(for: document.id)?
+            .controller.refreshReviewMarkers()
+    }
+
+    // MARK: - Source projections
+
+    /// Replaces exactly the captured block range in the rendered viewer. The
+    /// expected slice is the one the viewer displayed; if the document no
+    /// longer holds it, nothing is written and the editor can reopen.
+    @discardableResult
+    func commitBlockEdit(
+        range: SourceRange,
+        expectedSlice: String,
+        replacement: String,
+        in document: MarkdownDocument
+    ) -> Bool {
+        guard !document.isReadOnly else {
+            lastError = "This document is read-only."
+            return false
+        }
+        do {
+            let commit = try MarkdownBlockProjector.commit(
+                MarkdownBlockProjection(
+                    range: range.lowerBound..<range.upperBound,
+                    expectedSlice: expectedSlice
+                ),
+                replacement: replacement,
+                in: document.source
+            )
+            try document.replaceSource(
+                commit.source,
+                actionName: commit.actionName
+            )
+            document.selection = commit.selection
+            lastError = nil
+            return true
+        } catch MarkdownBlockProjectionError.staleBlock {
+            lastError = "This block changed since it opened. "
+                + "Close the editor and try again."
+            return false
+        } catch {
+            lastError = "Could not edit the block: \(error)"
+            return false
+        }
+    }
+
+    // MARK: - Proposals
+
+    /// Shows the conventional `.<name>.proposal.diff` when it exists, or asks
+    /// for a proposal file.
+    func presentProposal(for document: MarkdownDocument) {
+        guard let documentURL = document.fileURL else {
+            proposalError = "Save the document before reviewing a proposal."
+            return
+        }
+        let conventional = MarkdownProposal.proposalURL(for: documentURL)
+        if FileManager.default.fileExists(atPath: conventional.path) {
+            _ = loadProposal(from: conventional, for: document)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "diff") ?? .plainText,
+            .plainText,
+        ]
+        panel.allowsOtherFileTypes = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = documentURL.deletingLastPathComponent()
+        panel.message =
+            "Choose a proposal diff for \(documentURL.lastPathComponent)"
+        guard panel.runModal() == .OK, let chosen = panel.url else {
+            return
+        }
+        _ = loadProposal(from: chosen, for: document)
+    }
+
+    @discardableResult
+    func loadProposal(
+        from url: URL,
+        for document: MarkdownDocument
+    ) -> Bool {
+        guard let documentName = document.fileURL?.lastPathComponent else {
+            proposalError = "Save the document before reviewing a proposal."
+            return false
+        }
+        do {
+            let proposal = try MarkdownProposal.load(from: url)
+            guard proposal.documentName == documentName else {
+                proposalError = "This proposal is for "
+                    + "\(proposal.documentName), not \(documentName)."
+                return false
+            }
+            guard proposal.matches(source: document.source) else {
+                proposalError = "The document changed since this proposal "
+                    + "was written. Its base no longer matches."
+                return false
+            }
+            proposalPreview = ProposalPreview(
+                fileURL: url,
+                proposal: proposal,
+                expectedSource: document.source
+            )
+            proposalError = nil
+            isProposalVisible = true
+            return true
+        } catch {
+            proposalError = Self.proposalMessage(for: error)
+            return false
+        }
+    }
+
+    func dismissProposal() {
+        isProposalVisible = false
+        proposalPreview = nil
+        proposalError = nil
+    }
+
+    /// Applies the accepted hunks as one undoable source edit, then saves
+    /// through the document's ordinary compare-and-swap path.
+    @discardableResult
+    func applyProposal(
+        accepting hunkIDs: Set<Int>,
+        in document: MarkdownDocument
+    ) async -> Bool {
+        guard let preview = proposalPreview else { return false }
+        guard document.source == preview.expectedSource else {
+            proposalError = "The document changed while this proposal was "
+                + "open. Reopen it."
+            return false
+        }
+        do {
+            let newSource = try preview.proposal.apply(
+                accepting: hunkIDs,
+                to: document.source
+            )
+            guard newSource != document.source else {
+                proposalError = "No hunks were accepted."
+                return false
+            }
+            try document.replaceSource(
+                newSource,
+                actionName: "Apply Proposal"
+            )
+            dismissProposal()
+            await save(document)
+            return true
+        } catch {
+            proposalError = Self.proposalMessage(for: error)
+            return false
+        }
+    }
+
+    private static func proposalMessage(for error: Error) -> String {
+        switch error {
+        case MarkdownProposalError.staleBase:
+            return "The document changed since this proposal was written."
+        case let MarkdownProposalError.hunkOutOfDate(hunk):
+            return "Hunk \(hunk) no longer matches the document."
+        case MarkdownProposalError.overlappingHunks:
+            return "The proposal has overlapping hunks."
+        case MarkdownProposalError.noHunksSelected:
+            return "Select at least one hunk."
+        case let MarkdownProposalError.unsupportedVersion(version):
+            return "The proposal uses format \(version), which this build "
+                + "cannot read."
+        case let MarkdownProposalError.unreadable(detail):
+            return "Cannot read the proposal: \(detail)"
+        case let MarkdownProposalError.malformed(detail):
+            return "The proposal is malformed: \(detail)"
+        case let MarkdownProposalError.documentMismatch(expected, actual):
+            return "The proposal targets \(actual), not \(expected)."
+        default:
+            return String(describing: error)
+        }
     }
 
     /// Runs the correctness-only lint and the local link probe for one
@@ -674,7 +1511,11 @@ final class MarkdownWorkspace {
             documentURL: document.fileURL,
             root: workspaceRoot
         )
-        guard document.revision == revision else { return }
+        guard document.revision == revision,
+              !document.isClosed,
+              documents.contains(where: { $0 === document }) else {
+            return
+        }
         let result = MarkdownLintEngine.appendingProbeResults(
             outcomes,
             targets: targets,
@@ -709,41 +1550,102 @@ final class MarkdownWorkspace {
         _ = open(url: entry.url)
     }
 
-    /// Opens a file and selects the 1-based line and character column.
+    /// Opens a file and selects the 1-based line and 1-based UTF-16 column
+    /// (the convention `CodeSearchMatch` reports). When `query` is present
+    /// the source find bar opens seeded with it, so the reader can step
+    /// through the other matches.
     func openResult(
         url: URL,
         line: Int,
-        column: Int
+        column: Int,
+        query: String? = nil
     ) {
         guard let document = open(url: url) else { return }
-        document.mode = .source
         let map = SourceMap(source: document.source)
-        guard let text = map.lineText(line) else { return }
-        let prefix = text.prefix(max(0, min(column - 1, text.count)))
-        let utf8Column = prefix.utf8.count
-        guard var offset = map.utf16Offset(
-            line: line,
-            utf8Column: utf8Column
-        ) else {
+        guard let text = map.lineText(line),
+              let utf8Column = Self.utf8Column(
+                  in: text,
+                  utf16Column: column
+              ),
+              var offset = map.utf16Offset(
+                  line: line,
+                  utf8Column: utf8Column
+              ) else {
             return
         }
         offset = min(offset, (document.source as NSString).length)
-        controller(for: document).select(range: offset..<offset)
+        setMode(.source, for: document)
+        setSourceAnchor(for: document, selection: offset..<offset)
+        let controller = controller(for: document)
+        controller.select(range: offset..<offset)
+        if let query, !query.isEmpty {
+            controller.seedFindBar(with: query, at: offset)
+        }
+    }
+
+    /// Converts a 1-based UTF-16 column within a line to the 1-based UTF-8
+    /// column `SourceMap` resolves. A column past the line end clamps to the
+    /// line end; one that splits a surrogate pair resolves to nil.
+    private static func utf8Column(
+        in text: Substring,
+        utf16Column: Int
+    ) -> Int? {
+        let line = String(text)
+        let utf16 = line.utf16
+        let offset = min(max(utf16Column - 1, 0), utf16.count)
+        guard
+            let boundary = utf16.index(
+                utf16.startIndex,
+                offsetBy: offset,
+                limitedBy: utf16.endIndex
+            ),
+            let byteIndex = boundary.samePosition(in: line.utf8)
+        else {
+            return nil
+        }
+        return line.utf8.distance(
+            from: line.utf8.startIndex,
+            to: byteIndex
+        ) + 1
     }
 
     func findInFiles(
         _ query: String
     ) async -> CodeSearchResult? {
         guard let root = workspaceRoot else { return nil }
-        return await CodeProjectSearch().search(root: root, query: query)
+        return await CodeProjectSearch().search(
+            root: root,
+            query: query,
+            scope: .markdown
+        )
     }
 
     func showRenderedFind() {
-        renderedFind.show()
+        guard let document = selectedDocument else { return }
+        renderedFind(for: document).show()
     }
 
     func stepRenderedFind(_ delta: Int) {
-        renderedFind.step(delta)
+        guard let document = selectedDocument else { return }
+        renderedFind(for: document).step(delta)
+    }
+
+    /// The controller for one document's rendered find bar. Created on
+    /// demand; documents get one at open time so the first body evaluation
+    /// does not mutate workspace state.
+    @discardableResult
+    private func ensureRenderedFind(for document: MarkdownDocument)
+        -> RenderedFindController {
+        if let existing = renderedFinds[document.id] { return existing }
+        let controller = RenderedFindController()
+        renderedFinds[document.id] = controller
+        return controller
+    }
+
+    func renderedFind(
+        for document: MarkdownDocument
+    ) -> RenderedFindController {
+        ensureRenderedFind(for: document)
     }
 
     func togglePalette() {
@@ -847,11 +1749,17 @@ final class MarkdownWorkspace {
         guard let document = documents.first(where: { $0.id == id }) else {
             return
         }
+        // Capture before the disk version can replace the source, so an
+        // adoption restores the reading position instead of a stale viewport.
+        captureReadingPosition(for: document)
         Task { @MainActor in
             do {
                 let change = try await document.checkExternalChange()
                 switch change {
-                case .adopted, .conflict:
+                case .adopted:
+                    restoreAfterSourceReplacement(document)
+                    await observeExternalChange(for: document)
+                case .conflict:
                     await observeExternalChange(for: document)
                 case .deleted:
                     lastError = "The file was deleted on disk: "
@@ -867,7 +1775,22 @@ final class MarkdownWorkspace {
     }
 
     func reload(_ document: MarkdownDocument) {
+        captureReadingPosition(for: document)
         document.resolveExternalChange(.reload)
+        restoreAfterSourceReplacement(document)
+    }
+
+    /// Reapplies the captured reading position after an external replacement
+    /// of the whole source. The source pane consumes its anchor on the next
+    /// sync; the rendered pane consumes the pending-anchor binding.
+    private func restoreAfterSourceReplacement(_ document: MarkdownDocument) {
+        if document.mode == .source || isSplitView(document),
+           let anchor = readingPositions[document.id]?.source,
+           let controller = editorCache.cachedEntry(for: document.id)?
+               .controller {
+            controller.restoreReadingAnchorAfterSourceReplacement(anchor)
+        }
+        restoreReadingPosition(for: document)
     }
 
     func keepLocal(_ document: MarkdownDocument) {
@@ -915,7 +1838,7 @@ final class MarkdownWorkspace {
         to document: MarkdownDocument,
         fragment: String?
     ) async {
-        document.mode = .rendered
+        setMode(.rendered, for: document)
         guard let fragment, !fragment.isEmpty else { return }
         let revision = document.revision
         parseCoordinator.request(
@@ -1025,6 +1948,38 @@ final class MarkdownWorkspace {
         }
     }
 
+    /// Exports the focused document to a self-contained HTML file or a PDF.
+    ///
+    /// The source is snapshotted when the save panel closes, so a concurrent
+    /// edit cannot produce a document that never existed; an edit made after
+    /// the click belongs to the next export.
+    func exportSelected(as format: MarkdownExportFormat) {
+        guard let document = selectedDocument else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [format.contentType]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.title = "Export as \(format.displayName)"
+        panel.nameFieldStringValue = "\(MarkdownExportService.title(for: document)).\(format.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let root = workspaceRoot
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await MarkdownExportService.write(
+                    document: document,
+                    format: format,
+                    to: url,
+                    workspaceRoot: root,
+                    theme: MarkdownReadingSettings.currentTheme()
+                )
+            } catch {
+                self.lastError = "Export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// Binds the project root without opening a document. The project owns
     /// its tabs; binding only makes project-relative resolution and the
     /// Markdown file index available.
@@ -1096,8 +2051,10 @@ final class MarkdownWorkspace {
         return String(path.dropFirst(prefix.count))
     }
 
-    private func diskBytes(at url: URL) -> Data? {
-        try? Data(contentsOf: url)
+    private func diskBytes(at url: URL) async -> Data? {
+        await Task.detached(priority: .utility) {
+            try? MarkdownFileStore.readBoundedData(at: url)
+        }.value
     }
 
     @discardableResult
@@ -1105,10 +2062,13 @@ final class MarkdownWorkspace {
         for document: MarkdownDocument,
         kind: MarkdownHistoryPolicy.SaveKind
     ) async -> MarkdownSnapshotRecord? {
+        // Record the bytes the save actually committed, not a fresh read:
+        // an external writer between the swap and this call must not be
+        // recorded as Sonovo's save or become the review baseline.
         guard let snapshots = snapshotStore,
               let url = document.fileURL,
               let relative = relativeSnapshotPath(for: url),
-              let bytes = diskBytes(at: url) else {
+              let bytes = document.diskSnapshot?.bytes else {
             return nil
         }
         let result = await snapshots.recordHistory(
@@ -1139,7 +2099,7 @@ final class MarkdownWorkspace {
         guard let snapshots = snapshotStore,
               let url = document.fileURL,
               let relative = relativeSnapshotPath(for: url),
-              let bytes = diskBytes(at: url) else {
+              let bytes = await diskBytes(at: url) else {
             return
         }
         _ = await snapshots.observe(
@@ -1183,7 +2143,7 @@ final class MarkdownWorkspace {
         guard let snapshots = snapshotStore,
               case let .bytes(rawBytes, _) = await snapshots.load(id: record.id),
               let url = document.fileURL,
-              let current = diskBytes(at: url) else {
+              let current = await diskBytes(at: url) else {
             lastError = "Snapshot evidence is unavailable."
             return
         }
@@ -1217,10 +2177,11 @@ final class MarkdownWorkspace {
     ) async {
         guard let snapshots = snapshotStore,
               let url = document.fileURL,
-              let current = diskBytes(at: url) else { return }
-        let decision = await snapshots.decide(
+              let current = await diskBytes(at: url) else { return }
+        // Validate and obtain the bytes without recording the decision. A
+        // failed restore must not leave history saying the revert happened.
+        let decision = await snapshots.prepareRevert(
             transitionID: transition.id,
-            keep: false,
             currentDiskBytes: current
         )
         switch decision {
@@ -1230,6 +2191,12 @@ final class MarkdownWorkspace {
                     rawBytes: rawBytes,
                     expectedDiskBytes: current
                 )
+                if !(await snapshots.commitRevert(
+                    transitionID: transition.id
+                )) {
+                    lastError = "Reverted, but the review history "
+                        + "could not be updated."
+                }
             } catch {
                 lastError = "Revert failed: \(error)"
             }

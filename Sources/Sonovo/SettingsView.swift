@@ -55,6 +55,9 @@ struct SettingsView: View {
         AppTheme.Preferences.editorFontSizeDefault
     @AppStorage("sonovo.markdownRendered") private var markdownRendered = true
     @AppStorage("sonovo.wrapLines") private var wrapLines = true
+    @AppStorage("sonovo.markdownFocusMode") private var markdownFocusMode = false
+    @AppStorage("sonovo.markdownTypewriter") private var markdownTypewriter = false
+    @AppStorage("sonovo.markdownLineNumbers") private var markdownLineNumbers = false
     @AppStorage("sonovo.codeTabWidth") private var codeTabWidth =
         AppTheme.Code.tabWidthDefault
     @AppStorage("sonovo.codeUsesTabs") private var codeUsesTabs = false
@@ -111,6 +114,15 @@ struct SettingsView: View {
             postEditorPreferenceChange()
         }
         .onChange(of: wrapLines) { _, _ in
+            postEditorPreferenceChange()
+        }
+        .onChange(of: markdownFocusMode) { _, _ in
+            postEditorPreferenceChange()
+        }
+        .onChange(of: markdownTypewriter) { _, _ in
+            postEditorPreferenceChange()
+        }
+        .onChange(of: markdownLineNumbers) { _, _ in
             postEditorPreferenceChange()
         }
         .onChange(of: terminalFont) { _, _ in
@@ -411,6 +423,18 @@ struct SettingsView: View {
                 SettingsRow {
                     Toggle("Wrap long lines", isOn: $wrapLines)
                     Text("Wrap source lines to the width of the editor.")
+                }
+                SettingsRow {
+                    Toggle("Focus mode", isOn: $markdownFocusMode)
+                    Text("Dim Markdown blocks outside the current one.")
+                }
+                SettingsRow {
+                    Toggle("Typewriter mode", isOn: $markdownTypewriter)
+                    Text("Keep the caret near 40% of the editor.")
+                }
+                SettingsRow {
+                    Toggle("Line numbers", isOn: $markdownLineNumbers)
+                    Text("Show source line numbers in the gutter.")
                 }
             }
 

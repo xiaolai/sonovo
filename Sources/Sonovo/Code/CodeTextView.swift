@@ -562,7 +562,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         rulerView.needsDisplay = true
     }
 
-    static func role(for kind: CodeTokenKind) -> AppTheme.SyntaxRole {
+    nonisolated static func role(for kind: CodeTokenKind) -> AppTheme.SyntaxRole {
         switch kind {
         case .keyword: .keyword
         case .typeName: .typeName

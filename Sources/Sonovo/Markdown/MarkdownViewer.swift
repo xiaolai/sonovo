@@ -9,11 +9,57 @@ enum WikiLinkVisualState: Sendable, Equatable {
     case ambiguous
 }
 
+/// Whether a `sonovo:` media reference points at something real.
+enum MediaReferenceState: Sendable, Equatable {
+    case available
+    case missing
+}
+
+/// The scroll offset is read on every scroll tick. A reference box keeps it
+/// out of SwiftUI state, so scrolling does not invalidate the viewer.
+private final class RenderedScrollOffset {
+    var y: CGFloat = 0
+}
+
+/// One top-level block's rendered frame and source identity.
+private struct TopBlock {
+    let frame: CGRect
+    let offset: Int
+    let kind: ReadingBlockKind
+}
+
+/// An in-place block edit, held independently of the current AST so an
+/// external change that moves the block cannot destroy the open draft.
+///
+/// The editor model lives here, not inside `BlockProjectionEditor`'s
+/// `@State`: the same block can be presented in two places when an external
+/// change moves it, and only a model owned by the session carries the typed
+/// text across that move.
+private struct BlockEditingSession {
+    let range: SourceRange
+    let slice: String
+    let model: BlockProjectionEditorModel
+}
+
+/// Collects the top-level block frames in scroll-content coordinates.
+private struct BlockFramesKey: SwiftUI.PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+
+    static func reduce(
+        value: inout [String: CGRect],
+        nextValue: () -> [String: CGRect]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
 /// The read-only SwiftUI projection of `SonovoAST`.
 ///
-/// The viewer never parses Markdown and never loads a web view. Raw HTML is
-/// hidden; details and TOC are the only structural constructs. Expansion state
-/// is view state and is reconciled by content after a reparse.
+/// The viewer never parses Markdown. Raw HTML is hidden; details and TOC
+/// are the only structural constructs. Fenced diagrams hand off to an
+/// isolated renderer that owns its own web view; the viewer itself hosts no
+/// page. Expansion state is view state and is reconciled by content after a
+/// reparse.
 struct MarkdownViewer: View {
     let ast: SonovoAST
     let headings: HeadingIndex
@@ -21,13 +67,27 @@ struct MarkdownViewer: View {
     let documentURL: URL?
     let workspaceRoot: URL?
     let wikiLinkState: (WikiLink) -> WikiLinkVisualState
+    let mediaReferenceState: ((MediaReference) -> MediaReferenceState)?
     let onOpenWikiLink: ((WikiLink) -> Void)?
+    let onOpenMedia: ((MediaReference) -> Void)?
     let onOpenLocalLink: ((String) -> Void)?
     let onOpenExternalURL: ((URL) -> Void)?
     let onEditInSource: ((SourceRange) -> Void)?
+    let onSetDetailsOpen: ((SourceRange, Bool) -> Void)?
+    /// The exact source the AST came from. Block editing reads and writes
+    /// through this text, never through a second document model.
+    let source: String
+    /// Commits one block's replacement: (range, expected slice, new text).
+    let onCommitBlockEdit: ((SourceRange, String, String) -> Bool)?
     let scrollTarget: Binding<String?>?
+    let restoreAnchor: Binding<RenderedReadingAnchor?>?
+    let onReadingAnchorChange: ((RenderedReadingAnchor) -> Void)?
     let lintDiagnostics: [MarkdownDiagnostic]
     let find: RenderedFindController
+    /// Whether this pane owns keyboard focus. A window can host two panes,
+    /// each with its own Find bar, and only the focused one may consume
+    /// Cmd+G.
+    let isFocusedPane: Bool
 
     private let detailsIndices: [Int: Int]
     private let detailsRanges: [(index: Int, range: SourceRange)]
@@ -36,6 +96,14 @@ struct MarkdownViewer: View {
 
     @State private var expansion: [Int: Bool] = [:]
     @State private var keys: [DetailsContentKey] = []
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @State private var blockFrames: [String: CGRect] = [:]
+    @State private var topBlocks: [TopBlock] = []
+    @State private var scrollBox = RenderedScrollOffset()
+    /// The block being edited in place, if any.
+    @State private var editingSession: BlockEditingSession?
+    /// The block whose transient Source Peek panel is open, if any.
+    @State private var peekSession: BlockEditingSession?
     @Environment(\.colorScheme) private var colorScheme
 
     private var palette: ThemePalette {
@@ -49,13 +117,21 @@ struct MarkdownViewer: View {
         documentURL: URL? = nil,
         workspaceRoot: URL? = nil,
         wikiLinkState: @escaping (WikiLink) -> WikiLinkVisualState = { _ in .normal },
+        mediaReferenceState: ((MediaReference) -> MediaReferenceState)? = nil,
         onOpenWikiLink: ((WikiLink) -> Void)? = nil,
+        onOpenMedia: ((MediaReference) -> Void)? = nil,
         onOpenLocalLink: ((String) -> Void)? = nil,
         onOpenExternalURL: ((URL) -> Void)? = nil,
         onEditInSource: ((SourceRange) -> Void)? = nil,
+        onSetDetailsOpen: ((SourceRange, Bool) -> Void)? = nil,
+        source: String = "",
+        onCommitBlockEdit: ((SourceRange, String, String) -> Bool)? = nil,
         scrollTarget: Binding<String?>? = nil,
+        restoreAnchor: Binding<RenderedReadingAnchor?>? = nil,
+        onReadingAnchorChange: ((RenderedReadingAnchor) -> Void)? = nil,
         lintDiagnostics: [MarkdownDiagnostic] = [],
-        find: RenderedFindController = RenderedFindController()
+        find: RenderedFindController = RenderedFindController(),
+        isFocusedPane: Bool = true
     ) {
         self.ast = ast
         self.headings = headings
@@ -63,13 +139,21 @@ struct MarkdownViewer: View {
         self.documentURL = documentURL
         self.workspaceRoot = workspaceRoot
         self.wikiLinkState = wikiLinkState
+        self.mediaReferenceState = mediaReferenceState
         self.onOpenWikiLink = onOpenWikiLink
+        self.onOpenMedia = onOpenMedia
         self.onOpenLocalLink = onOpenLocalLink
         self.onOpenExternalURL = onOpenExternalURL
         self.onEditInSource = onEditInSource
+        self.onSetDetailsOpen = onSetDetailsOpen
+        self.source = source
+        self.onCommitBlockEdit = onCommitBlockEdit
         self.scrollTarget = scrollTarget
+        self.restoreAnchor = restoreAnchor
+        self.onReadingAnchorChange = onReadingAnchorChange
         self.lintDiagnostics = lintDiagnostics
         self.find = find
+        self.isFocusedPane = isFocusedPane
 
         let metadata = Self.detailsMetadata(for: ast)
         self.detailsIndices = metadata.map
@@ -93,20 +177,42 @@ struct MarkdownViewer: View {
         ScrollViewReader { proxy in
             VStack(spacing: AppTheme.Spacing.zero) {
                 if find.isVisible {
-                    RenderedFindBar(find: find)
+                    RenderedFindBar(find: find, isFocusedPane: isFocusedPane)
                 }
                 ScrollView {
                     VStack(alignment: .leading, spacing: theme.blockSpacing) {
-                        blocksView(ast.blocks, proxy: proxy)
+                        blocksView(ast.blocks, proxy: proxy, topLevel: true)
                     }
                     .frame(maxWidth: theme.measure, alignment: .leading)
                     .padding(.horizontal, theme.pagePadding)
                     .padding(.vertical, theme.pagePadding)
                     .frame(maxWidth: .infinity, alignment: .center)
+                    // The outermost content view's origin is the scroll
+                    // content's origin, so block frames compare directly with
+                    // `contentOffset`.
+                    .coordinateSpace(name: Self.scrollSpace)
                 }
+                .scrollPosition($scrollPosition)
                 .background(palette.paper.color)
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentOffset.y
+                } action: { _, offset in
+                    scrollBox.y = offset
+                    reportReadingAnchor(at: offset)
+                }
+                .onPreferenceChange(BlockFramesKey.self) { frames in
+                    blockFrames = frames
+                    rebuildTopBlocks()
+                    applyPendingRestoreIfPossible()
+                    reportReadingAnchor(at: scrollBox.y)
+                }
                 .onAppear {
                     reconcile(initial: true)
+                    if scrollTarget?.wrappedValue == nil {
+                        applyPendingRestoreIfPossible()
+                    } else {
+                        restoreAnchor?.wrappedValue = nil
+                    }
                     consumeScrollTarget(proxy: proxy)
                     // A document switch remounts the viewer while the bar can
                     // stay open; matches must follow the new document.
@@ -114,11 +220,15 @@ struct MarkdownViewer: View {
                 }
                 .onChange(of: ast) { _, _ in
                     reconcile(initial: false)
+                    rebuildTopBlocks()
                     consumeScrollTarget(proxy: proxy)
                     recomputeFind(proxy: proxy)
                 }
                 .onChange(of: scrollTarget?.wrappedValue) { _, _ in
                     consumeScrollTarget(proxy: proxy)
+                }
+                .onChange(of: restoreAnchor?.wrappedValue) { _, _ in
+                    applyPendingRestoreIfPossible()
                 }
             }
             .onChange(of: find.isVisible) { _, visible in
@@ -188,28 +298,237 @@ struct MarkdownViewer: View {
         return "block-\(index)"
     }
 
+    // MARK: - Reading anchor
+
+    private static let scrollSpace = "markdown-rendered-scroll"
+    private static let footnoteScheme = "sonovo-footnote"
+
+    private func rebuildTopBlocks() {
+        var top: [TopBlock] = []
+        for (index, block) in ast.blocks.enumerated() {
+            guard let range = block.range,
+                  let frame = blockFrames[blockAnchor(block, index: index)]
+            else { continue }
+            top.append(
+                TopBlock(
+                    frame: frame,
+                    offset: range.lowerBound,
+                    kind: ReadingBlockKind(block)
+                )
+            )
+        }
+        topBlocks = top.sorted { $0.frame.minY < $1.frame.minY }
+    }
+
+    private func reportReadingAnchor(at y: CGFloat) {
+        guard let onReadingAnchorChange, !topBlocks.isEmpty else { return }
+        var low = 0
+        var high = topBlocks.count - 1
+        var found = -1
+        while low <= high {
+            let mid = (low + high) / 2
+            if topBlocks[mid].frame.minY <= y {
+                found = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        let block = topBlocks[found >= 0 ? found : 0]
+        let fraction = block.frame.height > 0
+            ? Double((y - block.frame.minY) / block.frame.height)
+            : 0
+        onReadingAnchorChange(
+            RenderedReadingAnchor(
+                blockOffset: block.offset,
+                blockKind: block.kind,
+                fraction: fraction
+            )
+        )
+    }
+
+    /// Applies a pending anchor once the block frames are known. An explicit
+    /// navigation target wins: the reader asked to jump somewhere.
+    private func applyPendingRestoreIfPossible() {
+        guard let binding = restoreAnchor,
+              let anchor = binding.wrappedValue else {
+            return
+        }
+        if scrollTarget?.wrappedValue != nil {
+            binding.wrappedValue = nil
+            return
+        }
+        guard let index = ReadingAnchorResolver.renderedBlockIndex(
+            for: anchor,
+            in: ast.blocks
+        ) else {
+            return
+        }
+        let fraction = CGFloat(
+            ReadingAnchorResolver.clampedFraction(anchor.fraction)
+        )
+        let anchorID = blockAnchor(ast.blocks[index], index: index)
+        if let frame = blockFrames[anchorID] {
+            let y = frame.minY + fraction * frame.height
+            scrollPosition.scrollTo(point: CGPoint(x: 0, y: y))
+            scrollBox.y = y
+        } else {
+            // A virtualized stack has no frame for an offscreen block.
+            // Scroll by ID so the view materializes; the fraction is applied
+            // exactly only when its frame is already known.
+            scrollPosition.scrollTo(id: anchorID, anchor: .top)
+        }
+        binding.wrappedValue = nil
+    }
+
     // MARK: - Blocks
 
-    private func blocksView(_ blocks: [Block], proxy: ScrollViewProxy) -> AnyView {
-        AnyView(
-            VStack(alignment: .leading, spacing: theme.blockSpacing) {
-                ForEach(blocks.indices, id: \.self) { index in
-                    let block = blocks[index]
-                    let content = blockView(
-                        block,
-                        previous: index > 0 ? blocks[index - 1] : nil,
-                        proxy: proxy
-                    )
-                    if case .heading(_, _, let range) = block,
-                       let range,
-                       headingIDs[range.lowerBound] != nil {
-                        content
-                    } else {
-                        content.id("block-\(index)")
+    private func blocksView(
+        _ blocks: [Block],
+        proxy: ScrollViewProxy,
+        topLevel: Bool = false
+    ) -> AnyView {
+        let rows = ForEach(blocks.indices, id: \.self) { index in
+            blockRow(
+                blocks[index],
+                index: index,
+                blocks: blocks,
+                proxy: proxy,
+                topLevel: topLevel
+            )
+        }
+        // A session whose block no longer exists keeps its editor mounted:
+        // an external change must never silently destroy typed text.
+        let staleSession: BlockEditingSession? = {
+            guard topLevel, let session = editingSession,
+                  !blocks.contains(where: { $0.range == session.range }) else {
+                return nil
+            }
+            return session
+        }()
+        return AnyView(
+            Group {
+                if topLevel {
+                    // The top level is virtualized: a large document must
+                    // not pay for thousands of offscreen block views. Nested
+                    // containers (details bodies, list items) stay eager
+                    // because they are bounded and small.
+                    LazyVStack(
+                        alignment: .leading,
+                        spacing: theme.blockSpacing
+                    ) {
+                        if let staleSession {
+                            VStack(
+                                alignment: .leading,
+                                spacing: theme.blockSpacing
+                            ) {
+                                Text(
+                                    "This block changed on disk while you "
+                                        + "were editing. Your draft is kept "
+                                        + "below; copy anything you need, "
+                                        + "then cancel."
+                                )
+                                .font(.callout)
+                                .foregroundStyle(palette.secondaryInk.color)
+                                inlineBlockEditor(session: staleSession)
+                            }
+                        }
+                        rows
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: theme.blockSpacing) {
+                        rows
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        )
+    }
+
+    @ViewBuilder
+    private func blockRow(
+        _ block: Block,
+        index: Int,
+        blocks: [Block],
+        proxy: ScrollViewProxy,
+        topLevel: Bool
+    ) -> some View {
+        let content = blockContent(
+            block,
+            previous: index > 0 ? blocks[index - 1] : nil,
+            proxy: proxy
+        )
+        if topLevel {
+            topLevelItem(block, index: index, content: content)
+        } else if case .heading(_, _, let range) = block,
+                  let range,
+                  headingIDs[range.lowerBound] != nil {
+            content
+        } else if let range = block.range {
+            // Nested IDs used to be `block-<index>`, which repeated in every
+            // container and collided with the top level's IDs. A block's
+            // source position is unique across the whole document.
+            content.id("nested-block-\(range.lowerBound)")
+        } else {
+            content
+        }
+    }
+
+    /// The block's view: an inline source editor while it is being edited,
+    /// otherwise the rendered projection, with Source Peek attached when
+    /// requested.
+    private func blockContent(
+        _ block: Block,
+        previous: Block?,
+        proxy: ScrollViewProxy
+    ) -> AnyView {
+        let content: AnyView
+        if let range = block.range,
+           let session = editingSession,
+           session.range == range {
+            content = AnyView(
+                inlineBlockEditor(session: session)
+            )
+        } else {
+            content = blockView(
+                block,
+                previous: previous,
+                proxy: proxy
+            )
+        }
+        return sourcePeekContent(content, block: block)
+    }
+
+    /// Identifies a top-level block and reports its frame in scroll-content
+    /// coordinates. A heading view already carries its scroll ID; adding the
+    /// same ID outside it would duplicate it.
+    private func topLevelItem(
+        _ block: Block,
+        index: Int,
+        content: AnyView
+    ) -> AnyView {
+        let anchor = blockAnchor(block, index: index)
+        let identified: AnyView
+        if case .heading(_, _, let range) = block,
+           let range,
+           headingIDs[range.lowerBound] != nil {
+            identified = content
+        } else {
+            identified = AnyView(content.id(anchor))
+        }
+        return AnyView(
+            identified.background {
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: BlockFramesKey.self,
+                        value: [
+                            anchor: geometry.frame(
+                                in: .named(Self.scrollSpace)
+                            )
+                        ]
+                    )
+                }
+            }
         )
     }
 
@@ -247,6 +566,8 @@ struct MarkdownViewer: View {
             )
         case let .table(table, _):
             content = AnyView(tableView(table, proxy: proxy))
+        case let .definitionList(list, _):
+            content = AnyView(definitionListView(list, proxy: proxy))
         case let .details(details, range):
             content = detailsBlockView(
                 details,
@@ -255,21 +576,173 @@ struct MarkdownViewer: View {
             )
         case .tableOfContents:
             content = AnyView(tocView(proxy: proxy))
+        case .footnoteDefinition:
+            content = AnyView(EmptyView())
+        case let .footnotes(section, _):
+            content = AnyView(footnotesView(section, proxy: proxy))
         case .htmlBlock:
             content = AnyView(EmptyView())
         }
 
         let display = lintMarked(content, for: block)
-        guard let range = block.range, let onEditInSource else {
-            return display
-        }
-        return AnyView(
-            display.contextMenu {
-                Button("Edit in Source") {
-                    onEditInSource(range)
+        guard let range = block.range else { return display }
+        let actions = RenderedBlockMenu.actions(
+            for: block,
+            canEditInSource: onEditInSource != nil,
+            canSetDetailsOpen: onSetDetailsOpen != nil,
+            canEditBlock: canEditBlock
+        )
+        guard !actions.isEmpty else { return display }
+        let menu = display.contextMenu {
+            ForEach(actions.indices, id: \.self) { index in
+                let action = actions[index]
+                Button(action.title) {
+                    RenderedBlockMenu.perform(
+                        action,
+                        range: range,
+                        editInSource: onEditInSource,
+                        setDetailsOpen: onSetDetailsOpen,
+                        editBlock: { range in
+                            startBlockEditing(range)
+                        },
+                        sourcePeek: { range in
+                            startSourcePeek(range)
+                        }
+                    )
                 }
             }
+        }
+        guard let onEditInSource,
+              RenderedBlockMenu.doubleClickAction(
+                  for: block,
+                  canEditInSource: true
+              ) != nil else {
+            return AnyView(menu)
+        }
+        return AnyView(
+            menu.simultaneousGesture(
+                TapGesture(count: 2).onEnded {
+                    onEditInSource(range)
+                }
+            )
         )
+    }
+
+    // MARK: - Source projections
+
+    private var canEditBlock: Bool {
+        onCommitBlockEdit != nil && !source.isEmpty
+    }
+
+    private func blockSlice(_ range: SourceRange) -> String? {
+        guard canEditBlock else { return nil }
+        return MarkdownBlockProjector.slice(range, in: source)
+    }
+
+    private func inlineBlockEditor(
+        session: BlockEditingSession
+    ) -> some View {
+        BlockProjectionEditor(
+            title: "Edit Block",
+            model: session.model,
+            onCancel: { editingSession = nil }
+        )
+        .id(session.range.lowerBound)
+    }
+
+    /// Opens an in-place edit session. The model is created once and stored
+    /// in the session, so a reparse that moves the block re-presents the same
+    /// draft instead of starting a new editor with the original slice.
+    private func startBlockEditing(_ range: SourceRange) {
+        guard let slice = blockSlice(range) else { return }
+        let model = BlockProjectionEditorModel(
+            text: slice,
+            commit: { replacement in
+                let committed = commitBlock(
+                    range,
+                    expected: slice,
+                    replacement: replacement
+                )
+                if committed {
+                    editingSession = nil
+                }
+                return committed
+            }
+        )
+        editingSession = BlockEditingSession(
+            range: range,
+            slice: slice,
+            model: model
+        )
+    }
+
+    private func startSourcePeek(_ range: SourceRange) {
+        guard let slice = blockSlice(range) else { return }
+        let model = BlockProjectionEditorModel(
+            text: slice,
+            commit: { replacement in
+                let committed = commitBlock(
+                    range,
+                    expected: slice,
+                    replacement: replacement
+                )
+                if committed {
+                    peekSession = nil
+                }
+                return committed
+            }
+        )
+        peekSession = BlockEditingSession(
+            range: range,
+            slice: slice,
+            model: model
+        )
+    }
+
+    /// Attaches a transient Source Peek panel to the block when this block is
+    /// the requested one. The panel is a sibling presentation, not a mode
+    /// change: the document stays Rendered and the source is untouched until
+    /// Save.
+    private func sourcePeekContent(
+        _ content: AnyView,
+        block: Block
+    ) -> AnyView {
+        guard let range = block.range,
+              let session = peekSession,
+              session.range == range else {
+            return content
+        }
+        return AnyView(
+            content.popover(
+                isPresented: Binding(
+                    get: { peekSession?.range == range },
+                    set: { isPresented in
+                        if !isPresented { peekSession = nil }
+                    }
+                ),
+                arrowEdge: .bottom
+            ) {
+                BlockProjectionEditor(
+                    title: "Source Peek",
+                    model: session.model,
+                    onCancel: { peekSession = nil }
+                )
+                .frame(
+                    width: AppTheme.MarkdownChrome.BlockEditor.popoverWidth
+                )
+                .padding(AppTheme.Spacing.sm)
+                .background(AppTheme.MarkdownChrome.PaletteChrome.background)
+            }
+        )
+    }
+
+    private func commitBlock(
+        _ range: SourceRange,
+        expected: String,
+        replacement: String
+    ) -> Bool {
+        guard let onCommitBlockEdit else { return false }
+        return onCommitBlockEdit(range, expected, replacement)
     }
 
     /// A blockquote whose first text begins with a GitHub alert marker is
@@ -279,7 +752,7 @@ struct MarkdownViewer: View {
         _ blocks: [Block],
         proxy: ScrollViewProxy
     ) -> AnyView {
-        guard let kind = alertKind(for: blocks) else {
+        guard let kind = MarkdownAlertKind.kind(in: blocks) else {
             return AnyView(
                 HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
                     RoundedRectangle(cornerRadius: AppTheme.Radius.line)
@@ -291,7 +764,7 @@ struct MarkdownViewer: View {
             )
         }
 
-        let content = strippingAlertMarker(blocks, kind: kind)
+        let content = kind.strippingMarker(from: blocks)
         return AnyView(
             VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
                 Label(kind.label, systemImage: kind.icon)
@@ -323,51 +796,6 @@ struct MarkdownViewer: View {
         )
     }
 
-    private func alertKind(for blocks: [Block]) -> AlertKind? {
-        guard case .paragraph(let inlines, _) = blocks.first,
-              case .text(let text, _) = inlines.first else {
-            return nil
-        }
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        for kind in AlertKind.allCases
-        where trimmed.lowercased().hasPrefix(kind.marker) {
-            return kind
-        }
-        return nil
-    }
-
-    private func strippingAlertMarker(
-        _ blocks: [Block],
-        kind: AlertKind
-    ) -> [Block] {
-        guard !blocks.isEmpty,
-              case .paragraph(var inlines, let range) = blocks[0],
-              case .text(let text, let textRange) = inlines.first,
-              let marker = text.range(
-                  of: kind.marker,
-                  options: .caseInsensitive
-              ) else {
-            return blocks
-        }
-        var newText = text
-        newText.removeSubrange(marker)
-        while newText.first == " " || newText.first == "\t" {
-            newText.removeFirst()
-        }
-        if newText.isEmpty {
-            inlines.removeFirst()
-        } else {
-            inlines[0] = .text(newText, range: textRange)
-        }
-        var result = blocks
-        if inlines.isEmpty {
-            result.removeFirst()
-        } else {
-            result[0] = .paragraph(inlines: inlines, range: range)
-        }
-        return result
-    }
-
     /// Book-style paragraph indent applies as a block indent to a paragraph
     /// that follows another paragraph. The first paragraph after a heading or
     /// a list is flush, as it would be in print.
@@ -390,15 +818,33 @@ struct MarkdownViewer: View {
         let color = severity == .error
             ? AppTheme.MarkdownChrome.Lint.error
             : AppTheme.MarkdownChrome.Lint.warning
+        let message = lintMessage(
+            intersecting: range.lowerBound..<range.upperBound
+        )
         return AnyView(
             HStack(alignment: .top, spacing: AppTheme.Spacing.xs) {
                 Rectangle()
                     .fill(color)
                     .frame(width: AppTheme.MarkdownChrome.Lint.markerWidth)
                     .frame(maxHeight: .infinity)
+                    .accessibilityLabel(
+                        severity == .error
+                            ? "Markdown error"
+                            : "Markdown warning"
+                    )
+                    .accessibilityValue(message ?? "")
                 content
             }
         )
+    }
+
+    private func lintMessage(
+        intersecting range: Range<Int>
+    ) -> String? {
+        lintDiagnostics.first { diagnostic in
+            diagnostic.range.lowerBound < range.upperBound
+                && range.lowerBound < diagnostic.range.upperBound
+        }?.message
     }
 
     private func lintSeverity(
@@ -425,7 +871,7 @@ struct MarkdownViewer: View {
         let id = range.flatMap { headingIDs[$0.lowerBound] }
             ?? "heading-\(range?.lowerBound ?? 0)"
         return AnyView(
-            Text(attributed(inlines))
+            text(inlines, mathSize: theme.headingSize(level))
                 .font(headingFont(level))
                 .foregroundStyle(palette.ink.color)
                 .textSelection(.enabled)
@@ -440,6 +886,9 @@ struct MarkdownViewer: View {
         indented: Bool,
         proxy: ScrollViewProxy
     ) -> AnyView {
+        if let math = Self.displayMathPayload(inlines) {
+            return AnyView(displayMathView(math))
+        }
         if inlines.count == 1,
            case let .image(destination, title, description, _) = inlines[0] {
             return AnyView(
@@ -458,7 +907,7 @@ struct MarkdownViewer: View {
             )
         }
         return AnyView(
-            Text(attributed(inlines))
+            text(inlines, mathSize: theme.bodySize)
                 .font(theme.bodyFont.font(size: theme.bodySize))
                 .lineSpacing(theme.bodyLineSpacing)
                 .foregroundStyle(palette.ink.color)
@@ -503,7 +952,7 @@ struct MarkdownViewer: View {
                     .padding(.leading, AppTheme.Spacing.md)
                     .padding(.top, AppTheme.Spacing.xs)
             } label: {
-                Text(attributed(label))
+                text(label, mathSize: theme.bodySize)
                     .font(
                         theme.bodyFont.font(
                             size: theme.bodySize,
@@ -513,6 +962,45 @@ struct MarkdownViewer: View {
                     .foregroundStyle(palette.ink.color)
                     .environment(\.openURL, openAction(proxy: proxy))
             }
+        )
+    }
+
+    /// Terms are semibold; definitions are indented under them. Each item
+    /// keeps the source's own line breaks out of the reading surface because
+    /// the list structure already carries the grouping.
+    private func definitionListView(
+        _ list: DefinitionList,
+        proxy: ScrollViewProxy
+    ) -> AnyView {
+        AnyView(
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
+                ForEach(list.items.indices, id: \.self) { index in
+                    let item = list.items[index]
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                        ForEach(item.terms.indices, id: \.self) { termIndex in
+                            text(
+                                item.terms[termIndex].inlines,
+                                mathSize: theme.bodySize
+                            )
+                            .fontWeight(.semibold)
+                        }
+                        ForEach(
+                            item.definitions.indices,
+                            id: \.self
+                        ) { definitionIndex in
+                            text(
+                                item.definitions[definitionIndex].inlines,
+                                mathSize: theme.bodySize
+                            )
+                            .padding(.leading, AppTheme.Spacing.lg)
+                        }
+                    }
+                }
+            }
+            // Definition text carries links like any other block; without
+            // this they bypass workspace navigation and the external
+            // confirmation the rest of the viewer applies.
+            .environment(\.openURL, openAction(proxy: proxy))
         )
     }
 
@@ -553,13 +1041,24 @@ struct MarkdownViewer: View {
         }
     }
 
+    @ViewBuilder
     private func codeBlockView(_ code: CodeBlock) -> some View {
-        MarkdownCodeBlockView(
-            code: code,
-            theme: theme,
-            palette: palette,
-            highlightQuery: find.isVisible ? find.query : nil
-        )
+        if let diagram = DiagramPolicy.source(from: code) {
+            MarkdownDiagramView(
+                code: code,
+                diagram: diagram,
+                theme: theme,
+                palette: palette,
+                highlightQuery: find.isVisible ? find.query : nil
+            )
+        } else {
+            MarkdownCodeBlockView(
+                code: code,
+                theme: theme,
+                palette: palette,
+                highlightQuery: find.isVisible ? find.query : nil
+            )
+        }
     }
 
     private func tableView(_ table: TableBlock, proxy: ScrollViewProxy) -> some View {
@@ -574,6 +1073,8 @@ struct MarkdownViewer: View {
                         tableCell(
                             table.header[column],
                             alignment: alignment(for: table, column: column),
+                            row: 0,
+                            column: column,
                             proxy: proxy
                         )
                         .fontWeight(.semibold)
@@ -585,6 +1086,8 @@ struct MarkdownViewer: View {
                             tableCell(
                                 table.rows[row][column],
                                 alignment: alignment(for: table, column: column),
+                                row: row + 1,
+                                column: column,
                                 proxy: proxy
                             )
                         }
@@ -593,6 +1096,10 @@ struct MarkdownViewer: View {
             }
             .padding(AppTheme.Spacing.md)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "Table, \(table.header.count) columns, \(table.rows.count) rows"
+        )
         .background(palette.tableGround.color)
         .clipShape(
             RoundedRectangle(cornerRadius: AppTheme.Radius.surface, style: .continuous)
@@ -602,15 +1109,20 @@ struct MarkdownViewer: View {
     private func tableCell(
         _ cell: TableCell,
         alignment: Alignment,
+        row: Int,
+        column: Int,
         proxy: ScrollViewProxy
     ) -> some View {
-        Text(attributed(cell.inlines))
+        text(cell.inlines, mathSize: theme.tableSize)
             .font(theme.uiFont.font(size: theme.tableSize))
             .lineSpacing(theme.codeLineSpacing)
             .foregroundStyle(palette.ink.color)
             .multilineTextAlignment(textAlignment(alignment))
             .frame(maxWidth: .infinity, alignment: alignment)
             .environment(\.openURL, openAction(proxy: proxy))
+            .accessibilityValue(
+                "Row \(row + 1), column \(column + 1)"
+            )
     }
 
     private func alignment(for table: TableBlock, column: Int) -> Alignment {
@@ -690,12 +1202,202 @@ struct MarkdownViewer: View {
         scroll(to: scrollID, proxy: proxy)
     }
 
+    // MARK: - Footnotes
+
+    private func footnotesView(
+        _ section: FootnoteSection,
+        proxy: ScrollViewProxy
+    ) -> some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
+            Rectangle()
+                .fill(palette.rule.color)
+                .frame(height: AppTheme.BorderWidth.hairline)
+            Text("Footnotes")
+                .font(theme.uiFont.font(size: theme.captionSize))
+                .foregroundStyle(palette.secondaryInk.color)
+            ForEach(section.entries, id: \.number) { entry in
+                HStack(
+                    alignment: .firstTextBaseline,
+                    spacing: AppTheme.Spacing.sm
+                ) {
+                    Text("\(entry.number).")
+                        .font(theme.bodyFont.font(size: theme.bodySize))
+                        .foregroundStyle(palette.secondaryInk.color)
+                    VStack(
+                        alignment: .leading,
+                        spacing: AppTheme.Spacing.xxs
+                    ) {
+                        text(entry.inlines, mathSize: theme.bodySize)
+                            .font(theme.bodyFont.font(size: theme.bodySize))
+                            .foregroundStyle(palette.ink.color)
+                            .textSelection(.enabled)
+                            .environment(
+                                \.openURL,
+                                openAction(proxy: proxy)
+                            )
+                        if !entry.referenceRanges.isEmpty {
+                            HStack(spacing: AppTheme.Spacing.sm) {
+                                ForEach(
+                                    entry.referenceRanges.indices,
+                                    id: \.self
+                                ) { index in
+                                    backLink(
+                                        entry: entry,
+                                        index: index,
+                                        proxy: proxy
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                .id("footnote-\(entry.number)")
+            }
+        }
+        .padding(.top, AppTheme.Spacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func backLink(
+        entry: FootnoteEntry,
+        index: Int,
+        proxy: ScrollViewProxy
+    ) -> some View {
+        Button {
+            scrollToReference(entry.referenceRanges[index], proxy: proxy)
+        } label: {
+            Text("↩")
+                .font(theme.uiFont.font(size: theme.captionSize))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(palette.link.color)
+        .accessibilityLabel(
+            "Back to reference \(index + 1) of footnote \(entry.number)"
+        )
+    }
+
+    /// Scrolls to the top-level block that holds a reference, expanding any
+    /// details element on the way in.
+    private func scrollToReference(
+        _ range: SourceRange,
+        proxy: ScrollViewProxy
+    ) {
+        guard let index = ast.blocks.firstIndex(where: { block in
+            block.range?.contains(offset: range.lowerBound) ?? false
+        }) else {
+            return
+        }
+        for details in detailsRanges {
+            if details.range.lowerBound <= range.lowerBound,
+               range.upperBound <= details.range.upperBound {
+                expansion[details.index] = true
+            }
+        }
+        let anchor = blockAnchor(ast.blocks[index], index: index)
+        DispatchQueue.main.async {
+            withAnimation { proxy.scrollTo(anchor, anchor: .center) }
+        }
+    }
+
     // MARK: - Inline text
 
-    private func attributed(_ inlines: [Inline]) -> AttributedString {
+    func attributed(_ inlines: [Inline]) -> AttributedString {
         var result = AttributedString()
-        append(inlines, to: &result)
+        var styles: [MarkdownInlineHTMLTag] = []
+        append(inlines, to: &result, styles: &styles)
         return highlighted(result)
+    }
+
+    /// A paragraph's text as a `Text` value, with formulas substituted as
+    /// baseline-aligned images.
+    ///
+    /// `Text` ignores `NSTextAttachment`, so a formula is carried through the
+    /// attributed string as an object-replacement run and swapped here for
+    /// `Text(Image)`. The image is offset by the formula's descent, which
+    /// puts the math baseline on the text baseline.
+    private func text(
+        _ inlines: [Inline],
+        mathSize: CGFloat
+    ) -> Text {
+        let attributed = attributed(inlines)
+        var output = Text("")
+        var pending = AttributedString()
+
+        func flush() {
+            guard !pending.characters.isEmpty else { return }
+            output = Text("\(output)\(Text(pending))")
+            pending = AttributedString()
+        }
+
+        for run in attributed.runs {
+            if let payload = run[MarkdownMathAttribute.self] {
+                flush()
+                output = Text("\(output)\(mathText(payload, size: mathSize))")
+            } else {
+                pending.append(AttributedString(attributed[run.range]))
+            }
+        }
+        flush()
+        return output
+    }
+
+    private func mathText(_ payload: MarkdownMathPayload, size: CGFloat) -> Text {
+        switch MarkdownMathRenderer.shared.layout(
+            source: payload.source,
+            display: payload.display,
+            fontSize: size,
+            color: palette.ink.nsColor
+        ) {
+        case let .success(layout):
+            return Text(Image(nsImage: layout.image))
+                .baselineOffset(-layout.descent)
+        case .failure:
+            var literal = AttributedString(payload.raw)
+            literal.foregroundColor = palette.secondaryInk.color
+            return Text(literal)
+        }
+    }
+
+    @ViewBuilder
+    private func displayMathView(_ payload: MarkdownMathPayload) -> some View {
+        switch MarkdownMathRenderer.shared.layout(
+            source: payload.source,
+            display: true,
+            fontSize: theme.bodySize,
+            color: palette.ink.nsColor
+        ) {
+        case let .success(layout):
+            ViewThatFits(in: .horizontal) {
+                Image(nsImage: layout.image)
+                    .interpolation(.high)
+                Image(nsImage: layout.image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .accessibilityLabel(
+                payload.source.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        case .failure:
+            Text(payload.raw)
+                .font(theme.codeFont.font(size: theme.codeSize))
+                .foregroundStyle(palette.secondaryInk.color)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private static func displayMathPayload(
+        _ inlines: [Inline]
+    ) -> MarkdownMathPayload? {
+        guard let match = MarkdownInlineMath.soleDisplay(in: inlines) else {
+            return nil
+        }
+        return MarkdownMathPayload(
+            source: match.source,
+            raw: match.raw,
+            display: true
+        )
     }
 
     /// Marks every occurrence of the find query inside this block.
@@ -714,11 +1416,46 @@ struct MarkdownViewer: View {
         return result
     }
 
-    private func append(_ inlines: [Inline], to result: inout AttributedString) {
+    /// Applies the allowlisted inline HTML styles that are open around a
+    /// text run. `mark` uses the palette's warning tint at the standard
+    /// border opacity; scripts reuse the footnote scale and offset tokens.
+    private func applyInlineHTMLStyles(
+        _ styles: [MarkdownInlineHTMLTag],
+        to segment: inout AttributedString
+    ) {
+        for style in styles {
+            switch style {
+            case .mark:
+                segment.backgroundColor = palette.warning.color.opacity(
+                    AppTheme.Opacity.borderStrong
+                )
+            case .underline:
+                segment.underlineStyle = .single
+            case .superscript:
+                segment.font = theme.bodyFont.font(
+                    size: theme.bodySize * AppTheme.Reading.footnoteScale
+                )
+                segment.baselineOffset = AppTheme.Reading.footnoteBaselineOffset
+            case .subscriptTag:
+                segment.font = theme.bodyFont.font(
+                    size: theme.bodySize * AppTheme.Reading.footnoteScale
+                )
+                segment.baselineOffset = -AppTheme.Reading.footnoteBaselineOffset
+            }
+        }
+    }
+
+    private func append(
+        _ inlines: [Inline],
+        to result: inout AttributedString,
+        styles: inout [MarkdownInlineHTMLTag]
+    ) {
         for inline in inlines {
             switch inline {
             case let .text(value, _):
-                result.append(AttributedString(value))
+                var segment = AttributedString(value)
+                applyInlineHTMLStyles(styles, to: &segment)
+                result.append(segment)
             case .softBreak:
                 result.append(AttributedString(" "))
             case .lineBreak:
@@ -734,22 +1471,26 @@ struct MarkdownViewer: View {
                 result.append(segment)
             case let .emphasis(children, _):
                 var segment = AttributedString()
-                append(children, to: &segment)
+                append(children, to: &segment, styles: &styles)
                 result.append(applying(.emphasized, to: segment))
             case let .strong(children, _):
                 var segment = AttributedString()
-                append(children, to: &segment)
+                append(children, to: &segment, styles: &styles)
                 result.append(applying(.stronglyEmphasized, to: segment))
             case let .strikethrough(children, _):
                 var container = AttributeContainer()
                 container.strikethroughStyle = .single
                 var segment = AttributedString()
-                append(children, to: &segment)
+                append(children, to: &segment, styles: &styles)
                 segment.mergeAttributes(container)
                 result.append(segment)
             case let .link(destination, _, children, _):
+                if let reference = MediaReference.parse(destination) {
+                    result.append(mediaSegment(reference))
+                    continue
+                }
                 var segment = AttributedString()
-                append(children, to: &segment)
+                append(children, to: &segment, styles: &styles)
                 if case .allowed = MarkdownSecurity.linkDecision(for: destination),
                    let url = URL(string: destination) {
                     segment.link = url
@@ -762,7 +1503,19 @@ struct MarkdownViewer: View {
                 var segment = AttributedString(HeadingIndex.renderedText(description))
                 segment.foregroundColor = palette.secondaryInk.color
                 result.append(segment)
-            case .inlineHTML:
+            case let .inlineHTML(raw, _):
+                // Only the four allowlisted tags carry meaning; everything
+                // else stays hidden raw HTML.
+                guard let match = MarkdownInlineHTML.match(raw) else {
+                    continue
+                }
+                if match.isClosing {
+                    if let index = styles.lastIndex(of: match.tag) {
+                        styles.remove(at: index)
+                    }
+                } else {
+                    styles.append(match.tag)
+                }
                 continue
             case let .wikiLink(link, _):
                 var segment = AttributedString(link.display)
@@ -779,7 +1532,86 @@ struct MarkdownViewer: View {
                 }
                 segment.underlineStyle = .single
                 result.append(segment)
+            case let .footnoteReference(reference, _):
+                var container = AttributeContainer()
+                container.font = theme.bodyFont.font(
+                    size: theme.bodySize * AppTheme.Reading.footnoteScale
+                )
+                container.baselineOffset = AppTheme.Reading
+                    .footnoteBaselineOffset
+                var segment = AttributedString("\(reference.number)")
+                segment.mergeAttributes(container)
+                segment.link = Self.footnoteURL(number: reference.number)
+                segment.foregroundColor = palette.link.color
+                result.append(segment)
+            case let .math(source, raw, display, _):
+                var segment = AttributedString("\u{FFFC}")
+                segment[MarkdownMathAttribute.self] = MarkdownMathPayload(
+                    source: source,
+                    raw: raw,
+                    display: display
+                )
+                result.append(segment)
             }
+        }
+    }
+
+    // MARK: - Media references
+
+    private func mediaSegment(_ reference: MediaReference) -> AttributedString {
+        var segment = AttributedString()
+        if let label = reference.label, !label.isEmpty {
+            segment = AttributedString(label)
+        } else if let path = reference.path {
+            segment = AttributedString(path)
+        } else {
+            segment = AttributedString(
+                reference.kind == .take ? "Take" : "Timecode"
+            )
+        }
+        var prefixed = AttributedString(
+            Self.mediaGlyph(reference.kind) + " "
+        )
+        prefixed.append(segment)
+        switch mediaState(for: reference) {
+        case .available:
+            if let url = reference.url() {
+                prefixed.link = url
+            }
+            prefixed.foregroundColor = palette.link.color
+        case .missing:
+            prefixed.append(AttributedString(" (missing)"))
+            prefixed.foregroundColor = palette.warning.color
+        }
+        return prefixed
+    }
+
+    private func mediaState(
+        for reference: MediaReference
+    ) -> MediaReferenceState {
+        if let mediaReferenceState {
+            return mediaReferenceState(reference)
+        }
+        guard let path = reference.path else { return .available }
+        guard let documentURL else { return .missing }
+        let root: URL = workspaceRoot
+            ?? documentURL.deletingLastPathComponent()
+        guard let url = MarkdownSecurity.resolveLocalPath(
+            path,
+            relativeTo: documentURL,
+            root: root
+        ) else {
+            return .missing
+        }
+        return FileManager.default.fileExists(atPath: url.path)
+            ? .available
+            : .missing
+    }
+
+    private static func mediaGlyph(_ kind: MediaReference.Kind) -> String {
+        switch kind {
+        case .take: "▶"
+        case .timecode: "⏱"
         }
     }
 
@@ -787,6 +1619,14 @@ struct MarkdownViewer: View {
 
     private func openAction(proxy: ScrollViewProxy) -> OpenURLAction {
         OpenURLAction { url in
+            if let reference = MediaReference.parse(url.absoluteString) {
+                onOpenMedia?(reference)
+                return .handled
+            }
+            if let number = Self.footnoteNumber(from: url) {
+                scroll(to: "footnote-\(number)", proxy: proxy)
+                return .handled
+            }
             if let link = Self.parseWikiURL(url) {
                 onOpenWikiLink?(link)
                 return .handled
@@ -804,16 +1644,18 @@ struct MarkdownViewer: View {
                 return .handled
             }
 
-            switch MarkdownSecurity.linkDecision(for: absolute) {
-            case .allowed(.external), .allowed(.mailto):
+            switch MarkdownLinkActivation.decide(absolute) {
+            case .confirmBeforeOpening(let confirmed):
                 if let onOpenExternalURL {
-                    onOpenExternalURL(url)
+                    onOpenExternalURL(confirmed)
                 } else {
-                    NSWorkspace.shared.open(url)
+                    ExternalLinkConfirmation.present(
+                        ExternalLinkConfirmation.request(for: confirmed)
+                    )
                 }
-            case .allowed(.local):
+            case .openDirectly(.local):
                 onOpenLocalLink?(url.relativeString)
-            default:
+            case .openDirectly, .refused:
                 break
             }
             return .handled
@@ -848,6 +1690,15 @@ struct MarkdownViewer: View {
         let fragment = items.first { $0.name == "fragment" }?.value
         let alias = items.first { $0.name == "alias" }?.value
         return WikiLink(target: target, fragment: fragment, alias: alias)
+    }
+
+    static func footnoteURL(number: Int) -> URL? {
+        URL(string: "\(footnoteScheme)://\(number)")
+    }
+
+    static func footnoteNumber(from url: URL) -> Int? {
+        guard url.scheme == footnoteScheme else { return nil }
+        return Int(url.host ?? "")
     }
 
     // MARK: - Reconcile expansion
@@ -1096,7 +1947,7 @@ private struct MarkdownImageView: View {
 /// from the same lexer the code workspace uses; an unknown language stays
 /// plain. The view owns its highlighted value, so a document re-render does
 /// not re-lex every block.
-private struct MarkdownCodeBlockView: View {
+struct MarkdownCodeBlockView: View {
     let code: CodeBlock
     let theme: MarkdownTheme
     let palette: ThemePalette
@@ -1196,7 +2047,7 @@ private struct MarkdownCodeBlockView: View {
     }
 
     private func makeHighlighted() -> AttributedString? {
-        guard let language = fenceLanguage(code.language),
+        guard let language = MarkdownFenceLanguage.language(for: code.language),
               language != .plainText else {
             return nil
         }
@@ -1244,69 +2095,16 @@ private struct MarkdownCodeBlockView: View {
         return result
     }
 
-    private func fenceLanguage(_ raw: String?) -> CodeLanguage? {
-        guard let raw, !raw.isEmpty else { return nil }
-        let name = raw
-            .split(separator: " ", maxSplits: 1)
-            .first
-            .map(String.init)?
-            .lowercased() ?? raw.lowercased()
-        if let exact = CodeLanguage(rawValue: name) {
-            return exact
-        }
-        switch name {
-        case "js", "jsx", "javascript": return .javascript
-        case "ts", "tsx", "typescript": return .typescript
-        case "py", "python": return .python
-        case "sh", "bash", "zsh", "shell", "console": return .shell
-        case "yml": return .yaml
-        case "c++": return .cpp
-        case "objc", "objective-c": return .objectiveC
-        case "text", "plaintext", "plain": return .plainText
-        default: return CodeLanguage.language(forExtension: name)
-        }
-    }
-}
-
-// MARK: - GitHub alerts
-
-private enum AlertKind: String, CaseIterable {
-    case note
-    case tip
-    case important
-    case warning
-    case caution
-
-    var marker: String { "[!\(rawValue)]" }
-    var label: String { rawValue.capitalized }
-
-    var icon: String {
-        switch self {
-        case .note: "info.circle"
-        case .tip: "lightbulb"
-        case .important: "exclamationmark.circle"
-        case .warning: "exclamationmark.triangle"
-        case .caution: "xmark.octagon"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .note: AppTheme.MarkdownChrome.Alerts.note
-        case .tip: AppTheme.MarkdownChrome.Alerts.tip
-        case .important: AppTheme.MarkdownChrome.Alerts.important
-        case .warning: AppTheme.MarkdownChrome.Alerts.warning
-        case .caution: AppTheme.MarkdownChrome.Alerts.caution
-        }
-    }
 }
 
 // MARK: - Rendered find bar
 
 private struct RenderedFindBar: View {
     @Bindable var find: RenderedFindController
+    let isFocusedPane: Bool
     @FocusState private var fieldFocused: Bool
     @State private var keyMonitor: Any?
+    @State private var hostWindow = RenderedFindBarHostWindow()
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.xs) {
@@ -1362,6 +2160,9 @@ private struct RenderedFindBar: View {
             removeMonitor()
         }
         .onExitCommand { find.close() }
+        .background(
+            RenderedFindBarWindowProbe { hostWindow.window = $0 }
+        )
     }
 
     /// AppKit matches a lowercase menu equivalent without regard to Shift, so
@@ -1370,12 +2171,20 @@ private struct RenderedFindBar: View {
     private func installMonitor() {
         guard keyMonitor == nil else { return }
         let find = find
+        let host = hostWindow
         keyMonitor = NSEvent.addLocalMonitorForEvents(
             matching: .keyDown
         ) { event in
             let flags = event.modifierFlags
                 .intersection(.deviceIndependentFlagsMask)
-            guard event.charactersIgnoringModifiers?.lowercased() == "g",
+            // A local monitor sees every window's keys. Without this guard
+            // an open find bar in one window swallowed another window's
+            // Find Next.
+            guard let hostWindow = host.window,
+                  event.window === hostWindow,
+                  hostWindow.isKeyWindow,
+                  self.isFocusedPane,
+                  event.charactersIgnoringModifiers?.lowercased() == "g",
                   flags.contains(.command),
                   !flags.contains(.option),
                   !flags.contains(.control) else {
@@ -1393,5 +2202,35 @@ private struct RenderedFindBar: View {
         guard let keyMonitor else { return }
         NSEvent.removeMonitor(keyMonitor)
         self.keyMonitor = nil
+    }
+}
+
+/// The window a view is hosted in, updated as the view moves between
+/// windows. A plain class, not `@State`: the find bar reads it when an event
+/// arrives and must not re-render when it changes.
+private final class RenderedFindBarHostWindow {
+    weak var window: NSWindow?
+}
+
+private struct RenderedFindBarWindowProbe: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onWindow = onWindow
+        return view
+    }
+
+    func updateNSView(_ nsView: ProbeView, context: Context) {
+        nsView.onWindow = onWindow
+    }
+
+    final class ProbeView: NSView {
+        var onWindow: ((NSWindow?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindow?(window)
+        }
     }
 }

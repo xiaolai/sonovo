@@ -23,6 +23,7 @@ final class Project: Identifiable {
     let subtitles: SubtitleWorkspace
     let models: Model3DWorkspace
     let code: CodeWorkspace
+    let mdx: MDXWorkspace
     let terminalSessions: TerminalSessionsStore
     let mediaEdits: MediaEditWorkspace
     let timelines: TimelineWorkspace
@@ -141,6 +142,7 @@ final class Project: Identifiable {
         subtitles: SubtitleWorkspace,
         models: Model3DWorkspace,
         code: CodeWorkspace,
+        mdx: MDXWorkspace,
         terminalSessions: TerminalSessionsStore,
         openTabs: [EditorTab],
         selectedTabID: String,
@@ -160,6 +162,7 @@ final class Project: Identifiable {
         self.subtitles = subtitles
         self.models = models
         self.code = code
+        self.mdx = mdx
         self.terminalSessions = terminalSessions
         self.openTabs = openTabs
         self.selectedTabID = selectedTabID
@@ -266,6 +269,14 @@ final class Project: Identifiable {
         self.code.isDestinationReserved = { [weak self] path in
             self?.sharedReservedDestinations[path] != nil
         }
+        self.mdx.onDocumentClosed = { [weak self] document in
+            guard let self else { return }
+            self.removeTabs(forFileAt: document.fileURL, kind: .mdx)
+            self.resumePendingClose(closedDocumentID: document.id)
+        }
+        self.mdx.onDocumentActivated = { [weak self] url in
+            self?.syncTabForDocument(at: url, kind: .mdx)
+        }
     }
 
     /// Reserves a Save As destination across every workspace. The main actor
@@ -352,6 +363,7 @@ final class Project: Identifiable {
             subtitles: SubtitleWorkspace(readsDemoEnvironment: false),
             models: Model3DWorkspace(opensDemoModel: false),
             code: CodeWorkspace(readsDemoEnvironment: false),
+            mdx: MDXWorkspace(),
             terminalSessions: TerminalSessionsStore(
                 workingDirectory: root.path,
                 projectKey: root.path,
@@ -368,6 +380,7 @@ final class Project: Identifiable {
             sampleDocuments: nil
         )
         code.setWorkspaceRoot(root)
+        mdx.setWorkspaceRoot(root)
         markdown.setWorkspaceRoot(root)
         markdown.onOpenAsset = { [weak self] url in
             guard let self else { return false }
@@ -389,7 +402,8 @@ final class Project: Identifiable {
         models: Model3DWorkspace,
         terminalSessions: TerminalSessionsStore,
         sampleDocuments: SampleProjectDocuments?,
-        code: CodeWorkspace = CodeWorkspace(readsDemoEnvironment: false)
+        code: CodeWorkspace = CodeWorkspace(readsDemoEnvironment: false),
+        mdx: MDXWorkspace = MDXWorkspace()
     ) -> Project {
         let initialIDs = [
             "script-md", "captions-srt", "vo-take-03", "take-03", "stills",
@@ -408,6 +422,7 @@ final class Project: Identifiable {
             subtitles: subtitles,
             models: models,
             code: code,
+            mdx: mdx,
             terminalSessions: terminalSessions,
             openTabs: tabs,
             selectedTabID: "vo-take-03",
@@ -770,6 +785,10 @@ final class Project: Identifiable {
             return code.documents.first {
                 MarkdownSecurity.canonical($0.fileURL) == url
             }?.isDirty == true
+        case .mdx:
+            return mdx.documents.first {
+                MarkdownSecurity.canonical($0.fileURL) == url
+            }?.isDirty == true
         case .timeline:
             guard let document = timelines.document else { return false }
             return MarkdownSecurity.canonical(document.url)
@@ -815,6 +834,12 @@ final class Project: Identifiable {
             return (
                 document.displayName,
                 "\(language) · \(document.lineEnding == .crlf ? "CRLF" : "LF")"
+            )
+        case .mdx:
+            guard let document = mdx.selectedDocument else { return nil }
+            return (
+                document.displayName,
+                "MDX · \(document.isDirty ? "Edited" : "Saved")"
             )
         default:
             return nil
@@ -985,6 +1010,12 @@ final class Project: Identifiable {
             }) {
                 code.select(document)
             }
+        case .mdx:
+            if let document = mdx.documents.first(where: {
+                MarkdownSecurity.canonical($0.fileURL).path == path
+            }) {
+                mdx.select(document)
+            }
         case .timeline:
             break
         default:
@@ -1014,6 +1045,11 @@ final class Project: Identifiable {
             MarkdownSecurity.canonical($0.fileURL).path == path
         }) {
             return .code
+        }
+        if mdx.documents.contains(where: {
+            MarkdownSecurity.canonical($0.fileURL).path == path
+        }) {
+            return .mdx
         }
         if let document = timelines.document,
            MarkdownSecurity.canonical(document.url).path == path {
@@ -1153,6 +1189,8 @@ final class Project: Identifiable {
             } else {
                 markdown.lastError = message
                 markdown.selectedDocumentID = nil
+                markdown.secondaryDocumentID = nil
+                markdown.focusedDocumentID = nil
             }
             return
         }
@@ -1171,6 +1209,8 @@ final class Project: Identifiable {
             models.open(url: url)
         case .code:
             code.open(url: url)
+        case .mdx:
+            mdx.open(url: url)
         case .timeline:
             timelines.open(url: url)
         default:
@@ -1328,6 +1368,31 @@ final class Project: Identifiable {
                 }
             }
             return .closed
+        case .mdx:
+            for document in mdx.documents {
+                if hasFileTab(document.fileURL) {
+                    continue
+                }
+                let outcome = await closeTracked(
+                    url: document.fileURL,
+                    kind: .mdx,
+                    pendingDocumentID: { [weak self] in
+                        self?.mdx.pendingClose?.id
+                    },
+                    close: { [weak self] in
+                        guard let self else { return false }
+                        return await self.mdx.close(document)
+                    }
+                )
+                if let outcome {
+                    if case let .deferred(id) = outcome {
+                        pendingWorkspaceClose = kind
+                        pendingWorkspaceCloseDocumentID = id
+                    }
+                    return outcome
+                }
+            }
+            return .closed
         case .subtitle:
             for document in subtitles.documents {
                 if hasFileTab(document.fileURL) {
@@ -1436,6 +1501,14 @@ final class Project: Identifiable {
                 MarkdownSecurity.canonical($0.fileURL).path == path
             }) {
                 closed = await code.close(document)
+            } else {
+                closed = true
+            }
+        case .mdx:
+            if let document = mdx.documents.first(where: {
+                MarkdownSecurity.canonical($0.fileURL).path == path
+            }) {
+                closed = await mdx.close(document)
             } else {
                 closed = true
             }
@@ -1659,6 +1732,81 @@ final class Project: Identifiable {
 
     func clearMediaError() {
         mediaError = nil
+    }
+
+    // MARK: - Media links
+
+    /// One `sonovo:` link's ask to place the transport after its media tab
+    /// opens. It is one-shot: the media view consumes it when it is ready.
+    struct PendingMediaSeek: Equatable, Sendable {
+        let path: String
+        let seconds: Double?
+    }
+
+    private(set) var pendingMediaSeek: PendingMediaSeek?
+
+    /// The project asset a media link names, or the selected media asset when
+    /// the link carries no path. Only audio and video assets qualify.
+    func mediaAsset(
+        for reference: MediaReference,
+        documentURL: URL?
+    ) -> ProjectAsset? {
+        if let path = reference.path {
+            guard let documentURL,
+                  let root = root ?? markdown.workspaceRoot,
+                  let url = MarkdownSecurity.resolveLocalPath(
+                      path,
+                      relativeTo: documentURL,
+                      root: root
+                  ) else {
+                return nil
+            }
+            let canonical = MarkdownSecurity.canonical(url)
+            return assets.first { asset in
+                isMedia(asset.kind)
+                    && MarkdownSecurity.canonical(asset.url) == canonical
+            }
+        }
+        guard let selected = selectedAsset, isMedia(selected.kind) else {
+            return nil
+        }
+        return selected
+    }
+
+    /// Opens the media a link names and leaves a seek request for its view.
+    /// `documentURL` is the document that displayed the link; without it a
+    /// relative path would resolve against whichever pane has focus.
+    func openMediaReference(
+        _ reference: MediaReference,
+        documentURL: URL? = nil
+    ) {
+        guard let asset = mediaAsset(
+            for: reference,
+            documentURL: documentURL
+                ?? markdown.selectedDocument?.fileURL
+        ) else {
+            return
+        }
+        openAsset(asset)
+        pendingMediaSeek = PendingMediaSeek(
+            path: MarkdownSecurity.canonical(asset.url).path,
+            seconds: reference.seconds
+        )
+    }
+
+    /// Clears and returns the pending seek when it names this asset.
+    func takeMediaSeek(for asset: ProjectAsset) -> PendingMediaSeek? {
+        guard let pending = pendingMediaSeek,
+              pending.path
+                == MarkdownSecurity.canonical(asset.url).path else {
+            return nil
+        }
+        pendingMediaSeek = nil
+        return pending
+    }
+
+    private func isMedia(_ kind: AssetKind) -> Bool {
+        kind == .audio || kind == .video
     }
 
     func startAudioRecording() async -> Bool {
@@ -2238,6 +2386,11 @@ final class Project: Identifiable {
                 return true
             }
         }
+        for document in mdx.documents where document.id != id {
+            if MarkdownSecurity.canonical(document.fileURL).path == path {
+                return true
+            }
+        }
         if let document = timelines.document,
            MarkdownSecurity.canonical(document.url).path == path {
             return true
@@ -2293,6 +2446,7 @@ final class Project: Identifiable {
         stopOrCancelRecordingForLifecycle()
         mediaEdits.cancelJobs()
         mediaEdits.closeAll()
+        mdx.prepareForTermination()
         onSelectionChanged = nil
     }
 
@@ -2327,7 +2481,8 @@ final class Project: Identifiable {
 
     var hasDirtyDocuments: Bool {
         markdown.hasDirtyDocuments || subtitles.hasDirtyDocuments
-            || code.hasDirtyDocuments || timelines.hasDirtyDocuments
+            || code.hasDirtyDocuments || mdx.hasDirtyDocuments
+            || timelines.hasDirtyDocuments
     }
 
     func prepareForTermination() {
@@ -2341,6 +2496,7 @@ final class Project: Identifiable {
         markdown.shutdown()
         models.prepareForTermination()
         code.prepareForTermination()
+        mdx.prepareForTermination()
         timelines.prepareForTermination()
         terminalSessions.shutdownAll(force: true)
     }

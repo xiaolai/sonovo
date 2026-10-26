@@ -266,6 +266,11 @@ struct TransportBar: View {
             let lines = document.source.components(separatedBy: "\n").count
             return "\(lines.formatted()) lines"
         }
+        if tab.kind == .mdx,
+           let document = state.mdx.selectedDocument {
+            let lines = document.source.components(separatedBy: "\n").count
+            return "\(lines.formatted()) lines"
+        }
         return switch tab.kind {
         case .script: "0 words"
         case .stills: "8 frames"
@@ -276,6 +281,7 @@ struct TransportBar: View {
         case .html: "Local preview"
         case .delivery: "Not rendered"
         case .code: "No code file open"
+        case .mdx: "No MDX document open"
         case .timeline: "3 tracks"
         case .document: "Document"
         case .image: "Image"
@@ -324,6 +330,10 @@ struct TransportBar: View {
                 + (document.hasBOM ? "UTF-8 BOM" : "UTF-8")
                 + " · \(document.lineEnding == .crlf ? "CRLF" : "LF")"
         }
+        if tab.kind == .mdx,
+           let document = state.mdx.selectedDocument {
+            return "MDX · \(document.isDirty ? "Edited" : "Saved")"
+        }
         return switch tab.kind {
         case .script: "Markdown"
         case .stills: "2048 px · 8 frames"
@@ -334,6 +344,7 @@ struct TransportBar: View {
         case .html: "No remote loads"
         case .delivery: "1920×1080 · H.264"
         case .code: "UTF-8"
+        case .mdx: "MDX · UTF-8"
         case .timeline: "Video · Voice · Music"
         case .document: "Preview"
         case .image: "Local file"

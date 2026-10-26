@@ -155,9 +155,11 @@ extension Project {
             isOffline: isOffline,
             dirtyDocumentCount: markdown.documents.filter(\.isDirty).count
                 + subtitles.documents.filter(\.isDirty).count
-                + code.documents.filter(\.isDirty).count,
+                + code.documents.filter(\.isDirty).count
+                + mdx.documents.filter(\.isDirty).count,
             hasPendingSaveDecision: markdown.pendingClose != nil
-                || code.pendingClose != nil,
+                || code.pendingClose != nil
+                || mdx.pendingClose != nil,
             runningTerminalCount: terminalSessions.runningProcessCount,
             hasRunningConversion: models.hasRunningConversion,
             hasBackgroundChanges: hasActivity

@@ -57,4 +57,73 @@ public enum MarkdownLimits {
 
     /// Maximum number of wiki-link resolution candidates considered.
     public static let maxWikiLinkCandidates = 64
+
+    /// Maximum TeX source characters in one formula. Larger spans stay
+    /// literal; the renderer never typesets unbounded input.
+    public static let maxMathSourceCharacters = 4_096
+
+    /// Maximum brace nesting in one formula. Typesetting recurses through
+    /// groups, so this bounds the renderer's stack.
+    public static let maxMathBraceDepth = 64
+
+    /// Maximum formulas one export will rasterize. Later formulas stay
+    /// literal source so a pathological document cannot stall an export.
+    public static let maxRenderedMathFormulas = 500
+
+    /// Maximum typeset formulas kept in the renderer's cache.
+    public static let maxMathRenderCacheEntries = 512
+
+    /// Maximum PNG bytes an HTML export spends on formulas. Later formulas
+    /// stay literal source rather than letting one huge document produce an
+    /// unbounded file.
+    public static let maxMathExportBytes = 16 * 1024 * 1024
+
+    /// Maximum characters of Mermaid source in one fence. Diagrams are
+    /// authored by hand; a larger fence is a document, not a diagram, and
+    /// stays a code block.
+    public static let maxMermaidSourceCharacters = 32_768
+
+    /// Maximum nodes Mermaid may lay out in one diagram.
+    public static let maxMermaidEdges = 500
+
+    /// Maximum sanitized SVG bytes for one diagram. The sanitizer fails
+    /// closed above this, and the reader shows the code block instead.
+    public static let maxMermaidSVGBytes = 4 * 1024 * 1024
+
+    /// Maximum rendered diagrams kept in the renderer cache.
+    public static let maxMermaidRenderCacheEntries = 128
+
+    /// Seconds one diagram may take before the renderer abandons it and
+    /// reloads the isolated page.
+    public static let mermaidRenderTimeoutSeconds: Double = 10
+
+    /// A PDF export that has not finished by now is stalled: the page never
+    /// loaded, a script never returned, or the web process died silently.
+    public static let pdfRenderTimeoutSeconds: Double = 60
+
+    /// Maximum characters of Graphviz DOT source in one fence.
+    public static let maxGraphvizSourceCharacters = 32_768
+
+    /// Maximum characters of Markmap source in one fence.
+    public static let maxMarkmapSourceCharacters = 32_768
+
+    /// Maximum bytes of a raw SVG fence. The sanitizer still applies; this
+    /// only bounds the document that reaches it.
+    public static let maxSVGFenceBytes = 2 * 1024 * 1024
+
+    /// Seconds the synchronous SVG sanitizer may spend on one fence before
+    /// it stops and the fence falls back to a code block.
+    public static let svgSanitizeTimeoutSeconds: Double = 2
+
+    /// Maximum diagrams of any engine one HTML export will render.
+    public static let maxRenderedDiagrams = 200
+
+    /// Maximum SVG bytes an HTML export spends on all diagram engines.
+    public static let maxDiagramExportBytes = 16 * 1024 * 1024
+
+    /// Maximum cells an HTML-pasted table may produce after padding every
+    /// row to the widest row. A table with many rows and one wide row is
+    /// quadratic in the padded output; above this the rows convert as plain
+    /// text instead of a table.
+    public static let maxPastedTableCells = 10_000
 }

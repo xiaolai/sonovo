@@ -22,6 +22,17 @@ final class MarkdownViewerTests: XCTestCase {
         XCTAssertEqual(MarkdownViewer.parseWikiURL(url), link)
     }
 
+    func testFootnoteURLRoundTrips() throws {
+        let url = try XCTUnwrap(MarkdownViewer.footnoteURL(number: 12))
+        XCTAssertEqual(url.scheme, "sonovo-footnote")
+        XCTAssertEqual(MarkdownViewer.footnoteNumber(from: url), 12)
+        XCTAssertNil(
+            MarkdownViewer.footnoteNumber(
+                from: URL(string: "https://example.com")!
+            )
+        )
+    }
+
     func testDetailsMetadataAlignsWithReconcilerKeys() {
         let source = """
         # Top
@@ -58,6 +69,11 @@ final class MarkdownViewerTests: XCTestCase {
 
         Paragraph with **bold**, *italic*, `code`, [a link](https://example.com), and [[Wiki]].
 
+        A footnote reference[^note].
+
+        [Take 2](sonovo:take?path=assets/take-2.mov&seconds=12.5) and
+        [Missing take](sonovo:take?path=assets/missing.mov).
+
         > A quote
 
         > [!NOTE]
@@ -93,6 +109,8 @@ final class MarkdownViewerTests: XCTestCase {
         </details>
 
         <div>raw html is hidden</div>
+
+        [^note]: The footnote body.
         """
         let (ast, headings) = makeAST(source)
         let viewer = MarkdownViewer(

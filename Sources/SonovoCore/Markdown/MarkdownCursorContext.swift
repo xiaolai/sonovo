@@ -47,6 +47,12 @@ public struct MarkdownCursorContext: Sendable, Equatable {
 
         public let kind: Kind
         public let range: SourceRange
+        /// The parser-resolved destination for an inline link or image: the
+        /// escapes and character references are already decoded. The popover
+        /// must show the same value the reader opens, so it reads this
+        /// instead of decoding the raw slice itself.
+        public let destination: String?
+        public let title: String?
     }
 
     public let offset: Int
@@ -122,7 +128,6 @@ private extension MarkdownCursorContext {
         var block: BlockKind?
         var headingLevel: Int?
         var table: TableContext?
-        var list: ListContext?
         var listDepth = 0
         var blockQuoteDepth = 0
         var codeFence: SourceRange?
@@ -191,6 +196,17 @@ private extension MarkdownCursorContext {
                 for row in table.rows {
                     for cell in row { inspect(cell.inlines) }
                 }
+            case let .definitionList(list, _):
+                set(.paragraph)
+                for item in list.items where containsCaret(item.range) {
+                    for term in item.terms where containsCaret(term.range) {
+                        inspect(term.inlines)
+                    }
+                    for definition in item.definitions
+                        where containsCaret(definition.range) {
+                        inspect(definition.inlines)
+                    }
+                }
             case .details(let details, _):
                 set(.details)
                 if let summaryRange = details.summaryRange,
@@ -203,6 +219,10 @@ private extension MarkdownCursorContext {
                 }
             case .tableOfContents(_):
                 set(.tableOfContents)
+            case .footnoteDefinition(_, _):
+                set(.paragraph)
+            case .footnotes(_, _):
+                set(.paragraph)
             }
         }
 
@@ -212,14 +232,31 @@ private extension MarkdownCursorContext {
                     continue
                 }
                 switch inline {
-                case .link(_, _, let children, _):
-                    link = LinkContext(kind: .link, range: range)
+                case .link(let destination, let title, let children, _):
+                    link = LinkContext(
+                        kind: .link,
+                        range: range,
+                        destination: destination,
+                        title: title
+                    )
                     inspect(children)
-                case .image(_, _, let description, _):
-                    link = LinkContext(kind: .image, range: range)
+                case .image(let destination, let title, let description, _):
+                    link = LinkContext(
+                        kind: .image,
+                        range: range,
+                        destination: destination,
+                        title: title
+                    )
                     inspect(description)
                 case .wikiLink(_, _):
-                    link = LinkContext(kind: .wikiLink, range: range)
+                    link = LinkContext(
+                        kind: .wikiLink,
+                        range: range,
+                        destination: nil,
+                        title: nil
+                    )
+                case .footnoteReference(_, _):
+                    break
                 case .emphasis(let children, _),
                      .strong(let children, _),
                      .strikethrough(let children, _):

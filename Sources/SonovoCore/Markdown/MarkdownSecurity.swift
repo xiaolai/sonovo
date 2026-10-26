@@ -13,6 +13,8 @@ public enum MarkdownSecurity {
         case mailto
         case local
         case fragment
+        /// A validated `sonovo:` media reference.
+        case media
     }
 
     /// The exact policy outcome for a link destination.
@@ -69,6 +71,11 @@ public enum MarkdownSecurity {
             if scheme == "mailto" {
                 return .allowed(.mailto)
             }
+            if scheme == MediaReference.scheme {
+                return MediaReference.parse(trimmed) == nil
+                    ? .denied("invalid media link")
+                    : .allowed(.media)
+            }
             return .denied("unsupported scheme \(scheme)")
         }
 
@@ -110,15 +117,28 @@ public enum MarkdownSecurity {
         return candidate
     }
 
-    /// Whether a wiki target is structurally safe.
-    public static func isValidWikiTarget(_ target: String) -> Bool {
-        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+    /// Whether a path is relative, traversal-free, and free of a scheme.
+    public static func isValidRelativePath(_ path: String) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed == path else { return false }
         guard scheme(of: trimmed) == nil else { return false }
-        guard !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~") else { return false }
+        guard !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~") else {
+            return false
+        }
         guard !trimmed.contains("\\") else { return false }
-        let components = trimmed.split(separator: "/", omittingEmptySubsequences: true)
+        let components = trimmed.split(
+            separator: "/",
+            omittingEmptySubsequences: true
+        )
         return !components.contains(where: { $0 == ".." })
+    }
+
+    /// Whether a wiki target is structurally safe. Surrounding whitespace
+    /// has never counted as part of the target.
+    public static func isValidWikiTarget(_ target: String) -> Bool {
+        isValidRelativePath(
+            target.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 
     /// The viewer's raw-HTML policy: hide everything that is not a structural

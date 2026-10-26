@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Document-level menu commands: saving, new takes, sidebar, inspector.
@@ -44,6 +45,16 @@ struct DocumentCommands: Commands {
             .disabled(state.liveProject.openTabs.count < 2)
         }
         CommandGroup(after: .pasteboard) {
+            // Bypasses the smart-paste chain entirely: the pasteboard's plain
+            // string is inserted exactly, even when it carries HTML.
+            Button("Paste as Plain Text") {
+                NSApp.sendAction(
+                    #selector(NSTextView.pasteAsPlainText(_:)),
+                    to: nil,
+                    from: nil
+                )
+            }
+            .keyboardShortcut("v", modifiers: [.command, .option, .shift])
             Button("Find") {
                 if isRenderedModeSelected {
                     state.markdown.showRenderedFind()
@@ -90,12 +101,10 @@ struct DocumentCommands: Commands {
     /// lookup unsafe; resolve through the workspace instead.
     private var markdownTextView: NSTextView? {
         guard state.selectedTab?.kind == .script,
-              state.terminalPresentation != .full,
-              let document = state.markdown.selectedDocument,
-              document.mode == .source else {
+              state.terminalPresentation != .full else {
             return nil
         }
-        return state.markdown.controller(for: document).textView
+        return state.markdown.sourceFindTarget()?.textView
     }
 
     private var canFind: Bool {
@@ -238,6 +247,16 @@ struct MarkdownCommands: Commands {    @Bindable var state: AppState
                 .keyboardShortcut("r", modifiers: [.command, .option])
                 .disabled(!isMarkdownVisible)
             Divider()
+            Button("Export as HTML…") {
+                state.markdown.exportSelected(as: .html)
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+            .disabled(!isMarkdownVisible)
+            Button("Export as PDF…") {
+                state.markdown.exportSelected(as: .pdf)
+            }
+            .disabled(!isMarkdownVisible)
+            Divider()
             Group {
                 Button("Bold") {
                     state.markdown.performSelected(.toggleStrong)
@@ -255,6 +274,18 @@ struct MarkdownCommands: Commands {    @Bindable var state: AppState
                     state.markdown.performSelected(.toggleStrikethrough)
                 }
                 .keyboardShortcut("x", modifiers: [.command, .shift])
+                Button("Highlight") {
+                    state.markdown.performSelected(.toggleHighlight)
+                }
+                Button("Underline") {
+                    state.markdown.performSelected(.toggleUnderline)
+                }
+                Button("Superscript") {
+                    state.markdown.performSelected(.toggleSuperscript)
+                }
+                Button("Subscript") {
+                    state.markdown.performSelected(.toggleSubscript)
+                }
                 Menu("Heading") {
                     ForEach(1...6, id: \.self) { level in
                         Button("Heading \(level)") {
@@ -420,6 +451,11 @@ struct MarkdownCommands: Commands {    @Bindable var state: AppState
                     }
                     Button("Toggle Case") {
                         state.markdown.performSelected(.toggleCase)
+                    }
+                }
+                Menu("Text") {
+                    Button("Format CJK Spacing") {
+                        state.markdown.performSelected(.formatCJK)
                     }
                 }
             }

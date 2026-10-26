@@ -139,11 +139,18 @@ public enum MarkdownTableScanner {
     /// All tables in the source, in document order.
     public static func tables(in source: String) -> [MarkdownTable] {
         let lines = splitLines(source)
+        // A pipe-shaped line inside code is not a table the editor may
+        // rewrite; the scanner works on raw source and must exclude it.
+        let codeLines = codeLineFlags(lines)
         var tables: [MarkdownTable] = []
         var index = 0
         while index + 1 < lines.count {
             let headerLine = lines[index]
             let delimiterLine = lines[index + 1]
+            guard !codeLines[index], !codeLines[index + 1] else {
+                index += 1
+                continue
+            }
             guard hasUnescapedPipe(headerLine.text),
                   hasUnescapedPipe(delimiterLine.text) else {
                 index += 1
@@ -151,17 +158,20 @@ public enum MarkdownTableScanner {
             }
             let headerPrefix = containerPrefixLength(headerLine.text)
             let delimiterPrefix = containerPrefixLength(delimiterLine.text)
-            guard headerPrefix == delimiterPrefix else {
+            // The two rows must share a container, but they may indent
+            // differently inside it: `> | A |` followed by `>|---|` is a
+            // valid quoted table. Each row is parsed with its own prefix
+            // length.
+            guard blockquoteDepth(headerLine.text)
+                    == blockquoteDepth(delimiterLine.text) else {
                 index += 1
                 continue
             }
             guard let header = parseRow(
                 headerLine,
-                rowIndex: 0,
                 containerLength: headerPrefix
             ), let delimiter = parseRow(
                 delimiterLine,
-                rowIndex: 0,
                 containerLength: delimiterPrefix
             ) else {
                 index += 1
@@ -199,13 +209,14 @@ public enum MarkdownTableScanner {
                 let line = lines[cursor]
                 // A row belongs to the table's container. Leaving the
                 // blockquote ends the table; an unquoted pipe line after a
-                // quoted table is ordinary text.
+                // quoted table is ordinary text. A body row without a pipe
+                // is still a row: GFM reads it as one cell and leaves the
+                // remaining columns empty.
                 guard blockquoteDepth(line.text) == headerQuoteDepth,
                       !isBlank(line.text),
-                      hasUnescapedPipe(line.text),
+                      !startsInterruptingBlock(line.text),
                       let parsed = parseRow(
                           line,
-                          rowIndex: bodyRows.count + 1,
                           containerLength: containerPrefixLength(line.text)
                       ) else {
                     break
@@ -265,6 +276,266 @@ public enum MarkdownTableScanner {
         tables(in: source).first { table in
             offset >= table.range.lowerBound && offset <= table.range.upperBound
         }
+    }
+
+    // MARK: - Code exclusion
+
+    /// Marks every line that belongs to fenced or indented code.
+    private static func codeLineFlags(_ lines: [Line]) -> [Bool] {
+        var flags = [Bool](repeating: false, count: lines.count)
+        // A fence belongs to the container that opened it. An unclosed fence
+        // inside a blockquote or a list item ends with that container; it
+        // must not suppress valid tables in the text that follows.
+        var fence: OpenFence?
+        for index in lines.indices {
+            let context = fenceContext(lines[index].raw)
+            if let open = fence {
+                if context.quoteDepth < open.quoteDepth
+                    || endsListFence(open, context: context) {
+                    fence = nil
+                    // The container ended on this line; it may open a new
+                    // fence of its own.
+                } else {
+                    flags[index] = true
+                    let run = context.content.prefix(while: {
+                        $0 == open.marker
+                    }).count
+                    if run >= open.length,
+                       context.content.dropFirst(run).allSatisfy({
+                           $0 == " " || $0 == "\t"
+                       }) {
+                        fence = nil
+                    }
+                    continue
+                }
+            }
+            let trimmed = context.content
+            guard let first = trimmed.first,
+                  first == "`" || first == "~" else { continue }
+            let run = trimmed.prefix(while: { $0 == first }).count
+            guard run >= 3 else { continue }
+            // A backtick fence's info string may not contain a backtick.
+            if first == "~" || !trimmed.dropFirst(run).contains("`") {
+                fence = OpenFence(
+                    marker: first,
+                    length: run,
+                    quoteDepth: context.quoteDepth,
+                    listContentIndent: context.listContentIndent
+                )
+                flags[index] = true
+            }
+        }
+        var previousBlank = true
+        var index = 0
+        while index < lines.count {
+            let raw = lines[index].raw
+            let blank = raw.trimmingCharacters(in: .whitespaces).isEmpty
+            let indented = raw.hasPrefix("    ") || raw.hasPrefix("\t")
+            if indented, previousBlank {
+                var last = index
+                flags[last] = true
+                while last + 1 < lines.count {
+                    let next = lines[last + 1].raw
+                    let nextBlank = next
+                        .trimmingCharacters(in: .whitespaces).isEmpty
+                    let nextIndented = next.hasPrefix("    ")
+                        || next.hasPrefix("\t")
+                    guard nextBlank || nextIndented else { break }
+                    last += 1
+                    flags[last] = true
+                }
+                index = last + 1
+                previousBlank = false
+                continue
+            }
+            previousBlank = blank
+            index += 1
+        }
+        return flags
+    }
+
+    private struct OpenFence {
+        let marker: Character
+        let length: Int
+        let quoteDepth: Int
+        /// The list item's content column when the fence opened on a list
+        /// marker line; nil for a plain or quoted fence.
+        let listContentIndent: Int?
+    }
+
+    /// One line's container context, used to follow a fence without losing
+    /// track of the blockquote and list containers it lives in.
+    private struct FenceContext {
+        let content: Substring
+        let quoteDepth: Int
+        /// Leading indentation in columns after the quote prefixes.
+        let indent: Int
+        /// The list item's content column when this line starts with a list
+        /// marker.
+        let listContentIndent: Int?
+    }
+
+    private static func fenceContext(_ raw: String) -> FenceContext {
+        var rest = Substring(raw)
+        var quoteDepth = 0
+        while true {
+            let spaced = rest.drop(while: { $0 == " " || $0 == "\t" })
+            guard spaced.first == ">" else { break }
+            rest = spaced.dropFirst()
+            if rest.first == " " || rest.first == "\t" {
+                rest = rest.dropFirst()
+            }
+            quoteDepth += 1
+        }
+        var indent = 0
+        var probe = rest
+        while let first = probe.first, first == " " || first == "\t" {
+            indent += first == "\t" ? 4 : 1
+            probe = probe.dropFirst()
+        }
+        var content = probe
+        var listContentIndent: Int?
+        if let first = content.first {
+            if first == "-" || first == "+" || first == "*" {
+                let after = content.dropFirst()
+                if let next = after.first, next == " " || next == "\t" {
+                    var spaces = 0
+                    var remainder = after
+                    while let next = remainder.first,
+                          next == " " || next == "\t" {
+                        spaces += next == "\t" ? 4 : 1
+                        remainder = remainder.dropFirst()
+                    }
+                    listContentIndent = indent + 1 + min(max(spaces, 1), 4)
+                    content = remainder
+                }
+            } else if first.isNumber {
+                var cursor = content.startIndex
+                var digits = 0
+                while cursor < content.endIndex,
+                      content[cursor].isNumber,
+                      digits < 9 {
+                    cursor = content.index(after: cursor)
+                    digits += 1
+                }
+                if cursor < content.endIndex,
+                   content[cursor] == "." || content[cursor] == ")",
+                   content.index(after: cursor) < content.endIndex {
+                    let after = content[content.index(after: cursor)...]
+                    if let next = after.first, next == " " || next == "\t" {
+                        var spaces = 0
+                        var remainder = after
+                        while let next = remainder.first,
+                              next == " " || next == "\t" {
+                            spaces += next == "\t" ? 4 : 1
+                            remainder = remainder.dropFirst()
+                        }
+                        listContentIndent =
+                            indent + digits + 1 + min(max(spaces, 1), 4)
+                        content = remainder
+                    }
+                }
+            }
+        }
+        return FenceContext(
+            content: content,
+            quoteDepth: quoteDepth,
+            indent: indent,
+            listContentIndent: listContentIndent
+        )
+    }
+
+    /// A fenced code block cannot be lazily continued out of its list item.
+    /// A nonblank line that is neither indented to the item's content column
+    /// nor a new list marker ends the container and with it the fence.
+    private static func endsListFence(
+        _ open: OpenFence,
+        context: FenceContext
+    ) -> Bool {
+        guard let required = open.listContentIndent else { return false }
+        guard !context.content.allSatisfy({
+            $0 == " " || $0 == "\t" || $0 == "\n"
+        }) else {
+            return false
+        }
+        return context.indent < required
+    }
+
+    /// Block starts that end a table, mirroring where a paragraph stops.
+    private static func startsInterruptingBlock(_ text: NSString) -> Bool {
+        var index = containerPrefixLength(text)
+        while index < text.length, text.character(at: index) == 0x20 {
+            index += 1
+        }
+        guard index < text.length else { return false }
+        let first = text.character(at: index)
+        if first == 0x23 { // #
+            var probe = index + 1
+            while probe < text.length,
+                  text.character(at: probe) == 0x23,
+                  probe - index < 7 {
+                probe += 1
+            }
+            guard probe - index <= 6 else { return false }
+            return probe == text.length
+                || text.character(at: probe) == 0x20
+                || text.character(at: probe) == 0x09
+        }
+        if first == 0x60 || first == 0x7E { // ` ~
+            var probe = index
+            while probe < text.length, text.character(at: probe) == first {
+                probe += 1
+            }
+            return probe - index >= 3
+        }
+        if first == 0x3C { // < : an HTML block start
+            return true
+        }
+        if first >= 0x30, first <= 0x39 { // 1. / 1) ordered list
+            var probe = index
+            while probe < text.length,
+                  text.character(at: probe) >= 0x30,
+                  text.character(at: probe) <= 0x39,
+                  probe - index < 9 {
+                probe += 1
+            }
+            guard probe - index <= 9, probe < text.length,
+                  text.character(at: probe) == 0x2E
+                    || text.character(at: probe) == 0x29,
+                  probe + 1 < text.length,
+                  text.character(at: probe + 1) == 0x20
+                    || text.character(at: probe + 1) == 0x09 else {
+                return false
+            }
+            return true
+        }
+        if first == 0x2B { // + : an unordered list item
+            return index + 1 < text.length
+                && (text.character(at: index + 1) == 0x20
+                    || text.character(at: index + 1) == 0x09)
+        }
+        if first == 0x2D || first == 0x2A || first == 0x5F { // - * _
+            // A single-marker list item ends the table before the thematic
+            // break run check below.
+            if (first == 0x2D || first == 0x2A),
+               index + 1 < text.length,
+               text.character(at: index + 1) == 0x20
+                || text.character(at: index + 1) == 0x09 {
+                return true
+            }
+            var probe = index
+            while probe < text.length, text.character(at: probe) == first {
+                probe += 1
+            }
+            guard probe - index >= 3 else { return false }
+            while probe < text.length,
+                  text.character(at: probe) == 0x20
+                    || text.character(at: probe) == 0x09 {
+                probe += 1
+            }
+            return probe == text.length
+        }
+        return false
     }
 
     // MARK: - Lines
@@ -377,7 +648,6 @@ public enum MarkdownTableScanner {
 
     private static func parseRow(
         _ line: Line,
-        rowIndex: Int,
         containerLength: Int
     ) -> ParsedRow? {
         let text = line.text

@@ -93,7 +93,11 @@ public enum MarkdownLineEditor {
                 command,
                 source: source,
                 selection: selection,
+                // Inline spans plus the block-level ones: frontmatter,
+                // every fence kind, indented code, and raw HTML blocks are
+                // content, not prose, and must survive case folding.
                 mask: protectedSpans(source: source)
+                    + protectedRanges(source: source, table: table)
             )
         }
     }
@@ -107,11 +111,6 @@ public enum MarkdownLineEditor {
         selection: Range<Int>
     ) -> MarkdownLineEdit {
         var lines = table.lines
-        let start = table.offset(line: block.lowerBound, column: 0)
-        let end = table.offset(
-            line: block.upperBound,
-            column: lines[block.upperBound].utf16.count
-        )
         let caretLine = table.lineIndex(at: selection.lowerBound) ?? block.lowerBound
         let caretColumn = selection.lowerBound - table.offset(line: caretLine, column: 0)
         var newCaretLine = caretLine
@@ -153,7 +152,7 @@ public enum MarkdownLineEditor {
 
         let replacement = table.rebuild(lines)
         guard replacement != table.source else { return .notApplicable }
-        let newTable = LineTable(lines: lines, trailingNewline: table.trailingNewline)
+        let newTable = LineTable(lines: lines)
         let caretOffset = newTable.offset(
             line: min(newCaretLine, lines.count - 1),
             column: min(
@@ -161,8 +160,6 @@ public enum MarkdownLineEditor {
                 lines[min(newCaretLine, lines.count - 1)].utf16.count
             )
         )
-        _ = start
-        _ = end
         return MarkdownLineEdit(
             outcome: .handled,
             range: 0..<table.sourceLength,
@@ -220,11 +217,16 @@ public enum MarkdownLineEditor {
                         options: .regularExpression
                     )
             }
-        case .sortAscending:
-            let sorted = lines[block].sorted()
-            lines.replaceSubrange(block, with: sorted)
-        case .sortDescending:
-            let sorted = lines[block].sorted(by: >)
+        case .sortAscending, .sortDescending:
+            // Reordering lines out of a fence or the frontmatter corrupts
+            // the document; a range that touches protected content refuses
+            // instead of silently sorting around it.
+            guard !block.contains(where: isProtectedLine) else {
+                return .refused
+            }
+            let sorted = command == .sortAscending
+                ? lines[block].sorted()
+                : lines[block].sorted(by: >)
             lines.replaceSubrange(block, with: sorted)
         default:
             return .notApplicable
@@ -254,6 +256,7 @@ public enum MarkdownLineEditor {
         let lower = selection.lowerBound
         let upper = selection.upperBound
         var result = ""
+        var insideLength = 0
         var index = 0
         while index < ns.length {
             let characterRange = ns.rangeOfComposedCharacterSequence(at: index)
@@ -263,41 +266,50 @@ public enum MarkdownLineEditor {
                 $0.lowerBound < characterRange.location + characterRange.length
                     && characterRange.location < $0.upperBound
             }
+            let piece: String
             if inside, !protected {
                 switch command {
                 case .uppercase:
-                    result += scalar.uppercased()
+                    piece = scalar.uppercased()
                 case .lowercase:
-                    result += scalar.lowercased()
+                    piece = scalar.lowercased()
                 case .titleCase:
                     let before = index > 0
                         ? ns.character(at: index - 1)
                         : 0x20
-                    result += isWordBoundary(before)
+                    piece = isWordBoundary(before)
                         ? scalar.uppercased()
                         : scalar.lowercased()
                 case .toggleCase:
                     let upper = scalar.uppercased()
                     let lower = scalar.lowercased()
-                    result += scalar == upper && scalar != lower
+                    piece = scalar == upper && scalar != lower
                         ? lower
                         : upper
                 default:
-                    result += scalar
+                    piece = scalar
                 }
             } else {
-                result += scalar
+                piece = scalar
+            }
+            result += piece
+            if inside {
+                // Case mappings change UTF-16 length (`ß` becomes `SS`);
+                // the returned selection must cover what was produced.
+                insideLength += piece.utf16.count
             }
             index = characterRange.location + characterRange.length
         }
         guard result != source else {
             return .notApplicable
         }
+        let end = lower + insideLength
+        let newSelection = upper > lower ? lower..<end : end..<end
         return MarkdownLineEdit(
             outcome: .handled,
             range: 0..<ns.length,
             replacement: result,
-            selection: selection
+            selection: newSelection
         )
     }
 
@@ -325,24 +337,34 @@ public enum MarkdownLineEditor {
                     run += 1
                 }
                 var probe = index + run
+                var matched = false
                 while probe < ns.length {
-                    if ns.character(at: probe) == 0x60 {
-                        var closing = 0
-                        while probe + closing < ns.length,
-                              ns.character(at: probe + closing) == 0x60 {
-                            closing += 1
-                        }
-                        if closing == run {
-                            ranges.append(
-                                index..<(probe + closing)
-                            )
-                            index = probe + closing
-                            break
-                        }
+                    guard ns.character(at: probe) == 0x60 else {
+                        probe += 1
+                        continue
                     }
-                    probe += 1
+                    var closing = 0
+                    while probe + closing < ns.length,
+                          ns.character(at: probe + closing) == 0x60 {
+                        closing += 1
+                    }
+                    if closing == run {
+                        ranges.append(
+                            index..<(probe + closing)
+                        )
+                        index = probe + closing
+                        matched = true
+                        break
+                    }
+                    // A run of another length cannot close this span; skip
+                    // the whole run, or its suffix looks like a closer.
+                    probe += closing
                 }
-                if index != probe { continue }
+                if matched { continue }
+                // An unmatched opener is literal text. Advance past the run;
+                // otherwise this loop never terminates at end of file.
+                index += run
+                continue
             }
             index += 1
         }
@@ -368,7 +390,142 @@ public enum MarkdownLineEditor {
             let lower = match.range.location
             ranges.append(lower..<(lower + match.range.length))
         }
+        ranges.append(contentsOf: linkDestinationRanges(in: ns))
+        ranges.append(contentsOf: referenceDefinitionRanges(in: ns))
         return ranges
+    }
+
+    /// The destination part of every `](…)` link or image, relative paths
+    /// and non-HTTP schemes included: a path is case-sensitive on the volume,
+    /// so case transforms must not fold it.
+    private static func linkDestinationRanges(
+        in ns: NSString
+    ) -> [Range<Int>] {
+        var ranges: [Range<Int>] = []
+        var scan = 0
+        while scan + 1 < ns.length {
+            guard ns.character(at: scan) == 0x5D, // ]
+                  ns.character(at: scan + 1) == 0x28 else { // (
+                scan += 1
+                continue
+            }
+            var start = scan + 2
+            while start < ns.length,
+                  ns.character(at: start) == 0x20
+                    || ns.character(at: start) == 0x09
+                    || ns.character(at: start) == 0x0A {
+                start += 1
+            }
+            guard start < ns.length else { break }
+            if ns.character(at: start) == 0x3C { // <
+                var end = start + 1
+                while end < ns.length,
+                      ns.character(at: end) != 0x3E,
+                      ns.character(at: end) != 0x0A {
+                    end += 1
+                }
+                if end < ns.length, ns.character(at: end) == 0x3E {
+                    ranges.append(start..<(end + 1))
+                    scan = end + 1
+                } else {
+                    scan = start
+                }
+                continue
+            }
+            var end = start
+            var depth = 0
+            while end < ns.length {
+                let character = ns.character(at: end)
+                if character == 0x0A
+                    || character == 0x20
+                    || character == 0x09 {
+                    break
+                }
+                if character == 0x5C {
+                    end = min(end + 2, ns.length)
+                    continue
+                }
+                if character == 0x28 { depth += 1 }
+                if character == 0x29 {
+                    if depth == 0 { break }
+                    depth -= 1
+                }
+                end += 1
+            }
+            if end > start { ranges.append(start..<end) }
+            scan = max(scan + 2, end)
+        }
+        return ranges
+    }
+
+    /// The destination and title of a `[label]: …` reference definition.
+    private static func referenceDefinitionRanges(
+        in ns: NSString
+    ) -> [Range<Int>] {
+        guard let pattern = try? NSRegularExpression(
+            pattern: #"(?m)^ {0,3}\[[^\]\n]+\]:[ \t]*(\S[^\n]*)$"#
+        ) else {
+            return []
+        }
+        var ranges: [Range<Int>] = []
+        pattern.enumerateMatches(
+            in: ns as String,
+            range: NSRange(location: 0, length: ns.length)
+        ) { match, _, _ in
+            guard let match else { return }
+            let content = match.range(at: 1)
+            guard content.location != NSNotFound else { return }
+            ranges.append(
+                content.location..<(content.location + content.length)
+            )
+        }
+        return ranges
+    }
+
+    /// One line with its blockquote and list container prefixes removed, so a
+    /// fence marker nested in a container is recognized. Repeated prefixes
+    /// handle `> - ~~~`.
+    private static func containerStripped(_ line: String) -> Substring {
+        var remainder = line[...]
+        var rounds = 0
+        while rounds < 32 {
+            rounds += 1
+            var probe = remainder.drop(while: { $0 == " " || $0 == "\t" })
+            if probe.first == ">" {
+                probe = probe.dropFirst()
+                if probe.first == " " { probe = probe.dropFirst() }
+                remainder = probe
+                continue
+            }
+            if let first = probe.first,
+               first == "-" || first == "*" || first == "+" {
+                var after = probe.dropFirst()
+                if after.first == " " || after.first == "\t" {
+                    after = after.drop(while: {
+                        $0 == " " || $0 == "\t"
+                    })
+                    remainder = after
+                    continue
+                }
+            }
+            let digits = probe.prefix(while: \.isNumber)
+            if !digits.isEmpty, digits.count <= 9 {
+                let afterDigits = probe.dropFirst(digits.count)
+                if let punctuation = afterDigits.first,
+                   punctuation == "." || punctuation == ")" {
+                    var after = afterDigits.dropFirst()
+                    if after.first == " " || after.first == "\t" {
+                        after = after.drop(while: {
+                            $0 == " " || $0 == "\t"
+                        })
+                        remainder = after
+                        continue
+                    }
+                }
+            }
+            break
+        }
+        return remainder
     }
 
     /// Protected line-level spans: frontmatter, fenced code, and indented
@@ -398,7 +555,10 @@ public enum MarkdownLineEditor {
         var fenceLength = 0
         for (index, line) in table.lines.enumerated() {
             let start = table.offset(line: index, column: 0)
-            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            // A fence lives inside its container: `> ~~~` and `- ``` ` open
+            // a fence exactly as an unquoted one does, so the marker must be
+            // read after the blockquote and list prefixes.
+            let trimmed = containerStripped(line)
             if let first = trimmed.first, first == "`" || first == "~" {
                 let run = trimmed.prefix(while: { $0 == first }).count
                 if run >= 3 {
@@ -421,16 +581,68 @@ public enum MarkdownLineEditor {
         if let openFence {
             ranges.append(openFence..<ns.length)
         }
-        // Indented code: a four-space line after a blank line.
+        // Indented code: four-space lines after a blank line, ending at the
+        // first non-blank unindented line. Protecting through EOF made every
+        // paragraph after a code block uneditable.
         var previousBlank = true
-        for (index, line) in table.lines.enumerated() {
-            let start = table.offset(line: index, column: 0)
+        var lineIndex = 0
+        while lineIndex < table.lines.count {
+            let line = table.lines[lineIndex]
+            let start = table.offset(line: lineIndex, column: 0)
             let blank = line.trimmingCharacters(in: .whitespaces).isEmpty
             let indented = line.hasPrefix("    ") || line.hasPrefix("\t")
             if indented, previousBlank {
-                ranges.append(start..<ns.length)
+                var last = lineIndex
+                while last + 1 < table.lines.count {
+                    let next = table.lines[last + 1]
+                    let nextBlank = next
+                        .trimmingCharacters(in: .whitespaces).isEmpty
+                    let nextIndented = next.hasPrefix("    ")
+                        || next.hasPrefix("\t")
+                    guard nextBlank || nextIndented else { break }
+                    last += 1
+                }
+                let upper = table.offset(
+                    line: last,
+                    column: table.lines[last].utf16.count
+                )
+                ranges.append(start..<upper)
+                lineIndex = last + 1
+                previousBlank = false
+                continue
             }
             previousBlank = blank
+            lineIndex += 1
+        }
+        // Raw HTML blocks whose content is code, not prose. Case folding
+        // inside a script or a style element corrupts it.
+        var openHTML: (tag: String, start: Int)?
+        for (index, line) in table.lines.enumerated() {
+            let start = table.offset(line: index, column: 0)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+                .lowercased()
+            if let open = openHTML {
+                if trimmed.contains("</" + open.tag) {
+                    ranges.append(open.start..<(start + line.utf16.count))
+                    openHTML = nil
+                }
+                continue
+            }
+            for tag in ["script", "style", "pre", "textarea"] {
+                guard trimmed.hasPrefix("<" + tag) else { continue }
+                let after = trimmed.dropFirst(tag.count + 1).first
+                guard after == ">" || after == " " || after == "\t"
+                    || after == "/" else { continue }
+                if trimmed.contains("</" + tag) {
+                    ranges.append(start..<(start + line.utf16.count))
+                } else {
+                    openHTML = (tag, start)
+                }
+                break
+            }
+        }
+        if let openHTML {
+            ranges.append(openHTML.start..<ns.length)
         }
         return ranges
     }
@@ -439,7 +651,6 @@ public enum MarkdownLineEditor {
 /// Lines with their offsets. Offsets are UTF-16, matching source ranges.
 struct LineTable {
     let lines: [String]
-    let trailingNewline: Bool
     let source: String
     private let starts: [Int]
 
@@ -478,13 +689,10 @@ struct LineTable {
         self.lines = lines
         self.starts = starts
         self.source = source
-        self.trailingNewline = ns.length > 0
-            && ns.character(at: ns.length - 1) == 0x0A
     }
 
-    init(lines: [String], trailingNewline: Bool) {
+    init(lines: [String]) {
         self.lines = lines
-        self.trailingNewline = trailingNewline
         self.source = lines.joined(separator: "\n")
         var starts: [Int] = []
         var offset = 0

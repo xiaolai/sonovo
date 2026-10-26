@@ -379,6 +379,15 @@ enum InlineFragmentParser {
             return .inlineHTML(raw, range: range(source))
         case let .wikiLink(link, source):
             return .wikiLink(link, range: range(source))
+        case let .footnoteReference(reference, source):
+            return .footnoteReference(reference, range: range(source))
+        case let .math(tex, raw, display, sourceRange):
+            return .math(
+                source: tex,
+                raw: raw,
+                display: display,
+                range: range(sourceRange)
+            )
         }
     }
 

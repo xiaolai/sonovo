@@ -889,6 +889,36 @@ enum DetailsParser {
             return .thematicBreak(range: clampRange(range))
         case let .table(table, range):
             return .table(table, range: clampRange(range))
+        case let .definitionList(list, range):
+            let items = list.items.map { item in
+                DefinitionList.Item(
+                    terms: item.terms.map { term in
+                        DefinitionList.Term(
+                            inlines: term.inlines,
+                            range: clampRange(term.range) ?? term.range
+                        )
+                    },
+                    definitions: item.definitions.map { definition in
+                        DefinitionList.Definition(
+                            inlines: definition.inlines,
+                            range: clampRange(definition.range)
+                                ?? definition.range
+                        )
+                    },
+                    range: clampRange(item.range) ?? item.range
+                )
+            }
+            return .definitionList(
+                DefinitionList(items: items),
+                range: clampRange(range)
+            )
+        case let .footnoteDefinition(label, range):
+            return .footnoteDefinition(
+                label: label,
+                range: clampRange(range)
+            )
+        case let .footnotes(section, range):
+            return .footnotes(section, range: clampRange(range))
         case let .details(details, range):
             return .details(
                 DetailsBlock(

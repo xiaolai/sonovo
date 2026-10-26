@@ -64,14 +64,14 @@ public enum MarkdownLintEngine {
             mask: mask,
             into: &diagnostics
         )
-        appendTableDiagnostics(ns: ns, into: &diagnostics)
+        appendTableDiagnostics(ns: ns, mask: mask, into: &diagnostics)
         appendHeadingDiagnostics(ns: ns, ast: ast, mask: mask, into: &diagnostics)
         appendInlineDiagnostics(
             ns: ns,
             mask: mask,
             into: &diagnostics
         )
-        appendFenceDiagnostics(ns: ns, into: &diagnostics)
+        appendFenceDiagnostics(ast: ast, source: source, into: &diagnostics)
         appendLinkDiagnostics(ast: ast, into: &diagnostics)
         appendDefinitionDiagnostics(
             ast: ast,
@@ -108,6 +108,19 @@ public enum MarkdownLintEngine {
         }
         ranges.append(contentsOf: fencedCodeRanges(ns: ns))
         ranges.append(contentsOf: indentedCodeRanges(ns: ns))
+        // The AST knows the true extent of code and HTML blocks, including
+        // a fence inside a block quote: a raw line scan missed the `>` and
+        // let reference-shaped text inside them reach the rules.
+        walkBlocks(ast.blocks) { block in
+            switch block {
+            case let .codeBlock(_, range), let .htmlBlock(_, range):
+                if let range {
+                    ranges.append(range.lowerBound..<range.upperBound)
+                }
+            default:
+                break
+            }
+        }
         walkInlines(ast.blocks) { inline in
             switch inline {
             case .inlineCode(_, let range), .inlineHTML(_, let range):
@@ -350,11 +363,19 @@ public enum MarkdownLintEngine {
         let definitions = ast.referenceDefinitions
         for use in referenceUses(in: ns) {
             guard use.style != "shortcut" else { continue }
+            // Footnote syntax owns `[^label]`; its definitions are not link
+            // targets, so their absence from `referenceDefinitions` is not
+            // an undefined reference.
+            guard !use.label.hasPrefix("^") else { continue }
             guard !isProtected(use.range, by: mask) else { continue }
+            // CommonMark folds case and collapses internal whitespace; it
+            // does not ignore diacritics. A whitespace-equivalent label is
+            // the same reference, while `cafe` and `café` are distinct.
+            let normalizedUse = normalizedReferenceLabel(use.label)
             let found = definitions.contains {
-                $0.label.compare(
-                    use.label,
-                    options: [.caseInsensitive, .diacriticInsensitive]
+                normalizedReferenceLabel($0.label).compare(
+                    normalizedUse,
+                    options: [.caseInsensitive]
                 ) == .orderedSame
             }
             if !found {
@@ -372,6 +393,7 @@ public enum MarkdownLintEngine {
 
     private static func appendTableDiagnostics(
         ns: NSString,
+        mask: [Range<Int>],
         into diagnostics: inout [MarkdownDiagnostic]
     ) {
         for table in MarkdownTableScanner.tables(in: ns as String) {
@@ -380,11 +402,16 @@ public enum MarkdownLintEngine {
                     continue
                 }
                 let row = table.body[rowIndex]
+                let range = row.range.lowerBound..<row.range.upperBound
+                // The scanner excludes code but sees frontmatter and raw
+                // HTML as ordinary text; a table-shaped literal there is not
+                // a table.
+                guard !isProtected(range, by: mask) else { continue }
                 diagnostics.append(
                     MarkdownDiagnostic(
                         ruleID: "E02",
                         severity: .error,
-                        range: row.range.lowerBound..<row.range.upperBound,
+                        range: range,
                         message: "Table row has a different column count"
                     )
                 )
@@ -545,50 +572,115 @@ public enum MarkdownLintEngine {
         }
     }
 
+    /// Reports a fenced block the parser could not close.
+    ///
+    /// The AST already knows which blocks are fenced and where their content
+    /// ends, including container prefixes and frontmatter — a raw line scan
+    /// re-implemented the grammar and produced false positives on indented
+    /// literal backticks inside block quotes.
     private static func appendFenceDiagnostics(
-        ns: NSString,
+        ast: SonovoAST,
+        source: String,
         into diagnostics: inout [MarkdownDiagnostic]
     ) {
-        var openStart: Int?
-        var openMarker: unichar = 0
-        var openLength = 0
-        var lineStart = 0
-        while lineStart < ns.length {
-            var lineEnd = lineStart
-            while lineEnd < ns.length, ns.character(at: lineEnd) != 0x0A {
-                lineEnd += 1
+        let ns = source as NSString
+        walkBlocks(ast.blocks) { block in
+            guard case let .codeBlock(code, range) = block,
+                  code.fenced,
+                  let range,
+                  range.lowerBound >= 0,
+                  range.upperBound <= ns.length,
+                  range.lowerBound < range.upperBound else {
+                return
             }
-            let line = ns.substring(
-                with: NSRange(location: lineStart, length: lineEnd - lineStart)
+            let slice = ns.substring(
+                with: NSRange(
+                    location: range.lowerBound,
+                    length: range.upperBound - range.lowerBound
+                )
+            ) as NSString
+            let lines = slice.components(separatedBy: "\n")
+            guard let opener = lines.first else { return }
+            let openerMarker = fenceMarker(in: opener)
+            guard let openerMarker else { return }
+            let lastLine = lines.last ?? ""
+            // A one-line block is only the opener; it cannot close itself.
+            let closed = lines.count >= 2 && isClosingFence(
+                lastLine,
+                marker: openerMarker.character,
+                minimum: openerMarker.length
             )
-            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
-            if let first = trimmed.first, first == "`" || first == "~" {
-                let run = trimmed.prefix(while: { $0 == first }).count
-                if run >= 3 {
-                    let marker: unichar = first == "`" ? 0x60 : 0x7E
-                    if openStart == nil {
-                        openStart = lineStart
-                        openMarker = marker
-                        openLength = run
-                    } else if marker == openMarker, run >= openLength,
-                              trimmed.dropFirst(run).allSatisfy({
-                                  $0 == " " || $0 == "\t"
-                              }) {
-                        openStart = nil
-                    }
-                }
-            }
-            lineStart = lineEnd + 1
-        }
-        if let openStart {
+            guard !closed else { return }
             diagnostics.append(
                 MarkdownDiagnostic(
                     ruleID: "E08",
                     severity: .error,
-                    range: openStart..<ns.length,
+                    range: range.lowerBound..<range.upperBound,
                     message: "Unclosed fenced code block"
                 )
             )
+        }
+    }
+
+    /// The fence run that opens a line, after any container marker.
+    private static func fenceMarker(
+        in line: String
+    ) -> (character: Character, length: Int)? {
+        let trimmed = stripContainerPrefixes(line)
+        guard let first = trimmed.first,
+              first == "`" || first == "~" else { return nil }
+        let run = trimmed.prefix(while: { $0 == first }).count
+        guard run >= 3 else { return nil }
+        return (first, run)
+    }
+
+    private static func isClosingFence(
+        _ line: String,
+        marker: Character,
+        minimum: Int
+    ) -> Bool {
+        let trimmed = stripContainerPrefixes(line)
+        let run = trimmed.prefix(while: { $0 == marker }).count
+        guard run >= minimum else { return false }
+        return trimmed.dropFirst(run).allSatisfy { $0 == " " || $0 == "\t" }
+    }
+
+    /// A line without its blockquote markers and leading whitespace, so a
+    /// fenced block inside a quote is measured on its own text.
+    private static func stripContainerPrefixes(_ line: String) -> String {
+        var rest = Substring(line)
+        while true {
+            rest = rest.drop(while: { $0 == " " || $0 == "\t" })
+            guard rest.first == ">" else { break }
+            rest = rest.dropFirst()
+            if rest.first == " " || rest.first == "\t" {
+                rest = rest.dropFirst()
+            }
+        }
+        return String(rest.drop(while: { $0 == " " || $0 == "\t" }))
+    }
+
+    /// Visits every block, descending into containers.
+    static func walkBlocks(
+        _ blocks: [Block],
+        _ visit: (Block) -> Void
+    ) {
+        for block in blocks {
+            visit(block)
+            switch block {
+            case let .blockQuote(children, _):
+                walkBlocks(children, visit)
+            case let .list(list, _):
+                for item in list.items {
+                    walkBlocks(item.blocks, visit)
+                }
+            case let .details(details, _):
+                walkBlocks(details.blocks, visit)
+            case let .definitionList(list, _):
+                _ = list
+            default:
+                break
+            }
         }
     }
 
@@ -684,10 +776,11 @@ public enum MarkdownLintEngine {
         into diagnostics: inout [MarkdownDiagnostic]
     ) {
         let definitions = ast.referenceDefinitions
-        // E07 duplicate labels; the first wins.
+        // E07 duplicate labels; the first wins. The same normalized label
+        // rule decides duplicates and uses, or the two rules disagree.
         var seen: [String: Int] = [:]
         for definition in definitions {
-            let key = definition.label.lowercased()
+            let key = normalizedReferenceLabel(definition.label)
             if seen[key] != nil, let range = definition.range {
                 diagnostics.append(
                     MarkdownDiagnostic(
@@ -703,10 +796,12 @@ public enum MarkdownLintEngine {
         }
         // W03 unused definitions. Only uses outside protected regions count.
         for definition in definitions {
-            let key = definition.label.lowercased()
+            let key = normalizedReferenceLabel(definition.label)
             let used = uses.contains { use in
                 !isProtected(use.range, by: mask)
-                    && use.label.lowercased() == key
+                    && normalizedReferenceLabel(use.label)
+                        .compare(key, options: [.caseInsensitive])
+                        == .orderedSame
             }
             if !used, let range = definition.range {
                 diagnostics.append(
@@ -723,6 +818,16 @@ public enum MarkdownLintEngine {
 
     // MARK: - Helpers
 
+    /// CommonMark's label rule: trim and collapse internal whitespace, then
+    /// fold case. Diacritics stay significant.
+    static func normalizedReferenceLabel(_ label: String) -> String {
+        // CommonMark compares labels case-insensitively after collapsing
+        // whitespace; the same key decides uses, definitions, and duplicates.
+        label.split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+
     static func walkInlines(
         _ blocks: [Block],
         _ visit: (Inline) -> Void
@@ -737,6 +842,20 @@ public enum MarkdownLintEngine {
             case .list(let list, _):
                 for item in list.items {
                     walkInlines(item.blocks, visit)
+                }
+            case .definitionList(let list, _):
+                for item in list.items {
+                    for term in item.terms { walk(term.inlines, visit) }
+                    for definition in item.definitions {
+                        walk(definition.inlines, visit)
+                    }
+                }
+            case .table(let table, _):
+                // A table cell is an inline container like any paragraph;
+                // skipping it hid its links from every inline rule.
+                for cell in table.header { walk(cell.inlines, visit) }
+                for row in table.rows {
+                    for cell in row { walk(cell.inlines, visit) }
                 }
             case .details(let details, _):
                 walk(details.summary, visit)

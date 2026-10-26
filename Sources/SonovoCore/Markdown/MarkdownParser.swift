@@ -1137,7 +1137,9 @@ enum NestingGuard {
         if lower.hasPrefix("<!--") {
             return lower.contains("-->") ? nil : "-->"
         }
-        if lower.hasPrefix("<![cdata[") {
+        // CDATA is case-sensitive in HTML: `<![cdata[` is not a CDATA
+        // section, so it must not open a block that the parser then hides.
+        if trimmed.hasPrefix("<![CDATA[") {
             return lower.contains("]]>") ? nil : "]]>"
         }
         if lower.hasPrefix("<?") {

@@ -952,3 +952,21 @@ private extension JSONEncoder {
         return encoder
     }
 }
+
+// MARK: - Reading settings
+
+/// The resolved reading appearance shared by the viewer and export.
+///
+/// The keys are the same `@AppStorage` keys the Settings pane writes. Export
+/// must not invent a second set of reading preferences.
+@MainActor
+enum MarkdownReadingSettings {
+    static func currentTheme(defaults: UserDefaults = .standard) -> MarkdownTheme {
+        let id = defaults.string(forKey: PreferenceKey.readingTheme)
+            ?? MarkdownThemeStore.defaultID
+        let bodySize = defaults.double(forKey: PreferenceKey.readingBodySize)
+        let measure = defaults.double(forKey: PreferenceKey.readingMeasure)
+        return MarkdownThemeStore.shared.theme(id: id)
+            .withOverrides(bodySize: bodySize, measure: measure)
+    }
+}

@@ -62,8 +62,20 @@ public enum MarkdownTypingPolicy {
         selection: Range<Int>,
         backwards: Bool
     ) -> MarkdownEditPlan {
-        guard selection.isEmpty else { return .notApplicable }
-        let offset = selection.lowerBound
+        let offset: Int
+        if selection.isEmpty {
+            offset = selection.lowerBound
+        } else if MarkdownTableEditor.selectionIsCell(
+            source: source,
+            selection: selection
+        ) {
+            // The previous Tab selected a cell; continuing from its start
+            // keeps Tab navigating instead of letting normal text handling
+            // replace the selected cell with a tab.
+            offset = selection.lowerBound
+        } else {
+            return .notApplicable
+        }
         let ns = source as NSString
         guard offset >= 0, offset <= ns.length else { return .notApplicable }
         if isInsideFence(source, at: offset) { return .notApplicable }
@@ -72,7 +84,7 @@ public enum MarkdownTypingPolicy {
         // refuses rather than falling through to spaces.
         switch MarkdownTableEditor.navigate(
             source: source,
-            selection: selection,
+            selection: offset..<offset,
             backwards: backwards
         ) {
         case .select(let target):
@@ -94,8 +106,7 @@ public enum MarkdownTypingPolicy {
         }
 
         if let prefix = listPrefix(
-            line: lineText(ns, at: offset),
-            lineStart: lineStart(ns, at: offset)
+            line: lineText(ns, at: offset)
         ) {
             return indentList(
                 source: source,
@@ -145,7 +156,7 @@ public enum MarkdownTypingPolicy {
 
         let start = lineStart(ns, at: offset)
         let line = lineText(ns, at: offset)
-        if let prefix = listPrefix(line: line, lineStart: start) {
+        if let prefix = listPrefix(line: line) {
             let markerContentStart = start + prefix.contentStart
             let lineEnd = start + (line as NSString).length
             let afterMarker = (line as NSString).substring(
@@ -250,8 +261,7 @@ public enum MarkdownTypingPolicy {
     }
 
     private static func listPrefix(
-        line: String,
-        lineStart: Int
+        line: String
     ) -> ListPrefix? {
         let ns = line as NSString
         var index = 0
@@ -347,6 +357,246 @@ public enum MarkdownTypingPolicy {
         return .select((offset + 1)..<(offset + 1))
     }
 
+    // MARK: - Typing (auto-pair)
+
+    /// The plan for one typed character: insert its symmetric closer, or skip
+    /// over a closer that is already next to the caret.
+    ///
+    /// The controller withholds marked text and command chords before calling
+    /// this; both stay explicit inputs so the policy remains pure. An opener
+    /// over a selection, or in code, frontmatter, a URL, or a link
+    /// destination, is ordinary text.
+    public static func typing(
+        source: String,
+        selection: Range<Int>,
+        inserted: String,
+        chordModifierHeld: Bool = false
+    ) -> MarkdownEditPlan {
+        guard !chordModifierHeld,
+              selection.isEmpty,
+              inserted.utf16.count == 1,
+              let typed = inserted.utf16.first else {
+            return .notApplicable
+        }
+        let isOpener = pairs.contains { $0.open == typed }
+        let isCloser = pairs.contains { $0.close == typed }
+        guard isOpener || isCloser else { return .notApplicable }
+
+        let ns = source as NSString
+        let offset = selection.lowerBound
+        guard offset >= 0, offset <= ns.length else { return .notApplicable }
+        // An auto-inserted closer is already there: move past it instead of
+        // typing a duplicate. In prose this is always right; in an excluded
+        // context the keystroke is literal text. The one exception is a
+        // backtick inside an inline code span opened by a single backtick:
+        // that next backtick closes the span, so skipping it completes the
+        // pair. Inside a longer run's span a single typed backtick is literal.
+        let exclusion = excludedContext(source, at: offset)
+        if isCloser, offset < ns.length, ns.character(at: offset) == typed {
+            var skipsCloser = exclusion == nil
+            if case let .inlineCode(delimiter)? = exclusion {
+                skipsCloser = typed == 0x60 && delimiter == 1
+            }
+            if skipsCloser {
+                return .select((offset + 1)..<(offset + 1))
+            }
+        }
+        guard exclusion == nil else {
+            return .notApplicable
+        }
+
+        guard let pair = pairs.first(where: { $0.open == typed }) else {
+            return .notApplicable
+        }
+        // An apostrophe or inch mark inside a word does not open a quote.
+        if pair.open == 0x22 || pair.open == 0x27,
+           offset > 0,
+           isWordCharacter(ns.character(at: offset - 1)) {
+            return .notApplicable
+        }
+        guard let closer = UnicodeScalar(pair.close) else {
+            return .notApplicable
+        }
+        return .handled(
+            range: offset..<offset,
+            replacement: inserted + String(closer),
+            selection: (offset + 1)..<(offset + 1)
+        )
+    }
+
+    /// Contexts where a typed bracket is literal text: fenced or inline code,
+    /// frontmatter, a URL, or a link destination. The kind is named because
+    /// the auto-pair closer rule treats inline code differently from the
+    /// rest.
+    private enum ExcludedContext {
+        case fence
+        case frontmatter
+        case inlineCode(delimiter: Int)
+        case url
+        case linkDestination
+    }
+
+    private static func excludedContext(
+        _ source: String,
+        at offset: Int
+    ) -> ExcludedContext? {
+        if isInsideFence(source, at: offset) { return .fence }
+        let ns = source as NSString
+        if isInFrontmatter(ns, at: offset) { return .frontmatter }
+        // A code span can cross a soft line break, so the delimiter run must
+        // be tracked across the whole paragraph; the line prefix alone
+        // classified a continuation line as prose and inserted a stray
+        // closer.
+        let start = paragraphStart(ns, at: offset)
+        let prefix = ns.substring(
+            with: NSRange(location: start, length: offset - start)
+        )
+        if let delimiter = openInlineCodeDelimiter(prefix) {
+            return .inlineCode(delimiter: delimiter)
+        }
+        if isInsideURL(ns, at: offset) { return .url }
+        return isInsideLinkDestination(prefix) ? .linkDestination : nil
+    }
+
+    /// The start of the paragraph holding `offset`: the position after the
+    /// nearest preceding blank line, or the document start.
+    private static func paragraphStart(_ ns: NSString, at offset: Int) -> Int {
+        var cursor = offset
+        while cursor > 0 {
+            let newline = ns.range(
+                of: "\n",
+                options: .backwards,
+                range: NSRange(location: 0, length: cursor)
+            )
+            if newline.location == NSNotFound { return 0 }
+            let lineStart = newline.location + 1
+            let lineEnd = lineEnd(ns, from: lineStart)
+            if lineText(ns, from: lineStart, to: lineEnd)
+                .trimmingCharacters(in: .whitespaces).isEmpty {
+                return lineStart
+            }
+            cursor = newline.location
+        }
+        return 0
+    }
+
+    /// Whether the caret is inside a delimited frontmatter block. The first
+    /// line must be exactly `---`; the block ends at the next `---` or `...`
+    /// line. An unclosed opener is ordinary text.
+    private static func isInFrontmatter(
+        _ ns: NSString,
+        at offset: Int
+    ) -> Bool {
+        let firstLineEnd = lineEnd(ns, from: 0)
+        guard lineText(ns, from: 0, to: firstLineEnd) == "---" else {
+            return false
+        }
+        if offset <= firstLineEnd { return true }
+        var index = min(firstLineEnd + 1, ns.length)
+        while index < ns.length {
+            let end = lineEnd(ns, from: index)
+            let line = lineText(ns, from: index, to: end)
+            if line == "---" || line == "..." {
+                return offset < index
+            }
+            index = end + 1
+        }
+        return false
+    }
+
+    /// The length of the backtick run that opened the inline code span
+    /// containing the caret, or nil outside inline code. A backslash-escaped
+    /// backtick outside a span is literal text, not a delimiter.
+    private static func openInlineCodeDelimiter(_ prefix: String) -> Int? {
+        let ns = prefix as NSString
+        var open: Int?
+        var index = 0
+        while index < ns.length {
+            let character = ns.character(at: index)
+            if character == 0x5C, open == nil {
+                index += 2
+                continue
+            }
+            guard character == 0x60 else {
+                index += 1
+                continue
+            }
+            var run = 0
+            while index < ns.length, ns.character(at: index) == 0x60 {
+                run += 1
+                index += 1
+            }
+            if let length = open {
+                if run == length { open = nil }
+            } else {
+                open = run
+            }
+        }
+        return open
+    }
+
+    /// Whether the non-whitespace word around the caret is a URL.
+    private static func isInsideURL(_ ns: NSString, at offset: Int) -> Bool {
+        var start = offset
+        while start > 0 {
+            let character = ns.character(at: start - 1)
+            if isSpace(character) || character == 0x0A || character == 0x0D
+                || character == 0x28 || character == 0x3C {
+                break
+            }
+            start -= 1
+        }
+        var end = offset
+        while end < ns.length {
+            let character = ns.character(at: end)
+            if isSpace(character) || character == 0x0A || character == 0x0D
+                || character == 0x29 || character == 0x3E {
+                break
+            }
+            end += 1
+        }
+        let word = ns.substring(
+            with: NSRange(location: start, length: end - start)
+        ).lowercased()
+        return word.contains("://")
+            || word.hasPrefix("www.")
+            || word.hasPrefix("mailto:")
+    }
+
+    /// Whether the caret is inside an inline link destination or a reference
+    /// definition destination on the caret's line.
+    private static func isInsideLinkDestination(_ prefix: String) -> Bool {
+        let ns = prefix as NSString
+        var index = ns.length - 1
+        var depth = 0
+        while index >= 0 {
+            let character = ns.character(at: index)
+            if character == 0x29 { // )
+                depth += 1
+            } else if character == 0x28 { // (
+                if depth == 0 {
+                    return index > 0
+                        && ns.character(at: index - 1) == 0x5D
+                }
+                depth -= 1
+            }
+            index -= 1
+        }
+        let text = prefix.drop(while: { $0 == " " || $0 == "\t" })
+        guard text.hasPrefix("["),
+              let close = text.firstIndex(of: "]") else {
+            return false
+        }
+        let after = text.index(after: close)
+        return after < text.endIndex && text[after] == ":"
+    }
+
+    private static func isWordCharacter(_ character: unichar) -> Bool {
+        isDigit(character)
+            || (character >= 0x41 && character <= 0x5A)
+            || (character >= 0x61 && character <= 0x7A)
+    }
+
     // MARK: - Empty pair
 
     private static func emptyPairtoDelete(
@@ -417,6 +667,16 @@ public enum MarkdownTypingPolicy {
         return index
     }
 
+    /// The offset of the line feed ending the line that starts at `start`, or
+    /// the source length when the line is unterminated.
+    private static func lineEnd(_ ns: NSString, from start: Int) -> Int {
+        var end = min(start, ns.length)
+        while end < ns.length, ns.character(at: end) != 0x0A {
+            end += 1
+        }
+        return end
+    }
+
     private static func lineText(_ ns: NSString, at offset: Int) -> String {
         let start = lineStart(ns, at: offset)
         var end = min(offset, ns.length)
@@ -448,15 +708,16 @@ public enum MarkdownTypingPolicy {
     /// fence, exactly as it ends the item in the parser.
     ///
     /// CommonMark measures that indentation from the container's content
-    /// start, so the tracker follows list content columns line by line. It
-    /// models fenced code inside lists only; indented code blocks and fences
-    /// inside blockquotes are not tracked.
+    /// start, so the tracker follows list content columns and blockquote
+    /// depth line by line, and leaving either container ends the fence.
+    /// Indented code blocks are not tracked.
     public static func isInsideFence(_ source: String, at offset: Int) -> Bool {
         let ns = source as NSString
         let limit = min(offset, ns.length)
         var openFence: unichar?
         var openLength = 0
         var openContainer = 0
+        var openQuoteDepth = 0
         var listColumns: [Int] = []
         var lineStart = 0
         // The line holding the caret is read whole: its delimiters and its
@@ -468,38 +729,57 @@ public enum MarkdownTypingPolicy {
                 lineEnd += 1
             }
             let line = lineText(ns, from: lineStart, to: lineEnd)
-            let indent = indentation(of: line)
-            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            // A fence belongs to its blockquote: leaving the quote ends the
+            // fence exactly as it ends the quoted container.
+            let quote = stripBlockQuotes(line)
+            let quoteDepth = quote.depth
+            let content = String(quote.content)
+            let indent = indentation(of: content)
+            let trimmed = quote.content.drop(while: {
+                $0 == " " || $0 == "\t"
+            })
 
             if openFence != nil {
-                // A non-blank line left of the item that holds the fence
-                // ends the item, and the fence with it. The line is then
-                // read again in the outer context, where it may open a new
-                // fence.
-                let dedented = !trimmed.isEmpty && indent < openContainer
-                if !dedented {
-                    if closesFence(
-                        trimmed,
-                        indent: indent,
-                        marker: openFence,
-                        length: openLength,
-                        limit: openContainer + 3
-                    ) {
-                        openFence = nil
-                        openLength = 0
-                        openContainer = 0
+                if quoteDepth < openQuoteDepth {
+                    // The quoted container ended; this line may open a new
+                    // fence in the outer context.
+                    openFence = nil
+                    openLength = 0
+                    openContainer = 0
+                    openQuoteDepth = 0
+                    listColumns.removeAll()
+                } else {
+                    // A non-blank line left of the item that holds the fence
+                    // ends the item, and the fence with it. The line is then
+                    // read again in the outer context, where it may open a
+                    // new fence.
+                    let dedented = !trimmed.isEmpty && indent < openContainer
+                    if !dedented {
+                        if closesFence(
+                            trimmed,
+                            indent: indent,
+                            marker: openFence,
+                            length: openLength,
+                            limit: openContainer + 3
+                        ) {
+                            openFence = nil
+                            openLength = 0
+                            openContainer = 0
+                            openQuoteDepth = 0
+                        }
+                        if lineEnd >= limit { break }
+                        lineStart = lineEnd + 1
+                        continue
                     }
-                    if lineEnd >= limit { break }
-                    lineStart = lineEnd + 1
-                    continue
+                    openFence = nil
+                    openLength = 0
+                    openContainer = 0
+                    openQuoteDepth = 0
                 }
-                openFence = nil
-                openLength = 0
-                openContainer = 0
             }
             // A fence may open directly after one or more list markers,
-            // as in "- - ```".
-            let stripped = stripListMarkers(&listColumns, line: line)
+            // as in "- - ```", and inside a blockquote.
+            let stripped = stripListMarkers(&listColumns, line: content)
             let container = listColumns.last ?? 0
             if let opened = fenceOpener(
                 stripped.content,
@@ -509,11 +789,32 @@ public enum MarkdownTypingPolicy {
                 openFence = opened.marker
                 openLength = opened.length
                 openContainer = container
+                openQuoteDepth = quoteDepth
             }
             if lineEnd >= limit { break }
             lineStart = lineEnd + 1
         }
         return openFence != nil
+    }
+
+    /// The line after its blockquote markers, with the quote depth. CommonMark
+    /// strips each `>` and at most one following space before reading the
+    /// rest of the line.
+    private static func stripBlockQuotes(
+        _ line: String
+    ) -> (content: Substring, depth: Int) {
+        var rest = Substring(line)
+        var depth = 0
+        while true {
+            let spaced = rest.drop(while: { $0 == " " || $0 == "\t" })
+            guard spaced.first == ">" else { break }
+            rest = spaced.dropFirst()
+            if rest.first == " " || rest.first == "\t" {
+                rest = rest.dropFirst()
+            }
+            depth += 1
+        }
+        return (rest, depth)
     }
 
     private static func fenceOpener(
@@ -568,8 +869,7 @@ public enum MarkdownTypingPolicy {
         var base = 0
         var sawMarker = false
         while let prefix = listPrefix(
-            line: String(remainder),
-            lineStart: 0
+            line: String(remainder)
         ) {
             let markerIndent = column(
                 of: remainder.prefix(prefix.markerStart),

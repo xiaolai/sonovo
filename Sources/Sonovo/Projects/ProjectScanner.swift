@@ -47,7 +47,10 @@ struct ProjectScanner: ProjectScanning {
         .fileResourceIdentifierKey
     ]
 
-    private static let markdownExtensions: Set<String> = ["md", "markdown"]
+    static let markdownExtensions: Set<String> = ["md", "markdown"]
+    /// Component documents are their own kind. `.jsx` used to scan as plain
+    /// code; the MDX workspace now owns both extensions.
+    static let mdxExtensions: Set<String> = ["mdx", "jsx"]
     private static let documentExtensions: Set<String> = [
         "pdf", "docx", "rtf", "odt", "pages", "key", "pptx", "xlsx",
         "csv", "tsv", "fountain", "fdx", "epub",
@@ -224,6 +227,7 @@ struct ProjectScanner: ProjectScanning {
         let ext = fileExtension.lowercased()
         guard !ext.isEmpty else { return nil }
         if markdownExtensions.contains(ext) { return .script }
+        if mdxExtensions.contains(ext) { return .mdx }
         if subtitleExtensions.contains(ext) { return .subtitle }
         if modelExtensions.contains(ext) { return .model3d }
         if audioExtensions.contains(ext) { return .audio }
@@ -243,6 +247,13 @@ struct ProjectScanner: ProjectScanning {
         // before `CodeLanguage`, which claims the `.json` extension.
         if name.lowercased().hasSuffix(".timeline.json") {
             return .timeline
+        }
+        // `.jsx` is a JavaScript extension too; the component-document kind
+        // takes precedence over the generic code viewer.
+        if mdxExtensions.contains(
+            (name as NSString).pathExtension.lowercased()
+        ) {
+            return .mdx
         }
         if CodeLanguage.language(forFilename: name) != nil {
             // The Markdown, subtitle, model, and web families keep their own

@@ -135,4 +135,140 @@ struct MarkdownLinkEditorTests {
             )
         }
     }
+
+    @Test("An unchanged edit preserves the label's existing escapes")
+    func labelRoundTripPreservesEscapes() throws {
+        // The label is the raw bracket-inner source, escapes included.
+        // Escaping it again doubled every backslash and changed a link the
+        // user did not edit.
+        let source = #"See [lab \[x\] \\ end](https://example.com) now."#
+        let link = try #require(target(source, at: "lab"))
+        #expect(link.text == #"lab \[x\] \\ end"#)
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(
+                text: link.text,
+                destination: link.destination,
+                title: link.title
+            ),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        #expect(result.source == source)
+    }
+
+    @Test("A bracket the user typed in the label is escaped")
+    func labelBracketIsEscaped() throws {
+        let source = "See [docs](https://example.com) now."
+        let link = try #require(target(source, at: "docs"))
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(
+                text: "a]b [c]",
+                destination: "https://example.com"
+            ),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        // The unmatched `]` must be escaped; the balanced `[c]` pair is
+        // literal text either way, and escaping it would add noise.
+        #expect(
+            result.source
+                == #"See [a\]b [c]](https://example.com) now."#
+        )
+    }
+
+    @Test("A trailing backslash in the label stays a literal")
+    func labelTrailingBackslash() throws {
+        let source = "See [docs](https://example.com) now."
+        let link = try #require(target(source, at: "docs"))
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(text: #"a\"#, destination: "https://example.com"),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        #expect(
+            result.source == #"See [a\\](https://example.com) now."#
+        )
+    }
+
+    @Test("Brackets inside a code span in the label stay unescaped")
+    func labelCodeSpanRoundTrip() throws {
+        // The parser reads `[x]` inside a code span as literal text, not as
+        // the label's brackets. Escaping it would put backslashes into the
+        // code the reader sees, so the span is copied verbatim.
+        let source = #"See [`[x]`](https://example.com) now."#
+        let link = try #require(target(source, at: "[x]"))
+        #expect(link.text == #"`[x]`"#)
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(
+                text: link.text,
+                destination: link.destination,
+                title: link.title
+            ),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        #expect(result.source == source)
+    }
+
+    @Test("A closing bracket inside a code span does not end the label")
+    func labelCodeSpanWithClosingBracket() throws {
+        // Reading the label and writing it back must agree that the `]`
+        // between backticks is code, not the label's terminator.
+        let source = #"See [`]`](https://example.com) now."#
+        let link = try #require(target(source, at: "`]`"))
+        #expect(link.text == #"`]`"#)
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(
+                text: link.text,
+                destination: link.destination,
+                title: link.title
+            ),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        #expect(result.source == source)
+    }
+
+    @Test("A balanced bracket pair in the label stays raw")
+    func labelBalancedBrackets() throws {
+        let source = "See [a[bc]d](https://example.com) now."
+        let link = try #require(target(source, at: "bc"))
+        #expect(link.text == "a[bc]d")
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(
+                text: link.text,
+                destination: link.destination,
+                title: link.title
+            ),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        #expect(result.source == source)
+    }
+
+    @Test("An image inside the label keeps its syntax")
+    func labelEmbeddedImage() throws {
+        // `![alt](img.png)` is valid link text. Escaping its brackets would
+        // turn the image into literal text.
+        let source = "See [![alt](img.png)](https://example.com) now."
+        let link = try #require(target(source, at: "[!"))
+        #expect(link.text == "![alt](img.png)")
+        let result = try MarkdownLinkEditor.commit(
+            MarkdownLinkValues(
+                text: link.text,
+                destination: link.destination,
+                title: link.title
+            ),
+            to: link,
+            source: source,
+            selection: 0..<0
+        )
+        #expect(result.source == source)
+    }
 }

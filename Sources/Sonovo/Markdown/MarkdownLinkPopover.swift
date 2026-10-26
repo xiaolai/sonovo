@@ -16,6 +16,7 @@ final class MarkdownLinkPopoverController {
         onRemove: @escaping () -> Void,
         onCopy: @escaping (String) -> Void,
         onOpen: @escaping (String) -> Void,
+        onOpenWiki: @escaping (WikiLink) -> Void,
         onOpenDefinition: @escaping () -> Void
     ) {
         popover.behavior = .transient
@@ -26,6 +27,7 @@ final class MarkdownLinkPopoverController {
             onRemove: onRemove,
             onCopy: onCopy,
             onOpen: onOpen,
+            onOpenWiki: onOpenWiki,
             onOpenDefinition: onOpenDefinition,
             onCancel: { [weak self] in self?.close() }
         )
@@ -45,6 +47,7 @@ private struct MarkdownLinkPopoverView: View {
     let onRemove: () -> Void
     let onCopy: (String) -> Void
     let onOpen: (String) -> Void
+    let onOpenWiki: (WikiLink) -> Void
     let onOpenDefinition: () -> Void
     let onCancel: () -> Void
 
@@ -57,6 +60,7 @@ private struct MarkdownLinkPopoverView: View {
         onRemove: @escaping () -> Void,
         onCopy: @escaping (String) -> Void,
         onOpen: @escaping (String) -> Void,
+        onOpenWiki: @escaping (WikiLink) -> Void,
         onOpenDefinition: @escaping () -> Void,
         onCancel: @escaping () -> Void
     ) {
@@ -66,6 +70,7 @@ private struct MarkdownLinkPopoverView: View {
         self.onRemove = onRemove
         self.onCopy = onCopy
         self.onOpen = onOpen
+        self.onOpenWiki = onOpenWiki
         self.onOpenDefinition = onOpenDefinition
         self.onCancel = onCancel
         _values = State(
@@ -169,6 +174,9 @@ private struct MarkdownLinkPopoverView: View {
         } else {
             TextField("Text", text: $values.text)
             TextField("Destination", text: $values.destination)
+                .accessibilityHint(
+                    "A web address, a path inside the workspace, or an anchor"
+                )
             TextField("Title", text: titleBinding)
             if !headingChoices.isEmpty {
                 headingPicker
@@ -184,6 +192,7 @@ private struct MarkdownLinkPopoverView: View {
                 }
             }
         }
+        .accessibilityLabel("Pick a heading")
     }
 
     private var actions: some View {
@@ -194,10 +203,43 @@ private struct MarkdownLinkPopoverView: View {
                 Button("Open Definition", action: onOpenDefinition)
             }
             Spacer()
-            Button("Copy") { onCopy(values.destination) }
-            Button("Open") { onOpen(values.destination) }
-                .disabled(values.destination.isEmpty)
+            Button("Copy") { onCopy(actionDestination) }
+            Button("Open") {
+                if target.kind == .wikiLink {
+                    onOpenWiki(editedWikiLink)
+                } else {
+                    onOpen(actionDestination)
+                }
+            }
+            // A wiki link's value lives in the Target field, not in
+            // `destination`, which is only the target as it was presented.
+            .disabled(actionDestination.isEmpty)
         }
+    }
+
+    private var actionDestination: String {
+        target.kind == .wikiLink
+            ? (values.target ?? target.destination)
+            : values.destination
+    }
+
+    /// The edited wiki target split into its path and `#fragment` parts, so
+    /// Open goes through the same resolver as a wiki link in the reader.
+    private var editedWikiLink: WikiLink {
+        let raw = actionDestination.trimmingCharacters(in: .whitespaces)
+        let parts = raw.split(
+            separator: "#",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        let name = String(parts.first ?? "")
+        let fragment = parts.count > 1 ? String(parts[1]) : ""
+        let alias = (values.alias ?? "").trimmingCharacters(in: .whitespaces)
+        return WikiLink(
+            target: name,
+            fragment: fragment.isEmpty ? nil : fragment,
+            alias: alias.isEmpty ? nil : alias
+        )
     }
 
     private var footer: some View {

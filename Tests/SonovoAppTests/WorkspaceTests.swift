@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 @testable import Sonovo
+import SonovoCore
 
 @MainActor
 final class WorkspaceTests: XCTestCase {
@@ -32,6 +33,125 @@ final class WorkspaceTests: XCTestCase {
             ["Documents", "Audio", "Images", "3D"]
         )
         XCTAssertEqual(workspace.activeProject?.id, project.id)
+    }
+
+    func testMediaReferenceRoutesToTheAssetAndLeavesASeek() async throws {
+        let root = try makeRoot(
+            files: [
+                "script.md": "See the take.",
+                "voice.wav": "wav",
+                "still.png": "png"
+            ]
+        )
+        let workspace = makeWorkspace()
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        let loaded = await waitUntil { project.assets.count == 3 }
+        XCTAssertTrue(loaded)
+        let documentURL = root.appendingPathComponent("script.md")
+        project.markdown.open(url: documentURL)
+
+        let reference = try XCTUnwrap(
+            MediaReference.parse(
+                "sonovo:timecode?path=voice.wav&t=00:00:05"
+            )
+        )
+        project.openMediaReference(reference)
+
+        XCTAssertEqual(project.selectedAsset?.name, "voice.wav")
+        XCTAssertEqual(project.pendingMediaSeek?.seconds, 5)
+        let asset = try XCTUnwrap(project.selectedAsset)
+        XCTAssertEqual(project.takeMediaSeek(for: asset)?.seconds, 5)
+        XCTAssertNil(project.pendingMediaSeek)
+    }
+
+    func testMediaReferenceWithoutAPathUsesTheSelectedMedia() async throws {
+        let root = try makeRoot(
+            files: [
+                "script.md": "See it.",
+                "voice.wav": "wav"
+            ]
+        )
+        let workspace = makeWorkspace()
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        let loaded = await waitUntil { project.assets.count == 2 }
+        XCTAssertTrue(loaded)
+        project.markdown.open(url: root.appendingPathComponent("script.md"))
+        let asset = try XCTUnwrap(
+            project.assets.first { $0.kind == .audio }
+        )
+        project.openAsset(asset)
+
+        let reference = try XCTUnwrap(
+            MediaReference.parse("sonovo:timecode?seconds=3")
+        )
+        project.openMediaReference(reference)
+        XCTAssertEqual(project.pendingMediaSeek?.seconds, 3)
+    }
+
+    func testAMissingMediaTargetNeverGuesses() async throws {
+        let root = try makeRoot(
+            files: [
+                "script.md": "See it.",
+                "still.png": "png"
+            ]
+        )
+        let workspace = makeWorkspace()
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        let loaded = await waitUntil { project.assets.count == 2 }
+        XCTAssertTrue(loaded)
+        project.markdown.open(url: root.appendingPathComponent("script.md"))
+
+        let missing = try XCTUnwrap(
+            MediaReference.parse(
+                "sonovo:take?path=missing.wav&seconds=1"
+            )
+        )
+        project.openMediaReference(missing)
+        XCTAssertNil(project.pendingMediaSeek)
+        XCTAssertNotEqual(project.selectedAsset?.name, "missing.wav")
+
+        let still = try XCTUnwrap(
+            MediaReference.parse("sonovo:take?path=still.png")
+        )
+        project.openMediaReference(still)
+        XCTAssertNil(project.pendingMediaSeek)
+        XCTAssertNil(
+            project.mediaAsset(
+                for: still,
+                documentURL: root.appendingPathComponent("script.md")
+            )
+        )
+    }
+
+    func testMediaPathContainmentRefusesTraversal() throws {
+        let root = try makeRoot(files: ["assets/take.mov": "mov"])
+        let documentURL = root.appendingPathComponent("script.md")
+        let inside = MarkdownSecurity.resolveLocalPath(
+            "assets/take.mov",
+            relativeTo: documentURL,
+            root: root
+        )
+        XCTAssertEqual(
+            inside?.standardizedFileURL.path,
+            root.appendingPathComponent("assets/take.mov")
+                .standardizedFileURL.path
+        )
+        XCTAssertNil(
+            MarkdownSecurity.resolveLocalPath(
+                "../take.mov",
+                relativeTo: documentURL,
+                root: root
+            )
+        )
+        let outside = root.deletingLastPathComponent()
+            .appendingPathComponent("outside.mov")
+        XCTAssertNil(
+            MarkdownSecurity.resolveLocalPath(
+                outside.path,
+                relativeTo: documentURL,
+                root: root
+            )
+        )
     }
 
     func testScanBuildsTheFilesTreeUsedByTheFilesNavigator() async throws {

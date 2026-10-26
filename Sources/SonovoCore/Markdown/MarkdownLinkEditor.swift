@@ -116,18 +116,22 @@ public enum MarkdownLinkEditor {
         case .wikiLink:
             return parseWiki(slice, range: range)
         case .link:
+            guard let destination = link.destination else { return nil }
             return parseBracket(
                 slice,
                 range: range,
                 kind: .link,
-                definitions: ast.referenceDefinitions
+                definitions: ast.referenceDefinitions,
+                resolved: (destination, link.title)
             )
         case .image:
+            guard let destination = link.destination else { return nil }
             return parseBracket(
                 slice,
                 range: range,
                 kind: .image,
-                definitions: ast.referenceDefinitions
+                definitions: ast.referenceDefinitions,
+                resolved: (destination, link.title)
             )
         }
     }
@@ -162,7 +166,8 @@ public enum MarkdownLinkEditor {
         _ slice: String,
         range: Range<Int>,
         kind: MarkdownLinkTarget.Kind,
-        definitions: [ReferenceDefinition]
+        definitions: [ReferenceDefinition],
+        resolved: (destination: String, title: String?)
     ) -> MarkdownLinkTarget? {
         let prefix = kind == .image ? "![" : "["
         guard slice.hasPrefix(prefix) else { return nil }
@@ -172,15 +177,13 @@ public enum MarkdownLinkEditor {
         let after = String(body[body.index(after: close)...])
 
         if after.hasPrefix("("), after.hasSuffix(")") {
-            let inner = String(after.dropFirst().dropLast())
-            let parsed = parseInlineDestination(inner)
             return MarkdownLinkTarget(
                 kind: kind,
                 style: .inline,
                 range: range,
                 text: text,
-                destination: parsed.destination,
-                title: parsed.title
+                destination: resolved.destination,
+                title: resolved.title
             )
         }
 
@@ -231,6 +234,21 @@ public enum MarkdownLinkEditor {
                 escaped = false
             } else if character == "\\" {
                 escaped = true
+            } else if character == "`" {
+                // A code span protects its content: a bracket inside it is
+                // literal text and does not change the label's depth.
+                let run = backtickRun(in: text, at: index)
+                let afterRun = text.index(index, offsetBy: run)
+                if let close = closingBacktickRun(
+                    in: text,
+                    from: afterRun,
+                    length: run
+                ) {
+                    index = text.index(close, offsetBy: run)
+                    continue
+                }
+                index = afterRun
+                continue
             } else if character == "[" {
                 depth += 1
             } else if character == "]" {
@@ -242,56 +260,28 @@ public enum MarkdownLinkEditor {
         return nil
     }
 
-    private static func parseInlineDestination(
-        _ inner: String
-    ) -> (destination: String, title: String?) {
-        var text = inner.trimmingCharacters(in: .whitespaces)
-        var destination = ""
-        if text.hasPrefix("<"), let end = text.firstIndex(of: ">") {
-            destination = String(text[text.index(after: text.startIndex)..<end])
-            text = String(text[text.index(after: end)...])
-        } else {
-            var index = text.startIndex
-            while index < text.endIndex {
-                let character = text[index]
-                if character == " " || character == "\t" {
-                    break
-                }
-                destination.append(character)
-                index = text.index(after: index)
-            }
-            text = String(text[index...])
-        }
-        let title = parseTitle(
-            text.trimmingCharacters(in: .whitespaces)
-        )
-        return (destination, title)
-    }
-
-    private static func parseTitle(_ text: String) -> String? {
-        guard text.count >= 2, let first = text.first else { return nil }
-        let last = text.last
-        let closer: Character?
-        switch first {
-        case "\"": closer = "\""
-        case "'": closer = "'"
-        case "(": closer = ")"
-        default: closer = nil
-        }
-        guard let closer, last == closer else { return nil }
-        return String(text.dropFirst().dropLast())
-    }
+    // Inline destinations and titles are read from the parsed inline in the
+    // AST (through `MarkdownCursorContext.LinkContext`), never decoded here:
+    // a second, smaller entity table inevitably disagreed with the parser on
+    // the references it did not know.
 
     private static func find(
         _ label: String,
         in definitions: [ReferenceDefinition]
     ) -> ReferenceDefinition? {
-        definitions.first {
-            $0.label.compare(
-                label,
-                options: [.caseInsensitive, .diacriticInsensitive]
+        // CommonMark folds case and collapses internal whitespace. It does
+        // not ignore diacritics: `cafe` and `café` are distinct labels.
+        let normalized = normalizedLabel(label)
+        return definitions.first {
+            normalizedLabel($0.label).compare(
+                normalized,
+                options: [.caseInsensitive]
             ) == .orderedSame
         }
+    }
+
+    private static func normalizedLabel(_ label: String) -> String {
+        label.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     // MARK: - Writing
@@ -310,12 +300,12 @@ public enum MarkdownLinkEditor {
         let replacement: String
         switch target.kind {
         case .link:
-            let text = values.text.isEmpty ? target.text : values.text
-            replacement = "[\(text)](\(formattedDestination(values.destination))"
+            // An emptied field means an empty label (`[](url)`); falling
+            // back to the old text made clearing it impossible.
+            replacement = "[\(formattedLabel(values.text))](\(formattedDestination(values.destination))"
                 + formattedTitle(values.title) + ")"
         case .image:
-            let text = values.text.isEmpty ? target.text : values.text
-            replacement = "![\(text)](\(formattedDestination(values.destination))"
+            replacement = "![\(formattedLabel(values.text))](\(formattedDestination(values.destination))"
                 + formattedTitle(values.title) + ")"
         case .wikiLink:
             let name = (values.target ?? values.destination)
@@ -360,18 +350,153 @@ public enum MarkdownLinkEditor {
     }
 
     private static func formattedDestination(_ destination: String) -> String {
-        let trimmed = destination.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty { return "" }
-        if trimmed.contains(" ") || trimmed.contains("(")
-            || trimmed.contains(")") {
-            return "<\(trimmed)>"
+        MarkdownDestination.escaped(
+            destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    /// Escapes the label's delimiters without disturbing escapes the source
+    /// already carries: an unchanged edit must reproduce its own bytes. A
+    /// backslash that already escapes punctuation stays as written; a
+    /// backslash before anything else (or at the end) becomes a literal
+    /// backslash, so it can neither escape the closing bracket nor vanish.
+    ///
+    /// Inline code spans are copied verbatim. Brackets and backslashes inside
+    /// them are literal to the Markdown parser, so escaping them would change
+    /// the text the reader sees. A balanced bracket pair outside a code span
+    /// is also copied verbatim: it cannot end the label early, and it may be
+    /// embedded image syntax. Only an unmatched bracket is escaped.
+    private static func formattedLabel(_ text: String) -> String {
+        let matched = matchedBrackets(in: text)
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character == "`" {
+                let run = backtickRun(in: text, at: index)
+                let afterRun = text.index(index, offsetBy: run)
+                if let close = closingBacktickRun(
+                    in: text,
+                    from: afterRun,
+                    length: run
+                ) {
+                    let end = text.index(close, offsetBy: run)
+                    result += text[index..<end]
+                    index = end
+                } else {
+                    result += text[index..<afterRun]
+                    index = afterRun
+                }
+                continue
+            }
+            let next = text.index(after: index)
+            if character == "\\" {
+                if next < text.endIndex,
+                   MarkdownEscaping.punctuation.contains(text[next]) {
+                    result.append("\\")
+                    result.append(text[next])
+                    index = text.index(after: next)
+                } else {
+                    result += "\\\\"
+                    index = next
+                }
+            } else if character == "[" || character == "]" {
+                if matched.contains(index) {
+                    result.append(character)
+                } else {
+                    result += "\\\(character)"
+                }
+                index = next
+            } else {
+                result.append(character)
+                index = next
+            }
         }
-        return trimmed
+        return result
+    }
+
+    /// The bracket characters that pair with each other outside code spans
+    /// and escapes. A bracket outside this set has no partner, so it would
+    /// close the label (or swallow its terminator) if written raw.
+    private static func matchedBrackets(
+        in text: String
+    ) -> Set<String.Index> {
+        var stack: [String.Index] = []
+        var matched: Set<String.Index> = []
+        var index = text.startIndex
+        var escaped = false
+        while index < text.endIndex {
+            let character = text[index]
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "`" {
+                let run = backtickRun(in: text, at: index)
+                let afterRun = text.index(index, offsetBy: run)
+                if let close = closingBacktickRun(
+                    in: text,
+                    from: afterRun,
+                    length: run
+                ) {
+                    index = text.index(close, offsetBy: run)
+                    continue
+                }
+                index = afterRun
+                continue
+            } else if character == "[" {
+                stack.append(index)
+            } else if character == "]" {
+                if let open = stack.popLast() {
+                    matched.insert(open)
+                    matched.insert(index)
+                }
+            }
+            index = text.index(after: index)
+        }
+        return matched
+    }
+
+    private static func backtickRun(
+        in text: String,
+        at start: String.Index
+    ) -> Int {
+        var length = 0
+        var index = start
+        while index < text.endIndex, text[index] == "`" {
+            length += 1
+            index = text.index(after: index)
+        }
+        return length
+    }
+
+    private static func closingBacktickRun(
+        in text: String,
+        from start: String.Index,
+        length: Int
+    ) -> String.Index? {
+        var index = start
+        while index < text.endIndex {
+            guard text[index] == "`" else {
+                index = text.index(after: index)
+                continue
+            }
+            let run = backtickRun(in: text, at: index)
+            if run == length { return index }
+            index = text.index(index, offsetBy: run)
+        }
+        return nil
     }
 
     private static func formattedTitle(_ title: String?) -> String {
         guard let title, !title.isEmpty else { return "" }
-        let escaped = title.replacingOccurrences(of: "\"", with: "\\\"")
+        // A trailing backslash left as-is would escape the closing quote and
+        // swallow the rest of the link, and a literal ampersand could form a
+        // character reference on reparse.
+        let escaped = title
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         return " \"\(escaped)\""
     }
 }

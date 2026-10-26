@@ -590,4 +590,244 @@ struct MarkdownTypingPolicyAuditTests {
         #expect(plan.outcome == .handled)
         #expect(plan.selection == 4..<4)
     }
+
+    // MARK: - Auto-pair
+
+    @Test("Every opener inserts its closer and keeps the caret inside")
+    func autoPairEveryOpener() {
+        let expected: [(String, String)] = [
+            ("(", "()"),
+            ("[", "[]"),
+            ("{", "{}"),
+            ("\"", "\"\""),
+            ("'", "''"),
+            ("`", "``"),
+            ("「", "「」"),
+            ("『", "『』"),
+            ("（", "（）"),
+            ("【", "【】"),
+            ("《", "《》"),
+            ("〈", "〈〉")
+        ]
+        for (opener, pair) in expected {
+            let plan = MarkdownTypingPolicy.typing(
+                source: "",
+                selection: 0..<0,
+                inserted: opener
+            )
+            #expect(plan.outcome == .handled, "\(opener) was not paired")
+            #expect(plan.range == 0..<0)
+            #expect(plan.replacement == pair)
+            #expect(plan.selection == 1..<1)
+        }
+    }
+
+    @Test("An apostrophe inside a word stays a literal")
+    func apostropheStaysLiteral() {
+        let plan = MarkdownTypingPolicy.typing(
+            source: "don",
+            selection: 3..<3,
+            inserted: "'"
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("An opener over a selection is ordinary text")
+    func openerOverSelection() {
+        let plan = MarkdownTypingPolicy.typing(
+            source: "abc",
+            selection: 0..<3,
+            inserted: "("
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("An opener in a fence, inline code, or frontmatter is literal")
+    func codeAndFrontmatterExclusion() {
+        let fenced = MarkdownTypingPolicy.typing(
+            source: "```\nabc",
+            selection: 7..<7,
+            inserted: "("
+        )
+        #expect(fenced.outcome == .notApplicable)
+
+        let inline = MarkdownTypingPolicy.typing(
+            source: "`abc",
+            selection: 4..<4,
+            inserted: "("
+        )
+        #expect(inline.outcome == .notApplicable)
+
+        let frontmatter = MarkdownTypingPolicy.typing(
+            source: "---\ntitle: x\n---\nbody",
+            selection: 10..<10,
+            inserted: "("
+        )
+        #expect(frontmatter.outcome == .notApplicable)
+
+        let body = MarkdownTypingPolicy.typing(
+            source: "---\ntitle: x\n---\nbody",
+            selection: 20..<20,
+            inserted: "("
+        )
+        #expect(body.outcome == .handled)
+    }
+
+    @Test("An opener in a URL or a link destination is literal")
+    func urlAndDestinationExclusion() {
+        let url = "see https://example.com"
+        let inURL = MarkdownTypingPolicy.typing(
+            source: url,
+            selection: (url as NSString).length..<(url as NSString).length,
+            inserted: "("
+        )
+        #expect(inURL.outcome == .notApplicable)
+
+        let link = "[text](https://example.com"
+        let inLink = MarkdownTypingPolicy.typing(
+            source: link,
+            selection: (link as NSString).length..<(link as NSString).length,
+            inserted: "("
+        )
+        #expect(inLink.outcome == .notApplicable)
+
+        let definition = "[ref]: https://example.com"
+        let definitionEnd = (definition as NSString).length
+        let inDefinition = MarkdownTypingPolicy.typing(
+            source: definition,
+            selection: definitionEnd..<definitionEnd,
+            inserted: "("
+        )
+        #expect(inDefinition.outcome == .notApplicable)
+    }
+
+    @Test("Nested pairs insert independently")
+    func nestedPairs() {
+        let outer = MarkdownTypingPolicy.typing(
+            source: "",
+            selection: 0..<0,
+            inserted: "["
+        )
+        #expect(outer.replacement == "[]")
+        let inner = MarkdownTypingPolicy.typing(
+            source: "[]",
+            selection: 1..<1,
+            inserted: "("
+        )
+        #expect(inner.outcome == .handled)
+        #expect(inner.range == 1..<1)
+        #expect(inner.replacement == "()")
+        #expect(inner.selection == 2..<2)
+    }
+
+    @Test("Typing a closer skips the auto-inserted one")
+    func skipOverCloser() {
+        let plan = MarkdownTypingPolicy.typing(
+            source: "()",
+            selection: 1..<1,
+            inserted: ")"
+        )
+        #expect(plan.outcome == .handled)
+        #expect(plan.range == nil)
+        #expect(plan.selection == 2..<2)
+    }
+
+    @Test("A command chord never auto-pairs")
+    func chordModifierVetoesPairing() {
+        let plan = MarkdownTypingPolicy.typing(
+            source: "",
+            selection: 0..<0,
+            inserted: "(",
+            chordModifierHeld: true
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("An ordinary character is not a pair")
+    func ordinaryCharacter() {
+        let plan = MarkdownTypingPolicy.typing(
+            source: "",
+            selection: 0..<0,
+            inserted: "a"
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("A closer inside a fence is literal text")
+    func closerInsideFenceIsLiteral() {
+        // The closer-skip must not run in an excluded context: skipping the
+        // keystroke would silently swallow a character the user typed.
+        let source = "```\n()"
+        let plan = MarkdownTypingPolicy.typing(
+            source: source,
+            selection: 4..<4,
+            inserted: ")"
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("A closer inside inline code is literal text")
+    func closerInsideInlineCodeIsLiteral() {
+        let source = "`()"
+        let plan = MarkdownTypingPolicy.typing(
+            source: source,
+            selection: 2..<2,
+            inserted: ")"
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("The auto-inserted backtick pair's closer is skipped")
+    func autoPairedBacktickSkips() {
+        // After pairing a backtick the caret sits between the two, which the
+        // context check reads as an inline code span. Skipping its closer is
+        // the one excluded-context exception.
+        let plan = MarkdownTypingPolicy.typing(
+            source: "``",
+            selection: 1..<1,
+            inserted: "`"
+        )
+        #expect(plan.outcome == .handled)
+        #expect(plan.range == nil)
+        #expect(plan.selection == 2..<2)
+    }
+
+    @Test("A backtick closer inside a fence is literal")
+    func backtickCloserInsideFenceIsLiteral() {
+        let source = "```\n``"
+        let plan = MarkdownTypingPolicy.typing(
+            source: source,
+            selection: 5..<5,
+            inserted: "`"
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
+
+    @Test("The backtick closer is skipped after content is typed")
+    func backtickCloserSkipsAfterContent() {
+        // Auto-pairing inserts two backticks; once the author types between
+        // them the closing backtick must still be skipped, not duplicated.
+        let source = "`x`"
+        let plan = MarkdownTypingPolicy.typing(
+            source: source,
+            selection: 2..<2,
+            inserted: "`"
+        )
+        #expect(plan.outcome == .handled)
+        #expect(plan.range == nil)
+        #expect(plan.selection == 3..<3)
+    }
+
+    @Test("A literal backtick inside a longer code span is inserted")
+    func literalBacktickInsideDoubleBacktickSpan() {
+        // The span is delimited by two backticks; a single typed backtick
+        // cannot close it, so it is literal text and must not be swallowed.
+        let source = "``a`b``"
+        let plan = MarkdownTypingPolicy.typing(
+            source: source,
+            selection: 3..<3,
+            inserted: "`"
+        )
+        #expect(plan.outcome == .notApplicable)
+    }
 }

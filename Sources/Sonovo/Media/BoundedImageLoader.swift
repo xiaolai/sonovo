@@ -45,6 +45,15 @@ enum BoundedImageLoader {
         return pngData(from: data)
     }
 
+    /// The original encoded bytes, bounded by the same read cap.
+    ///
+    /// Export embeds the authored format (including animated GIF) instead of
+    /// re-encoding a thumbnail. The caller must first prove the bytes decode
+    /// through `image(from:)`.
+    static func encodedData(at url: URL) -> Data? {
+        boundedData(at: url)
+    }
+
     /// Reads at most `maxImageBytes` plus one byte. A file-size check before
     /// the read is not enough: the file can grow between the check and
     /// `Data(contentsOf:)`, which would then allocate without a bound.

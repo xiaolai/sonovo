@@ -43,6 +43,7 @@ public enum MarkdownSmartSelect {
         collectContaining(
             blocks: ast.blocks,
             offset: selection.lowerBound,
+            documentEnd: ns.length,
             into: &containing
         )
         containing.sort {
@@ -98,12 +99,18 @@ public enum MarkdownSmartSelect {
     private static func collectContaining(
         blocks: [Block],
         offset: Int,
+        documentEnd: Int,
         into ranges: inout [Range<Int>]
     ) {
         for block in blocks {
+            // Half-open: an offset exactly at a block's end belongs to the
+            // next block, not the one that just ended. The document's own
+            // end stays inside the final block.
             guard let range = block.range,
                   offset >= range.lowerBound,
-                  offset <= range.upperBound else {
+                  offset < range.upperBound
+                    || (offset == range.upperBound
+                        && range.upperBound == documentEnd) else {
                 continue
             }
             ranges.append(range.lowerBound..<range.upperBound)
@@ -112,6 +119,7 @@ public enum MarkdownSmartSelect {
                 collectContaining(
                     blocks: children,
                     offset: offset,
+                    documentEnd: documentEnd,
                     into: &ranges
                 )
             case .list(let list, _):
@@ -119,6 +127,7 @@ public enum MarkdownSmartSelect {
                     collectContaining(
                         blocks: item.blocks,
                         offset: offset,
+                        documentEnd: documentEnd,
                         into: &ranges
                     )
                 }
@@ -126,6 +135,7 @@ public enum MarkdownSmartSelect {
                 collectContaining(
                     blocks: details.blocks,
                     offset: offset,
+                    documentEnd: documentEnd,
                     into: &ranges
                 )
             default:

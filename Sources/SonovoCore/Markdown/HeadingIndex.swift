@@ -143,8 +143,16 @@ public struct HeadingIndex: Sendable, Equatable {
     }
 
     /// Rendered heading text: links use their label, code its content, wiki
-    /// links their display text, and images contribute nothing.
-    public static func renderedText(_ inlines: [Inline]) -> String {
+    /// links their display text, math its TeX source, and images contribute
+    /// nothing.
+    ///
+    /// `includingMath: false` matches what the reading view shows when a
+    /// formula is an image: the formula's source is not visible text, so the
+    /// rendered find bar must not report matches inside it.
+    public static func renderedText(
+        _ inlines: [Inline],
+        includingMath: Bool = true
+    ) -> String {
         var result = ""
         for inline in inlines {
             switch inline {
@@ -157,15 +165,21 @@ public struct HeadingIndex: Sendable, Equatable {
             case let .emphasis(children, _),
                  let .strong(children, _),
                  let .strikethrough(children, _):
-                result += renderedText(children)
+                result += renderedText(children, includingMath: includingMath)
             case let .link(_, _, children, _):
-                result += renderedText(children)
+                result += renderedText(children, includingMath: includingMath)
             case .image:
                 continue
             case .inlineHTML:
                 continue
             case let .wikiLink(link, _):
                 result += link.display
+            case let .footnoteReference(reference, _):
+                result += "\(reference.number)"
+            case let .math(source, _, _, _):
+                if includingMath {
+                    result += source
+                }
             }
         }
         return result

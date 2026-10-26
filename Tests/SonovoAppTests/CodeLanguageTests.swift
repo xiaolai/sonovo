@@ -14,11 +14,14 @@ final class CodeLanguageTests: XCTestCase {
                 XCTAssertNotNil(
                     ProjectScanner.kind(forFilename: "file.\(fileExtension)")
                 )
+                // `.jsx` stays a JavaScript language for highlighting, but
+                // the scanner routes component documents to the MDX
+                // workspace; every other code extension keeps the code kind.
                 XCTAssertEqual(
                     ProjectScanner.kind(
                         forFilename: "file.\(fileExtension)"
                     ),
-                    .code,
+                    fileExtension == "jsx" ? .mdx : .code,
                     fileExtension
                 )
                 _ = language

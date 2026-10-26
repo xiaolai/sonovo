@@ -15,6 +15,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     let document: MarkdownDocument
     let textView: MarkdownTextView
     let scrollView: NSScrollView
+    let reviewRulerView = ReviewMarkerRulerView()
 
     private final class WeakController: @unchecked Sendable {
         weak var value: MarkdownEditorController?
@@ -43,10 +44,42 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     private var parseTask: Task<Void, Never>?
     private var pendingParseRevision: UInt64?
     private var linkPopover: MarkdownLinkPopoverController?
+    private var tablePopover: MarkdownTablePopoverController?
+    /// The table the grid popover edits, captured when it opened. Commits
+    /// refuse when the document no longer holds this exact block.
+    private(set) var tableSnapshot: MarkdownTableSnapshot?
+    /// The document revision the snapshot belongs to. A reload or an edit
+    /// elsewhere refuses the next commit instead of writing through it.
+    private(set) var tableSnapshotRevision: UInt64 = 0
     private(set) var lintDiagnostics: [MarkdownDiagnostic] = []
+    /// View-only display modes. They never touch the text or the undo stack.
+    var isFocusModeEnabled = false
+    var isTypewriterEnabled = false
+    private var lineNumberCache: (
+        revision: UInt64,
+        length: Int,
+        starts: [Int]
+    )?
     /// The workspace's effective-root generation, captured into action
     /// targets so a project switch refuses a stale popover commit.
     var rootGenerationProvider: () -> UInt64 = { 0 }
+    /// Supplies the comment margin's markers. The workspace owns comment
+    /// state; the editor asks instead of keeping a second copy that could
+    /// drift.
+    var reviewMarkerProvider: (() -> [ReviewMarkerRulerView.Marker])?
+    var onReviewMarkerSelected: ((UUID) -> Void)?
+    /// Reports the viewport's reading anchor after a scroll. The split view
+    /// uses it to follow the source pane; nil elsewhere.
+    var onVisibleAnchorChange: ((SourceReadingAnchor) -> Void)?
+    /// Reports that this editor became the editing surface, so a
+    /// two-document split can route commands to its pane.
+    var onFocus: (() -> Void)?
+    /// Routes a link the source link popover opens, using the workspace's
+    /// routing so Source and Rendered cannot disagree.
+    var onOpenLocalLink: ((String) -> Void)?
+    var onOpenMediaLink: ((MediaReference) -> Void)?
+    /// A wiki target is not a path; the workspace resolves it by name.
+    var onOpenWikiLink: ((WikiLink) -> Void)?
     /// The document state when the current input-method composition began.
     private var compositionBaseline: CompositionBaseline?
     /// The action name for the edit currently being applied through the
@@ -59,6 +92,14 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
     private var suppressSync = false
     private var pendingCommands: [QueuedCommand] = []
+    /// A find-bar seed waiting for the view to gain a window.
+    private var pendingFindSeed: (query: String, offset: Int)?
+    /// A mount restore waiting for layout. An explicit navigation clears it.
+    private var pendingReadingAnchor: SourceReadingAnchor?
+    /// A reading anchor to reapply when an external reload replaces the
+    /// whole source. Captured before the replacement, consumed by the next
+    /// sync, and cleared by an explicit navigation.
+    private var pendingSourceReplacementAnchor: SourceReadingAnchor?
     private(set) var lastOutput: MarkdownParseOutput?
     private(set) var lastHighlightedRevision: UInt64?
 
@@ -96,7 +137,25 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         textView.onSmartPaste = { [weak self] in
             self?.smartPaste() ?? false
         }
+        textView.onInsertText = { [weak self] text, range in
+            self?.handleTyping(text, replacementRange: range) ?? false
+        }
         textView.delegate = self
+        reviewRulerView.clientView = textView
+        reviewRulerView.scrollView = scrollView
+        reviewRulerView.lineTop = { [weak self] offset in
+            self?.lineTop(offset: offset)
+        }
+        reviewRulerView.onSelect = { [weak self] id in
+            self?.onReviewMarkerSelected?(id)
+        }
+        reviewRulerView.visibleLines = { [weak self] in
+            self?.textView.visibleCodeLines() ?? []
+        }
+        reviewRulerView.lineNumberProvider = { [weak self] offset in
+            self?.lineNumber(at: offset)
+        }
+        reviewRulerView.showsLineNumbers = Preferences.markdownLineNumbers
         textView.string = document.source
         applyBaseAttributesOnly()
         parseObserverToken = parseCoordinator.addObserver(
@@ -104,6 +163,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         ) { [weak self] state in
             self?.handleParseState(state)
         }
+        // A coordinator that already parsed this revision (the editor was
+        // recreated for a mode switch) publishes nothing for a repeat
+        // request, so the new observer must read the current state once.
+        handleParseState(parseCoordinator.state(for: document.id))
+        isFocusModeEnabled = Preferences.markdownFocusMode
+        isTypewriterEnabled = Preferences.markdownTypewriter
         observeDocument()
         preferenceObserver = NotificationCenter.default.addObserver(
             forName: .sonovoEditorPreferencesChanged,
@@ -120,6 +185,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     func attach() {
         installScrollObserver()
         syncFromDocument()
+        refreshReviewMarkers()
     }
 
     isolated deinit {
@@ -134,6 +200,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     /// Stops consuming parse publications for this document.
     func detach() {
+        tablePopover?.close()
+        tablePopover = nil
+        tableSnapshot = nil
         if let parseObserverToken {
             parseCoordinator.removeObserver(parseObserverToken, for: document.id)
             self.parseObserverToken = nil
@@ -159,6 +228,10 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 height: CGFloat.greatestFiniteMagnitude
             )
         }
+        isFocusModeEnabled = Preferences.markdownFocusMode
+        isTypewriterEnabled = Preferences.markdownTypewriter
+        reviewRulerView.showsLineNumbers = Preferences.markdownLineNumbers
+        refreshReviewMarkers()
         applyBaseAttributesOnly()
         scheduleVisibleHighlight()
     }
@@ -189,6 +262,23 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.textContainer?.widthTracksTextView = wrap
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = false
+        scrollView.verticalRulerView = reviewRulerView
+    }
+
+    /// Recomputes the margin markers and shows the gutter only while at least
+    /// one thread is anchored. Called after comment edits, source edits, and
+    /// mount.
+    func refreshReviewMarkers() {
+        let markers = reviewMarkerProvider?() ?? []
+        reviewRulerView.commentMarkers = markers
+        let show = reviewRulerView.showsLineNumbers
+            || markers.contains(where: \.anchored)
+        if scrollView.rulersVisible != show {
+            scrollView.rulersVisible = show
+        }
+        reviewRulerView.needsDisplay = true
     }
 
     private func installScrollObserver() {
@@ -202,7 +292,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             queue: .main
         ) { _ in
             Task { @MainActor in
-                box.value?.scheduleVisibleHighlight()
+                guard let controller = box.value else { return }
+                controller.reviewRulerView.needsDisplay = true
+                controller.scheduleVisibleHighlight()
+                if let anchor = controller.readingAnchor() {
+                    controller.onVisibleAnchorChange?(anchor)
+                }
             }
         }
     }
@@ -249,6 +344,14 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// The decoration layers that are independent of the parse output.
     private var currentDecorations: MarkdownDecorationSet {
         var decorations = MarkdownDecorationSet()
+        if isFocusModeEnabled, let output = lastOutput {
+            decorations.focus = MarkdownFocus.decorations(
+                sourceLength: (textView.string as NSString).length,
+                caret: textView.selectedRange().location,
+                blocks: output.ast.blocks,
+                dim: NSColor(AppTheme.MarkdownChrome.Focus.dim)
+            )
+        }
         if let range = tableCellRange {
             decorations.cell = [
                 MarkdownDecoration(
@@ -331,7 +434,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             isInsideFence: MarkdownTypingPolicy.isInsideFence(
                 textView.string,
                 at: selection.lowerBound
-            )
+            ),
+            documentSource: textView.string
         )
         guard case let .insert(range, replacement, newSelection) =
             MarkdownPasteConverter.plan(input: input, selection: selection)
@@ -366,7 +470,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// Cmd+A expands to the next enclosing container. Selection-only: no
     /// undo entry is created.
     func smartSelectAll() -> Bool {
-        guard let output = lastOutput else { return false }
+        guard let output = lastOutput, output.revision == document.revision
+        else { return false }
         let selection = Range(textView.selectedRange()) ?? 0..<0
         guard let next = MarkdownSmartSelect.next(
             source: textView.string,
@@ -524,6 +629,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// mode switch.
     func syncFromDocument() {
         textView.isEditable = !document.isReadOnly
+        refreshReviewMarkers()
         if textView.hasMarkedText() {
             // A document update that cannot be applied mid-composition must
             // still be remembered, so the commit does not overwrite it.
@@ -547,11 +653,19 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
         resetTextToDocument()
         restoreSelection(selected)
+        if let anchor = pendingSourceReplacementAnchor {
+            pendingSourceReplacementAnchor = nil
+            restoreReadingAnchor(anchor)
+        }
         scheduleParse(immediate: true)
     }
 
     /// Copies the document source into the view without recording an edit.
     private func resetTextToDocument() {
+        // Diagnostics describe the replaced text; keeping them would let the
+        // next highlight paint ranges from the old source and let problem
+        // navigation jump to them.
+        lintDiagnostics = []
         suppressSync = true
         textView.string = document.source
         applyBaseAttributesOnly()
@@ -634,6 +748,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         clearLintDiagnostics()
         scheduleParse()
         flushPendingCommands()
+        refreshReviewMarkers()
+        keepCaretNearTypewriterLine()
     }
 
     /// Records the document state the current composition started from, once.
@@ -645,11 +761,89 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         )
     }
 
+    func textDidBeginEditing(_ notification: Notification) {
+        onFocus?()
+    }
+
     func textViewDidChangeSelection(_ notification: Notification) {
         if let range = Range(textView.selectedRange()) {
             document.selection = range
         }
         scheduleVisibleHighlight()
+        keepCaretNearTypewriterLine()
+    }
+
+    /// Keeps the caret's visual line near 40% of the viewport. A line already
+    /// within the jitter window does not move, and Reduce Motion falls back
+    /// to the minimal scroll instead of re-centering.
+    func keepCaretNearTypewriterLine() {
+        guard isTypewriterEnabled, !textView.hasMarkedText() else { return }
+        let caret = textView.selectedRange().location
+        // The caret may be offscreen after a programmatic move; lay its line
+        // out before measuring it.
+        textView.scrollRangeToVisible(NSRange(location: caret, length: 0))
+        guard let line = textView.visibleCodeLines()
+            .last(where: { $0.documentOffset <= caret }) else {
+            return
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            textView.scrollRangeToVisible(
+                NSRange(location: caret, length: 0)
+            )
+            return
+        }
+        let visible = scrollView.contentView.bounds
+        guard let target = MarkdownTypewriter.scrollTarget(
+            viewportMinY: visible.minY,
+            viewportHeight: visible.height,
+            caretLineTop: line.rect.minY
+        ) else {
+            return
+        }
+        let maximum = max(0, textView.bounds.height - visible.height)
+        let y = min(max(0, target), maximum)
+        scrollView.contentView.scroll(
+            to: NSPoint(x: visible.origin.x, y: y)
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        reviewRulerView.needsDisplay = true
+    }
+
+    /// The 1-based source line for a UTF-16 offset. The newline index is
+    /// rebuilt once per document revision, not once per ruler draw.
+    func lineNumber(at offset: Int) -> Int {
+        let revision = document.revision
+        let length = (textView.string as NSString).length
+        let starts: [Int]
+        if let cache = lineNumberCache,
+           cache.revision == revision,
+           cache.length == length {
+            starts = cache.starts
+        } else {
+            var built: [Int] = [0]
+            let ns = textView.string as NSString
+            if ns.length > 0 {
+                for index in 0..<ns.length
+                where ns.character(at: index) == 0x0A {
+                    built.append(index + 1)
+                }
+            }
+            lineNumberCache = (revision, length, built)
+            starts = built
+        }
+        var low = 0
+        var high = starts.count - 1
+        var found = 0
+        while low <= high {
+            let mid = (low + high) / 2
+            if starts[mid] <= offset {
+                found = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return found + 1
     }
 
     func undoManager(for view: NSTextView) -> UndoManager? {
@@ -754,6 +948,273 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
     }
 
+    /// The auto-pair entry point for ordinary typing. Marked text and command
+    /// chords never reach the policy; AppKit handles those insertions.
+    private func handleTyping(
+        _ inserted: String,
+        replacementRange: NSRange
+    ) -> Bool {
+        guard !textView.hasMarkedText() else { return false }
+        let selection: Range<Int>
+        if replacementRange.location == NSNotFound {
+            selection = Range(textView.selectedRange()) ?? 0..<0
+        } else {
+            selection = Range(replacementRange) ?? 0..<0
+        }
+        let plan = MarkdownTypingPolicy.typing(
+            source: textView.string,
+            selection: selection,
+            inserted: inserted,
+            chordModifierHeld: typingChordModifierHeld
+        )
+        return apply(plan, in: textView)
+    }
+
+    private var typingChordModifierHeld: Bool {
+        // Only the event being dispatched can say whether a chord modifier
+        // is held. `NSEvent.modifierFlags` reports the flags of the last
+        // event at any time, so a programmatic insert (paste, IME commit, a
+        // test) would inherit whatever modifiers the previous event used and
+        // skip pairing unpredictably.
+        guard let flags = NSApp.currentEvent?.modifierFlags else {
+            return false
+        }
+        return !flags.intersection([.command, .control, .option]).isEmpty
+    }
+
+    // MARK: - Table grid
+
+    /// Opens the inline table grid when the caret is inside a table.
+    func presentTablePopover() {
+        guard !document.isReadOnly else {
+            lastCommandError = DocumentError.readOnly
+            return
+        }
+        guard let window = textView.window else { return }
+        let selection = Range(textView.selectedRange()) ?? 0..<0
+        guard let snapshot = beginTableEditing(at: selection.lowerBound)
+        else {
+            lastCommandError = NSError(
+                domain: "Sonovo.TableGrid",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Place the caret in a table to edit it.",
+                ]
+            )
+            return
+        }
+        let cell = snapshot.cell(row: 0, column: 0).map {
+            $0.range.lowerBound..<$0.range.upperBound
+        } ?? snapshot.blockRange
+        let nsRange = NSRange(
+            location: cell.lowerBound,
+            length: cell.count
+        )
+        let screenRect = textView.firstRect(
+            forCharacterRange: nsRange,
+            actualRange: nil
+        )
+        var viewRect = textView.convert(
+            window.convertFromScreen(screenRect),
+            from: nil
+        )
+        if viewRect.isEmpty {
+            viewRect = NSRect(
+                x: viewRect.midX,
+                y: viewRect.midY,
+                width: AppTheme.MarkdownChrome.Popover.anchorSize,
+                height: AppTheme.MarkdownChrome.Popover.anchorSize
+            )
+        }
+        let controller = tablePopover ?? MarkdownTablePopoverController()
+        tablePopover = controller
+        controller.show(
+            snapshot: snapshot,
+            relativeTo: viewRect,
+            of: textView,
+            onSetCell: { [weak self] row, column, text in
+                self?.commitTableCell(
+                    row: row,
+                    column: column,
+                    text: text
+                ) ?? .refused("The table editor closed.")
+            },
+            onCommand: { [weak self] command, row, column in
+                self?.performTableCommand(
+                    command,
+                    row: row,
+                    column: column
+                ) ?? .refused("The table editor closed.")
+            },
+            onReload: { [weak self] in
+                self?.reloadTableSnapshot()
+                    ?? .refused("The table editor closed.")
+            },
+            onClose: { [weak self] in
+                self?.tablePopover = nil
+                self?.tableSnapshot = nil
+            }
+        )
+    }
+
+    /// Captures the table at `offset` for editing. Exposed so tests exercise
+    /// exactly what the popover does without mounting a window.
+    @discardableResult
+    func beginTableEditing(at offset: Int) -> MarkdownTableSnapshot? {
+        guard let snapshot = MarkdownTableGrid.snapshot(
+            at: offset,
+            in: textView.string
+        ) else {
+            tableSnapshot = nil
+            return nil
+        }
+        tableSnapshot = snapshot
+        tableSnapshotRevision = document.revision
+        return snapshot
+    }
+
+    func commitTableCell(
+        row: Int,
+        column: Int,
+        text: String
+    ) -> MarkdownTableGridOutcome {
+        guard let snapshot = tableSnapshot else {
+            return .refused("Open the table editor first.")
+        }
+        guard prepareTableCommit() else {
+            return .refused(
+                "The document changed since this table editor opened. "
+                    + "Reload it and try again."
+            )
+        }
+        do {
+            let edit = try MarkdownTableGrid.setContent(
+                text,
+                row: row,
+                column: column,
+                in: snapshot,
+                source: textView.string
+            )
+            return applyTableGridEdit(edit)
+        } catch {
+            return .refused(Self.tableGridMessage(error))
+        }
+    }
+
+    func performTableCommand(
+        _ command: MarkdownTableCommand,
+        row: Int,
+        column: Int
+    ) -> MarkdownTableGridOutcome {
+        guard let snapshot = tableSnapshot else {
+            return .refused("Open the table editor first.")
+        }
+        guard prepareTableCommit() else {
+            return .refused(
+                "The document changed since this table editor opened. "
+                    + "Reload it and try again."
+            )
+        }
+        do {
+            let edit = try MarkdownTableGrid.perform(
+                command,
+                row: row,
+                column: column,
+                in: snapshot,
+                source: textView.string
+            )
+            return applyTableGridEdit(edit)
+        } catch {
+            return .refused(Self.tableGridMessage(error))
+        }
+    }
+
+    func reloadTableSnapshot() -> MarkdownTableGridOutcome {
+        guard let snapshot = tableSnapshot else {
+            return .refused("Open the table editor first.")
+        }
+        if let relocated = MarkdownTableGrid.relocate(
+            snapshot,
+            in: textView.string
+        ) {
+            tableSnapshot = relocated
+            // The relocation was computed against the current revision;
+            // leaving the old revision here made every later commit refuse
+            // after an unrelated edit.
+            tableSnapshotRevision = document.revision
+            return .updated(relocated)
+        }
+        return .refused(
+            "The table changed. Close the editor and open it again."
+        )
+    }
+
+    private func applyTableGridEdit(
+        _ edit: MarkdownTableGridEdit
+    ) -> MarkdownTableGridOutcome {
+        let result = MarkdownCommandResult(
+            source: edit.source,
+            selection: edit.selection,
+            actionName: edit.actionName,
+            previousSource: textView.string
+        )
+        guard apply(result) else {
+            return .refused("The change could not be applied.")
+        }
+        guard let updated = MarkdownTableGrid.snapshot(
+            at: edit.blockRange.lowerBound,
+            in: textView.string
+        ) else {
+            return .refused("The table could not be read back.")
+        }
+        tableSnapshot = updated
+        tableSnapshotRevision = document.revision
+        lastCommandError = nil
+        return .updated(updated)
+    }
+
+    /// A commit must belong to the exact document revision the grid saw.
+    private func prepareTableCommit() -> Bool {
+        guard document.revision == tableSnapshotRevision else {
+            return false
+        }
+        if textView.string != document.source {
+            syncFromDocument()
+        }
+        return true
+    }
+
+    private static func tableGridMessage(_ error: Error) -> String {
+        switch error {
+        case MarkdownTableGridError.staleTable:
+            return "The table changed since this editor opened. "
+                + "Reload it and try again."
+        case MarkdownTableGridError.unknownCell:
+            return "That cell is not authored in the source. "
+                + "Add a column to give every row the cell."
+        case let MarkdownTableGridError.refused(reason):
+            switch reason {
+            case .headerRow:
+                return "The header row cannot be deleted."
+            case .lastRow:
+                return "The table must keep at least one body row."
+            case .lastColumn:
+                return "The table must keep at least one column."
+            case .malformedTable:
+                return "The table is malformed."
+            }
+        case MarkdownTableGridError.invalidTable:
+            return "The table could not be read."
+        case MarkdownTableGridError.notApplicable:
+            return "That command does not apply here."
+        case MarkdownTableGridError.noTable:
+            return "Place the caret in a table to edit it."
+        default:
+            return String(describing: error)
+        }
+    }
+
     // MARK: - Link popover
 
     /// Opens the link popover over the link at the caret. With no link there,
@@ -812,13 +1273,13 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             headings: output.headings.headings,
             relativeTo: viewRect,
             of: textView,
-            onCommit: { [weak self] values in
+            onCommit: { [weak self, weak controller] values in
                 self?.commitLink(values, target: target, action: actionTarget)
-                controller.close()
+                controller?.close()
             },
-            onRemove: { [weak self] in
+            onRemove: { [weak self, weak controller] in
                 self?.removeLink(target: target, action: actionTarget)
-                controller.close()
+                controller?.close()
             },
             onCopy: { destination in
                 NSPasteboard.general.clearContents()
@@ -827,19 +1288,61 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                     forType: .string
                 )
             },
-            onOpen: { destination in
-                guard let url = URL(string: destination),
-                      url.scheme != nil else {
-                    return
-                }
-                NSWorkspace.shared.open(url)
+            onOpen: { [weak self] destination in
+                self?.openLinkDestination(destination)
             },
-            onOpenDefinition: { [weak self] in
+            onOpenWiki: { [weak self, weak controller] link in
+                controller?.close()
+                self?.onOpenWikiLink?(link)
+            },
+            onOpenDefinition: { [weak self, weak controller] in
                 guard let range = target.definitionRange else { return }
                 self?.select(range: range)
-                controller.close()
+                controller?.close()
             }
         )
+    }
+
+    /// Routes the source popover's Open action through the same decision
+    /// model as the rendered viewer: external links confirm, local paths and
+    /// `sonovo:` media links use the workspace routing, and a fragment
+    /// reveals its heading in Source.
+    func openLinkDestination(_ destination: String) {
+        switch MarkdownLinkActivation.decide(destination) {
+        case .confirmBeforeOpening(let url):
+            ExternalLinkConfirmation.present(
+                ExternalLinkConfirmation.request(for: url)
+            )
+        case .openDirectly(.local):
+            onOpenLocalLink?(destination)
+        case .openDirectly(.media):
+            if let reference = MediaReference.parse(destination) {
+                onOpenMediaLink?(reference)
+            }
+        case .openDirectly(.fragment):
+            revealFragment(destination)
+        case .openDirectly(.external), .openDirectly(.mailto):
+            // `decide` maps both to `confirmBeforeOpening`; this arm keeps
+            // the switch exhaustive without a second route.
+            break
+        case .refused:
+            break
+        }
+    }
+
+    private func revealFragment(_ destination: String) {
+        let trimmed = destination.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard trimmed.hasPrefix("#") else { return }
+        let raw = String(trimmed.dropFirst())
+        let fragment = raw.removingPercentEncoding ?? raw
+        guard !fragment.isEmpty,
+              let entry = lastOutput?.headings.heading(forFragment: fragment),
+              let range = entry.range else {
+            return
+        }
+        select(range: range.lowerBound..<range.upperBound)
     }
 
     private func commitLink(
@@ -951,9 +1454,235 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     // MARK: - Commands and IME affinity
 
+    // MARK: - Reading anchor
+
+    /// The visible reading anchor: the line at the viewport's top edge, how
+    /// many points of it are above that edge, and the selection.
+    func readingAnchor() -> SourceReadingAnchor? {
+        let ns = textView.string as NSString
+        guard ns.length > 0 else { return nil }
+        let visible = scrollView.contentView.bounds
+        guard visible.height > 0 else { return nil }
+        let point = NSPoint(
+            x: textView.textContainerOrigin.x,
+            y: visible.minY
+        )
+        let index = textView.characterIndexForInsertion(at: point)
+        let clamped = min(max(index, 0), ns.length - 1)
+        let lineRange = ns.lineRange(
+            for: NSRange(location: clamped, length: 0)
+        )
+        guard let top = lineTop(offset: lineRange.location) else {
+            return nil
+        }
+        return SourceReadingAnchor(
+            lineOffset: lineRange.location,
+            viewportOffset: Double(visible.minY - top),
+            selection: Range(textView.selectedRange())
+        )
+    }
+
+    /// Scrolls the source pane so the line containing `offset` sits at the
+    /// top edge. Split scroll sync uses this; it changes no text, selection,
+    /// or undo entry.
+    func scrollToSourceOffset(_ offset: Int) {
+        let ns = textView.string as NSString
+        guard ns.length > 0 else { return }
+        let clamped = min(max(offset, 0), ns.length - 1)
+        // Lay out the line first; `lineTop` reads the fragment geometry.
+        textView.scrollRangeToVisible(
+            NSRange(location: clamped, length: min(1, ns.length - clamped))
+        )
+        guard let top = lineTop(offset: clamped) else { return }
+        let visible = scrollView.contentView.bounds
+        let maximum = max(0, textView.bounds.height - visible.height)
+        let target = min(max(0, top), maximum)
+        scrollView.contentView.scroll(
+            to: NSPoint(x: visible.origin.x, y: target)
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    /// Restores an anchor once the view has a window and a viewport. A later
+    /// explicit navigation (`select`, find-bar seeding) clears it, so a
+    /// deferred mount restore can never overwrite where the user just went.
+    func restoreReadingAnchorWhenMounted(_ anchor: SourceReadingAnchor) {
+        pendingReadingAnchor = anchor
+        schedulePendingReadingAnchor(attempt: 0)
+    }
+
+    private func schedulePendingReadingAnchor(attempt: Int) {
+        guard pendingReadingAnchor != nil else { return }
+        guard textView.window != nil,
+              scrollView.contentView.bounds.height > 0 else {
+            guard attempt < 6 else {
+                pendingReadingAnchor = nil
+                return
+            }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(16))
+                self?.schedulePendingReadingAnchor(attempt: attempt + 1)
+            }
+            return
+        }
+        guard let anchor = pendingReadingAnchor else { return }
+        pendingReadingAnchor = nil
+        restoreReadingAnchor(anchor)
+    }
+
+    /// Reapplies a captured reading anchor after an external reload replaces
+    /// the source. If the new text is already in the view, the anchor is
+    /// restored now; otherwise the next `syncFromDocument` consumes it.
+    func restoreReadingAnchorAfterSourceReplacement(
+        _ anchor: SourceReadingAnchor
+    ) {
+        if textView.string == document.source {
+            pendingSourceReplacementAnchor = nil
+            restoreReadingAnchor(anchor)
+        } else {
+            pendingSourceReplacementAnchor = anchor
+        }
+    }
+
+    /// Restores an anchor without changing the document or its undo history.
+    /// `scrollRangeToVisible` forces TextKit to lay out the line; the viewport
+    /// is then adjusted by the recorded offset and clamped to the document.
+    func restoreReadingAnchor(_ anchor: SourceReadingAnchor) {
+        guard let start = ReadingAnchorResolver.sourceLineStart(
+            for: anchor,
+            in: textView.string
+        ) else {
+            return
+        }
+        let ns = textView.string as NSString
+        if let selection = anchor.selection {
+            let location = min(max(selection.lowerBound, 0), ns.length)
+            let upper = min(max(location, selection.upperBound), ns.length)
+            textView.setSelectedRange(
+                NSRange(location: location, length: upper - location)
+            )
+        }
+        textView.scrollRangeToVisible(
+            NSRange(location: start, length: min(1, ns.length - start))
+        )
+        // An anchor at or past the end of the document names the final empty
+        // line, which has no fragment of its own: its position is simply the
+        // document's bottom.
+        let desired: CGFloat
+        if start < ns.length, let top = lineTop(offset: start) {
+            desired = max(0, top + CGFloat(anchor.viewportOffset))
+        } else if start >= ns.length {
+            desired = .greatestFiniteMagnitude
+        } else {
+            return
+        }
+        // TextKit refines the document height as the newly revealed viewport
+        // is laid out, so a scroll clamped to the current bottom can finish
+        // short of — or past — the settled end. Re-evaluate against the
+        // settled height; two passes reach it and the third bounds a layout
+        // that keeps reporting a new height.
+        for _ in 0..<3 {
+            let available = max(
+                0,
+                textView.bounds.height
+                    - scrollView.contentView.bounds.height
+            )
+            let target = min(desired, available)
+            scrollView.contentView.scroll(
+                to: NSPoint(
+                    x: scrollView.contentView.bounds.origin.x,
+                    y: target
+                )
+            )
+            textView.layoutSubtreeIfNeeded()
+            let settledAvailable = max(
+                0,
+                textView.bounds.height
+                    - scrollView.contentView.bounds.height
+            )
+            if min(desired, settledAvailable) == target {
+                break
+            }
+        }
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    /// The view-space y of the line fragment that starts at `offset`.
+    private func lineTop(offset: Int) -> CGFloat? {
+        guard let layout = textView.textLayoutManager,
+              let content = layout.textContentManager else {
+            return nil
+        }
+        layout.textViewportLayoutController.layoutViewport()
+        guard let location = content.location(
+            content.documentRange.location,
+            offsetBy: offset
+        ), let fragment = layout.textLayoutFragment(for: location) else {
+            return nil
+        }
+        return fragment.layoutFragmentFrame.minY
+            + textView.textContainerOrigin.y
+    }
+
+    // MARK: - Find bar seeding
+
+    /// Shows the source find bar seeded with `query`, with the occurrence at
+    /// `offset` selected. The text finder reads the search string from the
+    /// selection, so the view must be mounted before the actions run.
+    func seedFindBar(with query: String, at offset: Int) {
+        guard !query.isEmpty else { return }
+        pendingReadingAnchor = nil
+        pendingSourceReplacementAnchor = nil
+        pendingFindSeed = (query, offset)
+        schedulePendingFindSeed(attempt: 0)
+    }
+
+    private func schedulePendingFindSeed(attempt: Int) {
+        guard let pending = pendingFindSeed else { return }
+        guard textView.window != nil else {
+            guard attempt < 6 else {
+                pendingFindSeed = nil
+                return
+            }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(16))
+                self?.schedulePendingFindSeed(attempt: attempt + 1)
+            }
+            return
+        }
+        pendingFindSeed = nil
+        applyFindSeed(pending)
+    }
+
+    private func applyFindSeed(_ pending: (query: String, offset: Int)) {
+        let ns = textView.string as NSString
+        guard pending.offset >= 0, pending.offset <= ns.length else {
+            return
+        }
+        let length = min(
+            (pending.query as NSString).length,
+            ns.length - pending.offset
+        )
+        guard length > 0 else { return }
+        textView.setSelectedRange(
+            NSRange(location: pending.offset, length: length)
+        )
+        textView.window?.makeFirstResponder(textView)
+        // The standard text-finder actions, not a second finder: the bar owns
+        // its own state and the Find menu keeps working on it.
+        let set = NSMenuItem()
+        set.tag = NSTextFinder.Action.setSearchString.rawValue
+        textView.performTextFinderAction(set)
+        let show = NSMenuItem()
+        show.tag = NSTextFinder.Action.showFindInterface.rawValue
+        textView.performTextFinderAction(show)
+    }
+
     /// Select an exact UTF-16 range and reveal it. Used by Edit in Source;
     /// this changes no bytes and creates no undo entry.
     func select(range: Range<Int>) {
+        pendingReadingAnchor = nil
+        pendingSourceReplacementAnchor = nil
         let length = (textView.string as NSString).length
         guard range.lowerBound >= 0,
               range.upperBound <= length,
@@ -985,6 +1714,36 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                     mode: self.document.mode
                 )
                 let result = try self.registry.apply(command, to: context)
+                succeeded = self.apply(result)
+                self.lastCommandError = nil
+            } catch {
+                self.lastCommandError = error
+            }
+        }
+        return succeeded
+    }
+
+    /// Sets the authored `open` default of the details block enclosing
+    /// `offset`, through the same registry and undo stack as a source-mode
+    /// command. The offset is explicit because a rendered-viewer menu action
+    /// is not tied to the source selection.
+    @discardableResult
+    func setDetailsOpenDefault(open: Bool, at offset: Int) -> Bool {
+        guard !document.isReadOnly else { return false }
+        var succeeded = false
+        performCommand { [weak self] in
+            guard let self else { return }
+            do {
+                let context = MarkdownCommandContext(
+                    source: self.textView.string,
+                    selection: offset..<offset,
+                    isReadOnly: self.document.isReadOnly,
+                    hasMarkedText: self.textView.hasMarkedText()
+                )
+                let result = try self.registry.apply(
+                    .setDetailsOpen(open),
+                    to: context
+                )
                 succeeded = self.apply(result)
                 self.lastCommandError = nil
             } catch {
@@ -1050,6 +1809,21 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     private func apply(_ result: MarkdownCommandResult) -> Bool {
+        // A command that changes nothing must not register an undo step; an
+        // idempotent formatter run would otherwise fill the history with
+        // no-ops. The caret still moves to the command's selection.
+        if result.source == textView.string {
+            let nsSource = textView.string as NSString
+            let location = min(result.selection.lowerBound, nsSource.length)
+            let length = min(
+                result.selection.upperBound - result.selection.lowerBound,
+                nsSource.length - location
+            )
+            textView.setSelectedRange(
+                NSRange(location: location, length: length)
+            )
+            return true
+        }
         let old = textView.string as NSString
         let new = result.source as NSString
         let newRange = result.changedRange
@@ -1388,6 +2162,9 @@ final class MarkdownTextView: NSTextView {
     /// Returns true when the controller consumed the whole-document select.
     var onSmartSelectAll: (() -> Bool)?
     var onSmartPaste: (() -> Bool)?
+    /// Returns true when the controller handled the insertion as an auto-pair
+    /// or a skip-over; AppKit then inserts nothing.
+    var onInsertText: ((String, NSRange) -> Bool)?
     /// Returns true when the controller collapsed a smart selection.
     var onEscapeSelection: (() -> Bool)?
     private var dragHasImage = false
@@ -1406,6 +2183,14 @@ final class MarkdownTextView: NSTextView {
         if handleImage(from: NSPasteboard.general) { return }
         if onSmartPaste?() == true { return }
         super.paste(sender)
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if let text = string as? String,
+           onInsertText?(text, replacementRange) == true {
+            return
+        }
+        super.insertText(string, replacementRange: replacementRange)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
@@ -1483,6 +2268,128 @@ final class MarkdownTextView: NSTextView {
         }
         return false
     }
+
+    /// The viewport's rendered visual lines, in view coordinates. Shared by
+    /// the line-number ruler and typewriter mode, so a coordinate fix cannot
+    /// drift between them.
+    func visibleCodeLines() -> [CodeLineLayout] {
+        guard let layout = textLayoutManager,
+              let content = layout.textContentManager else {
+            return []
+        }
+        let inset = textContainerInset
+        let visible = visibleRect
+        layout.textViewportLayoutController.layoutViewport()
+        let viewportStart = layout.textViewportLayoutController
+            .viewportRange?.location
+        var lines: [CodeLineLayout] = []
+        layout.enumerateTextLayoutFragments(
+            from: viewportStart,
+            options: [.ensuresLayout]
+        ) { fragment in
+            let frame = fragment.layoutFragmentFrame
+            for line in fragment.textLineFragments {
+                let bounds = line.typographicBounds
+                let lineRect = NSRect(
+                    x: frame.minX + inset.width + bounds.minX,
+                    y: frame.minY + inset.height + bounds.minY,
+                    width: bounds.width,
+                    height: bounds.height
+                )
+                if lineRect.minY > visible.maxY {
+                    return false
+                }
+                guard lineRect.maxY >= visible.minY else {
+                    continue
+                }
+                let fragmentStart = content.offset(
+                    from: content.documentRange.location,
+                    to: fragment.rangeInElement.location
+                )
+                lines.append(
+                    CodeLineLayout(
+                        documentOffset: fragmentStart
+                            + line.characterRange.location,
+                        rect: lineRect,
+                        text: line.attributedString.string
+                    )
+                )
+            }
+            return true
+        }
+        return lines
+    }
+}
+
+// MARK: - Focus and typewriter
+
+/// Focus-mode decorations: everything outside the block containing the caret
+/// is dimmed. The compositor clips these ranges to the visible range and the
+/// lint layer still wins on its own keys.
+enum MarkdownFocus {
+    static func decorations(
+        sourceLength: Int,
+        caret: Int,
+        blocks: [Block],
+        dim: NSColor
+    ) -> [MarkdownDecoration] {
+        guard sourceLength >= 0,
+              caret >= 0,
+              caret <= sourceLength,
+              let block = blocks.first(where: { block in
+                  guard let range = block.range else { return false }
+                  return range.lowerBound <= caret
+                      && caret <= range.upperBound
+              }),
+              let range = block.range else {
+            return []
+        }
+        var decorations: [MarkdownDecoration] = []
+        if range.lowerBound > 0 {
+            decorations.append(
+                MarkdownDecoration(
+                    layer: .focus,
+                    range: NSRange(
+                        location: 0,
+                        length: min(range.lowerBound, sourceLength)
+                    ),
+                    attributes: [.foregroundColor: dim]
+                )
+            )
+        }
+        if range.upperBound < sourceLength {
+            decorations.append(
+                MarkdownDecoration(
+                    layer: .focus,
+                    range: NSRange(
+                        location: range.upperBound,
+                        length: sourceLength - range.upperBound
+                    ),
+                    attributes: [.foregroundColor: dim]
+                )
+            )
+        }
+        return decorations
+    }
+}
+
+/// Typewriter scroll arithmetic. Returning nil keeps the viewport still when
+/// the caret is already near the target, so typing does not jitter.
+enum MarkdownTypewriter {
+    static func scrollTarget(
+        viewportMinY: CGFloat,
+        viewportHeight: CGFloat,
+        caretLineTop: CGFloat,
+        jitter: CGFloat = AppTheme.MarkdownChrome.Typewriter.jitter,
+        centerFraction: CGFloat =
+            AppTheme.MarkdownChrome.Typewriter.centerFraction
+    ) -> CGFloat? {
+        guard viewportHeight > 0 else { return nil }
+        let target = viewportMinY + viewportHeight * centerFraction
+        let delta = caretLineTop - target
+        guard abs(delta) > jitter else { return nil }
+        return viewportMinY + delta
+    }
 }
 
 // MARK: - Formatting toolbar
@@ -1507,6 +2414,7 @@ struct MarkdownFormattingToolbar: View {
             BarIconButton(systemName: "curlybraces", help: "Inline Code") {
                 controller.perform(.toggleInlineCode)
             }
+            inlineExtrasMenu
 
             toolbarDivider
 
@@ -1520,6 +2428,30 @@ struct MarkdownFormattingToolbar: View {
 
             insertMenu
         }
+    }
+
+    private var inlineExtrasMenu: some View {
+        Menu {
+            Button("Highlight") {
+                controller.perform(.toggleHighlight)
+            }
+            Button("Underline") {
+                controller.perform(.toggleUnderline)
+            }
+            Button("Superscript") {
+                controller.perform(.toggleSuperscript)
+            }
+            Button("Subscript") {
+                controller.perform(.toggleSubscript)
+            }
+        } label: {
+            toolbarIcon("textformat")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Highlight and Script")
+        .accessibilityLabel("Highlight and Script")
     }
 
     private var headingMenu: some View {
@@ -1576,6 +2508,13 @@ struct MarkdownFormattingToolbar: View {
             }
             Button("Table of Contents") {
                 controller.perform(.insertTOC)
+            }
+            Divider()
+            Button("Table") {
+                controller.perform(.insertTable(rows: 2, columns: 2))
+            }
+            Button("Edit Table…") {
+                controller.presentTablePopover()
             }
             Divider()
             Button("Code Block") {
@@ -1891,7 +2830,7 @@ private struct MarkdownHighlighter {
             case let .paragraph(inlines, _):
                 applyInlines(
                     inlines,
-                    base: NSFont.systemFont(ofSize: baseSize),
+                    base: bodyFont,
                     bold: false,
                     italic: false,
                     storage
@@ -1925,6 +2864,27 @@ private struct MarkdownHighlighter {
                 for cell in table.header { applyInlines(cell.inlines, base: bodyFont, bold: false, italic: false, storage) }
                 for row in table.rows {
                     for cell in row { applyInlines(cell.inlines, base: bodyFont, bold: false, italic: false, storage) }
+                }
+            case let .definitionList(list, _):
+                for item in list.items {
+                    for term in item.terms {
+                        applyInlines(
+                            term.inlines,
+                            base: bodyFont,
+                            bold: true,
+                            italic: false,
+                            storage
+                        )
+                    }
+                    for definition in item.definitions {
+                        applyInlines(
+                            definition.inlines,
+                            base: bodyFont,
+                            bold: false,
+                            italic: false,
+                            storage
+                        )
+                    }
                 }
             case let .details(details, _):
                 applyInlines(details.summary, base: bodyFont, bold: false, italic: false, storage)
@@ -2094,6 +3054,13 @@ private struct MarkdownHighlighter {
                     add(.foregroundColor, accent, range, storage)
                     add(.underlineStyle, NSUnderlineStyle.single.rawValue, range, storage)
                 }
+            case let .footnoteReference(_, range):
+                if let range {
+                    add(.foregroundColor, accent, range, storage)
+                    add(.underlineStyle, NSUnderlineStyle.single.rawValue, range, storage)
+                }
+            case let .math(_, _, _, range):
+                if let range { add(.foregroundColor, secondary, range, storage) }
             case .softBreak, .lineBreak:
                 continue
             }
@@ -2160,15 +3127,47 @@ struct MarkdownSourceEditor: NSViewRepresentable {
     let document: MarkdownDocument
     var cache: MarkdownEditorCache?
     var parseCoordinator: MarkdownParseCoordinator?
+    /// Applied once, after the view is attached and laid out.
+    var readingAnchor: SourceReadingAnchor?
+    /// A source offset the split view wants revealed after a rendered scroll.
+    var scrollTargetOffset: Binding<Int?>?
+    var onVisibleAnchorChange: ((SourceReadingAnchor) -> Void)?
+    var onFocus: (() -> Void)?
+    var onOpenLocalLink: ((String) -> Void)?
+    var onOpenMediaLink: ((MediaReference) -> Void)?
+    /// A wiki target is not a path; the workspace resolves it by name.
+    var onOpenWikiLink: ((WikiLink) -> Void)?
 
     init(
         document: MarkdownDocument,
         cache: MarkdownEditorCache? = nil,
-        parseCoordinator: MarkdownParseCoordinator? = nil
+        parseCoordinator: MarkdownParseCoordinator? = nil,
+        readingAnchor: SourceReadingAnchor? = nil,
+        scrollTargetOffset: Binding<Int?>? = nil,
+        onVisibleAnchorChange: ((SourceReadingAnchor) -> Void)? = nil,
+        onFocus: (() -> Void)? = nil,
+        onOpenLocalLink: ((String) -> Void)? = nil,
+        onOpenMediaLink: ((MediaReference) -> Void)? = nil,
+        onOpenWikiLink: ((WikiLink) -> Void)? = nil
     ) {
         self.document = document
         self.cache = cache
         self.parseCoordinator = parseCoordinator
+        self.readingAnchor = readingAnchor
+        self.scrollTargetOffset = scrollTargetOffset
+        self.onVisibleAnchorChange = onVisibleAnchorChange
+        self.onFocus = onFocus
+        self.onOpenLocalLink = onOpenLocalLink
+        self.onOpenMediaLink = onOpenMediaLink
+        self.onOpenWikiLink = onOpenWikiLink
+    }
+
+    final class Coordinator {
+        var lastScrollTarget: Int?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -2180,6 +3179,14 @@ struct MarkdownSourceEditor: NSViewRepresentable {
             entry.scrollView.removeFromSuperview()
         }
         entry.controller.attach()
+        entry.controller.onVisibleAnchorChange = onVisibleAnchorChange
+        entry.controller.onFocus = onFocus
+        entry.controller.onOpenLocalLink = onOpenLocalLink
+        entry.controller.onOpenMediaLink = onOpenMediaLink
+        entry.controller.onOpenWikiLink = onOpenWikiLink
+        if let anchor = readingAnchor {
+            entry.controller.restoreReadingAnchorWhenMounted(anchor)
+        }
         return entry.scrollView
     }
 
@@ -2193,6 +3200,24 @@ struct MarkdownSourceEditor: NSViewRepresentable {
         // Never sync a controller into a view it does not own.
         guard nsView === entry.scrollView else { return }
         entry.controller.syncFromDocument()
+        entry.controller.onVisibleAnchorChange = onVisibleAnchorChange
+        entry.controller.onFocus = onFocus
+        entry.controller.onOpenLocalLink = onOpenLocalLink
+        entry.controller.onOpenMediaLink = onOpenMediaLink
+        entry.controller.onOpenWikiLink = onOpenWikiLink
+        guard let binding = scrollTargetOffset else { return }
+        guard let target = binding.wrappedValue else {
+            context.coordinator.lastScrollTarget = nil
+            return
+        }
+        guard target != context.coordinator.lastScrollTarget else { return }
+        context.coordinator.lastScrollTarget = target
+        entry.controller.scrollToSourceOffset(target)
+        DispatchQueue.main.async {
+            if binding.wrappedValue == target {
+                binding.wrappedValue = nil
+            }
+        }
     }
 
     private var resolvedCache: MarkdownEditorCache {

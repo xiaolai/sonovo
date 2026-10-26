@@ -276,11 +276,31 @@ public enum DetailsExpansionReconciler {
                 encodeList(row.map { canonical($0.inlines) })
             }.joined()
             return "t:\(alignments)\(header)\(rows)"
+        case let .definitionList(list, _):
+            return "dl:" + encodeList(list.items.map { item in
+                encodeList(item.terms.map { canonical($0.inlines) })
+                    + encodeList(
+                        item.definitions.map { canonical($0.inlines) }
+                    )
+            })
         case let .details(details, _):
             return "d:\(details.isOpen):" + canonical(details.summary)
                 + ":" + canonical(details.blocks)
         case .tableOfContents:
             return "toc"
+        case let .footnoteDefinition(label, _):
+            return "fd:\(label.utf8.count):\(label)"
+        case let .footnotes(section, _):
+            return "fn:" + encodeList(section.entries.map { entry in
+                let references = entry.referenceRanges.map {
+                    "\($0.lowerBound)-\($0.upperBound)"
+                }.joined(separator: ",")
+                return "\(entry.number):\(entry.label.utf8.count):"
+                    + "\(entry.label):\(entry.contentRange.lowerBound)-"
+                    + "\(entry.contentRange.upperBound):"
+                    + "\(references.utf8.count):\(references):"
+                    + canonical(entry.inlines)
+            })
         }
     }
 
@@ -322,6 +342,12 @@ public enum DetailsExpansionReconciler {
                 return "w:\(link.target.utf8.count):\(link.target):"
                     + "\(fragment.utf8.count):\(fragment):"
                     + "\(alias.utf8.count):\(alias)"
+            case let .footnoteReference(reference, _):
+                return "fr:\(reference.number):\(reference.label.utf8.count):"
+                    + reference.label
+            case let .math(tex, raw, display, _):
+                return "m:\(display ? 1 : 0):\(tex.utf8.count):\(tex):"
+                    + "\(raw.utf8.count):\(raw)"
             }
         }.joined(separator: "\u{1E}")
     }

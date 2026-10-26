@@ -6,6 +6,10 @@ public enum MarkdownCommandKind: Sendable, Equatable, Hashable {
     case toggleStrong
     case toggleInlineCode
     case toggleStrikethrough
+    case toggleHighlight
+    case toggleUnderline
+    case toggleSuperscript
+    case toggleSubscript
     case toggleHeading(level: Int)
     case toggleBlockQuote
     case toggleList(kind: MarkdownListKind)
@@ -44,6 +48,8 @@ public enum MarkdownCommandKind: Sendable, Equatable, Hashable {
     case toggleCase
     case trimTrailingSpaces
     case collapseBlankLines
+    /// Explicit CJK spacing and punctuation normalization.
+    case formatCJK
 }
 
 /// The list shapes a toggle can produce.
@@ -272,6 +278,10 @@ public struct MarkdownCommandRegistry: Sendable {
         case .toggleStrong: "Bold"
         case .toggleInlineCode: "Inline Code"
         case .toggleStrikethrough: "Strikethrough"
+        case .toggleHighlight: "Highlight"
+        case .toggleUnderline: "Underline"
+        case .toggleSuperscript: "Superscript"
+        case .toggleSubscript: "Subscript"
         case .toggleHeading(let level): "Heading \(level)"
         case .toggleBlockQuote: "Block Quote"
         case .toggleList(.bullet): "Bullet List"
@@ -315,6 +325,7 @@ public struct MarkdownCommandRegistry: Sendable {
         case .toggleCase: "Toggle Case"
         case .trimTrailingSpaces: "Remove Trailing Spaces"
         case .collapseBlankLines: "Collapse Blank Lines"
+        case .formatCJK: "Format CJK Spacing"
         }
     }
 
@@ -336,6 +347,30 @@ public struct MarkdownCommandRegistry: Sendable {
             return try toggleWrap("**", name: "Bold", context)
         case .toggleStrikethrough:
             return try toggleWrap("~~", name: "Strikethrough", context)
+        case .toggleHighlight:
+            return try toggleHTMLTag(
+                .mark,
+                name: title(for: command),
+                context
+            )
+        case .toggleUnderline:
+            return try toggleHTMLTag(
+                .underline,
+                name: title(for: command),
+                context
+            )
+        case .toggleSuperscript:
+            return try toggleHTMLTag(
+                .superscript,
+                name: title(for: command),
+                context
+            )
+        case .toggleSubscript:
+            return try toggleHTMLTag(
+                .subscriptTag,
+                name: title(for: command),
+                context
+            )
         case .toggleInlineCode:
             return try toggleInlineCode(context)
         case .toggleHeading(let level):
@@ -452,7 +487,27 @@ public struct MarkdownCommandRegistry: Sendable {
                 name: title(for: command),
                 context
             )
+        case .formatCJK:
+            return formatCJK(context)
         }
+    }
+
+    /// One whole-document replacement; the editor applies it as one undo
+    /// step named "Format CJK Spacing". Nothing is written when no rule
+    /// applies.
+    private func formatCJK(
+        _ context: MarkdownCommandContext
+    ) -> MarkdownCommandResult {
+        let formatted = MarkdownCJKFormatter.format(
+            source: context.source,
+            selection: context.selection
+        )
+        return MarkdownCommandResult(
+            source: formatted.source,
+            selection: formatted.selection,
+            actionName: "Format CJK Spacing",
+            previousSource: context.source
+        )
     }
 
     private func lineCommand(
@@ -644,6 +699,103 @@ public struct MarkdownCommandRegistry: Sendable {
     }
 
     // MARK: - Wrapping
+
+    /// Wraps or unwraps the selection in an allowlisted inline HTML pair.
+    ///
+    /// Unlike the delimiter form, the opening and closing sequences differ.
+    /// The three states mirror `toggleWrap`: no selection inserts an empty
+    /// pair, text already wrapped from the outside unwraps, and a selection
+    /// that includes both tags unwraps to its inner text.
+    private func toggleHTMLTag(
+        _ tag: MarkdownInlineHTMLTag,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let core = trimmedCore(ns, selection)
+        let open = tag.openTag as NSString
+        let close = tag.closeTag as NSString
+
+        if core.length == 0 {
+            let location = min(core.location, ns.length)
+            let source = ns.replacingCharacters(
+                in: NSRange(location: location, length: 0),
+                with: tag.openTag + tag.closeTag
+            )
+            return result(
+                source,
+                selection: NSRange(
+                    location: location + open.length,
+                    length: 0
+                ),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        let beforeStart = core.location - open.length
+        if beforeStart >= 0,
+           core.location + core.length + close.length <= ns.length,
+           ns.substring(
+               with: NSRange(location: beforeStart, length: open.length)
+           ) == (open as String),
+           ns.substring(
+               with: NSRange(
+                   location: core.location + core.length,
+                   length: close.length
+               )
+           ) == (close as String) {
+            let mutable = NSMutableString(string: context.source)
+            mutable.deleteCharacters(
+                in: NSRange(
+                    location: core.location + core.length,
+                    length: close.length
+                )
+            )
+            mutable.deleteCharacters(
+                in: NSRange(location: beforeStart, length: open.length)
+            )
+            return result(
+                mutable as String,
+                selection: NSRange(location: beforeStart, length: core.length),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        if core.length >= open.length + close.length {
+            let slice = ns.substring(with: core)
+            if slice.hasPrefix(tag.openTag), slice.hasSuffix(tag.closeTag) {
+                let inner = ns.substring(
+                    with: NSRange(
+                        location: core.location + open.length,
+                        length: core.length - open.length - close.length
+                    )
+                )
+                return result(
+                    ns.replacingCharacters(in: core, with: inner),
+                    selection: NSRange(
+                        location: core.location,
+                        length: (inner as NSString).length
+                    ),
+                    name: name,
+                    previous: context.source
+                )
+            }
+        }
+
+        let wrapped = tag.openTag + ns.substring(with: core) + tag.closeTag
+        return result(
+            ns.replacingCharacters(in: core, with: wrapped),
+            selection: NSRange(
+                location: core.location + open.length,
+                length: core.length
+            ),
+            name: name,
+            previous: context.source
+        )
+    }
 
     private func toggleWrap(
         _ marker: String,

@@ -18,6 +18,10 @@ public enum MarkdownCommandCatalog {
         entry(.toggleStrong, "Format"),
         entry(.toggleInlineCode, "Format"),
         entry(.toggleStrikethrough, "Format"),
+        entry(.toggleHighlight, "Format"),
+        entry(.toggleUnderline, "Format"),
+        entry(.toggleSuperscript, "Format"),
+        entry(.toggleSubscript, "Format"),
         entry(.toggleHeading(level: 1), "Heading"),
         entry(.toggleHeading(level: 2), "Heading"),
         entry(.toggleHeading(level: 3), "Heading"),
@@ -62,6 +66,7 @@ public enum MarkdownCommandCatalog {
         entry(.toggleCase, "Case"),
         entry(.trimTrailingSpaces, "Lines"),
         entry(.collapseBlankLines, "Lines"),
+        entry(.formatCJK, "Text"),
         entry(.setDetailsOpen(true), "Details"),
         entry(.setDetailsOpen(false), "Details")
     ]

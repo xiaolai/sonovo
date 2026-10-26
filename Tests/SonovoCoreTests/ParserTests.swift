@@ -345,6 +345,36 @@ struct ParserTests {
         })
     }
 
+    @Test("An escaped ampersand in a destination stays literal")
+    func escapedAmpersandInDestination() throws {
+        // Decoding escapes before entities turned `\&copy;` into `©`, so an
+        // unchanged definition changed meaning on the next parse.
+        let source = "[ref]: /a\\&copy;\n\n[ref]\n"
+        let parsed = MarkdownParser.parseCanonical(source)
+        let definition = try #require(parsed.ast.referenceDefinitions.first)
+        #expect(definition.destination == "/a&copy;")
+
+        let line = ReferenceDefinitionSerializer.line(definition)
+        #expect(line == "[ref]: /a&amp;copy;")
+        let reparsed = MarkdownParser.parseCanonical(line + "\n\n[ref]\n")
+        #expect(
+            reparsed.ast.referenceDefinitions.first?.destination
+                == "/a&copy;"
+        )
+    }
+
+    @Test("An escaped ampersand in a title stays literal")
+    func escapedAmpersandInTitle() throws {
+        let source = "[ref]: /target \"a \\&copy; b\"\n\n[ref]\n"
+        let parsed = MarkdownParser.parseCanonical(source)
+        let definition = try #require(parsed.ast.referenceDefinitions.first)
+        #expect(definition.title == "a &copy; b")
+
+        let line = ReferenceDefinitionSerializer.line(definition)
+        let reparsed = MarkdownParser.parseCanonical(line + "\n\n[ref]\n")
+        #expect(reparsed.ast.referenceDefinitions.first?.title == "a &copy; b")
+    }
+
     @Test("Scheme autolinks require a non-empty authority")
     func autolinkAuthority() {
         let parsed = MarkdownParser.parseCanonical(

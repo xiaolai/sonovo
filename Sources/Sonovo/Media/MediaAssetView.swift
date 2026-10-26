@@ -178,6 +178,7 @@ struct MediaAssetView: View {
         .padding(AppTheme.Spacing.lg)
         .task(id: asset.id) {
             loadSource()
+            consumePendingSeek()
         }
         .onChange(of: mode) { _, next in
             if next == .edit {
@@ -188,6 +189,12 @@ struct MediaAssetView: View {
         }
         .onChange(of: playback.state) { _, state in
             handlePlaybackState(state)
+            if state == .ready {
+                consumePendingSeek()
+            }
+        }
+        .onChange(of: project?.pendingMediaSeek) { _, _ in
+            consumePendingSeek()
         }
         .onChange(of: playback.elapsed) { _, _ in
             followPlayhead()
@@ -625,6 +632,18 @@ struct MediaAssetView: View {
         }
         .padding(AppTheme.Spacing.lg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Applies a `sonovo:` link's one-shot request once the player can seek.
+    /// A link without a time only opens the media.
+    private func consumePendingSeek() {
+        guard let project,
+              playback.state == .ready,
+              let seek = project.takeMediaSeek(for: asset),
+              let seconds = seek.seconds else {
+            return
+        }
+        Task { await playback.seek(to: seconds) }
     }
 
     private func loadSource() {

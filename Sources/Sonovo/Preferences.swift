@@ -9,6 +9,9 @@ enum PreferenceKey {
     static let editorFontSize = "sonovo.editorFontSize"
     static let showBreadcrumbs = "sonovo.showBreadcrumbs"
     static let wrapLines = "sonovo.wrapLines"
+    static let markdownFocusMode = "sonovo.markdownFocusMode"
+    static let markdownTypewriter = "sonovo.markdownTypewriter"
+    static let markdownLineNumbers = "sonovo.markdownLineNumbers"
     static let audioDevice = "sonovo.audioDevice"
     static let followPlayhead = "sonovo.followPlayhead"
     static let captionsDefault = "sonovo.captionsDefault"
@@ -59,6 +62,18 @@ enum Preferences {
 
     static var wrapLines: Bool {
         bool(PreferenceKey.wrapLines, default: true)
+    }
+
+    static var markdownFocusMode: Bool {
+        bool(PreferenceKey.markdownFocusMode, default: false)
+    }
+
+    static var markdownTypewriter: Bool {
+        bool(PreferenceKey.markdownTypewriter, default: false)
+    }
+
+    static var markdownLineNumbers: Bool {
+        bool(PreferenceKey.markdownLineNumbers, default: false)
     }
 
     static var followPlayhead: Bool {

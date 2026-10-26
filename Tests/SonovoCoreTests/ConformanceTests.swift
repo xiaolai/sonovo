@@ -223,11 +223,38 @@ enum ConformanceProjection {
                 children.append(rowNode)
             }
             node["children"] = children
+        case let .definitionList(list, _):
+            node["children"] = list.items.flatMap { item in
+                item.terms.map { term in
+                    var child = base(
+                        kind: "definition_term",
+                        range: term.range
+                    )
+                    child["children"] = term.inlines.map(projectInline)
+                    return child
+                } + item.definitions.map { definition in
+                    var child = base(
+                        kind: "definition_definition",
+                        range: definition.range
+                    )
+                    child["children"] = definition.inlines.map(projectInline)
+                    return child
+                }
+            }
         case let .details(details, _):
             node["detailsOpen"] = details.isOpen
             node["children"] = details.blocks.map { projectBlock($0, context: context) }
         case .tableOfContents:
             node["children"] = [Any]()
+        case let .footnoteDefinition(label, _):
+            node["literal"] = label
+        case let .footnotes(section, _):
+            node["children"] = section.entries.map { entry in
+                var child = base(kind: "footnote", range: entry.contentRange)
+                child["literal"] = entry.number
+                child["children"] = entry.inlines.map(projectInline)
+                return child
+            }
         }
 
         return node
@@ -277,6 +304,11 @@ enum ConformanceProjection {
             node["literal"] = value
         case let .wikiLink(link, _):
             node["literal"] = link.display
+        case let .footnoteReference(reference, _):
+            node["literal"] = "\(reference.number)"
+            node["footnoteLabel"] = reference.label
+        case let .math(source, _, _, _):
+            node["literal"] = source
         }
 
         return node
@@ -292,8 +324,11 @@ enum ConformanceProjection {
         case .htmlBlock: "html_block"
         case .thematicBreak: "thematic_break"
         case .table: "table"
+        case .definitionList: "definition_list"
         case .details: "details"
         case .tableOfContents: "table_of_contents"
+        case .footnoteDefinition: "footnote_definition"
+        case .footnotes: "footnotes"
         }
     }
 
@@ -317,6 +352,8 @@ enum ConformanceProjection {
         case .image: "image"
         case .inlineHTML: "html_inline"
         case .wikiLink: "wiki_link"
+        case .footnoteReference: "footnote_reference"
+        case .math: "math"
         }
     }
 

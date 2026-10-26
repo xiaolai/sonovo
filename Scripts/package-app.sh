@@ -25,9 +25,10 @@ Scripts/build.sh "${build_flags[@]}"
 products=".build/out/Products/Release"
 binary="$products/Sonovo"
 resources="$products/Sonovo_Sonovo.bundle"
+math_resources="$products/SwiftMath_SwiftMath.bundle"
 icon_source="Sources/Sonovo/Resources/AppIcon.png"
 entitlements="Scripts/Sonovo.entitlements"
-for required in "$binary" "$resources" "$icon_source" "$entitlements"; do
+for required in "$binary" "$resources" "$math_resources" "$icon_source" "$entitlements"; do
     [[ -e "$required" ]] || { echo "missing $required" >&2; exit 1; }
 done
 
@@ -38,7 +39,17 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 cp "$binary" "$app/Contents/MacOS/Sonovo"
 cp -R "$resources" "$app/Contents/Resources/"
+cp -R "$math_resources" "$app/Contents/Resources/"
 printf 'APPL????' > "$app/Contents/PkgInfo"
+
+# SwiftMath's font bundle is resolved through Bundle.module from the app's
+# resource directory, and its font loader force-unwraps the result. A bundle
+# without the fonts would crash on the first formula, so fail the build.
+math_fonts="$app/Contents/Resources/SwiftMath_SwiftMath.bundle/Contents/Resources/mathFonts.bundle"
+[[ -d "$math_fonts" ]] || {
+    echo "bundle is missing SwiftMath's mathFonts.bundle" >&2
+    exit 1
+}
 
 # A bundle without the xterm-ghostty entry starts every shell with a
 # database that does not exist; fail the build rather than ship it.
@@ -47,6 +58,65 @@ terminfo_entry="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/
     echo "bundle is missing the xterm-ghostty terminfo entry" >&2
     exit 1
 }
+
+# Mermaid is inlined into the diagram renderer; a missing or truncated script
+# silently turns every diagram into a code block. Fail the build instead.
+mermaid_script="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/mermaid-12.2.0.min.js"
+[[ -f "$mermaid_script" ]] || {
+    echo "bundle is missing the Mermaid script" >&2
+    exit 1
+}
+mermaid_bytes="$(wc -c < "$mermaid_script" | tr -d '[:space:]')"
+[[ "$mermaid_bytes" -ge 5000000 ]] || {
+    echo "Mermaid script looks truncated: $mermaid_bytes bytes" >&2
+    exit 1
+}
+
+# The Graphviz and Markmap bundles are inlined the same way; a missing or
+# truncated file would silently turn those fences into code blocks.
+for diagram_engine in "viz-global-3.31.0.min.js:1000000" "markmap-0.18.12.min.js:500000"; do
+    file_name="${diagram_engine%%:*}"
+    minimum="${diagram_engine##*:}"
+    diagram_script="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/$file_name"
+    [[ -f "$diagram_script" ]] || {
+        echo "bundle is missing $file_name" >&2
+        exit 1
+    }
+    diagram_bytes="$(wc -c < "$diagram_script" | tr -d '[:space:]')"
+    [[ "$diagram_bytes" -ge "$minimum" ]] || {
+        echo "$file_name looks truncated: $diagram_bytes bytes" >&2
+        exit 1
+    }
+done
+
+# The MDX compiler and its React runtime are inlined into the preview page;
+# a missing or truncated file would silently disable every MDX preview.
+for mdx_resource in \
+    "mdx-compiler-3.1.1.js:600000" \
+    "mdx-runtime-19.3.1.js:150000"; do
+    file_name="${mdx_resource%%:*}"
+    minimum="${mdx_resource##*:}"
+    mdx_script="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/$file_name"
+    [[ -f "$mdx_script" ]] || {
+        echo "bundle is missing $file_name" >&2
+        exit 1
+    }
+    mdx_bytes="$(wc -c < "$mdx_script" | tr -d '[:space:]')"
+    [[ "$mdx_bytes" -ge "$minimum" ]] || {
+        echo "$file_name looks truncated: $mdx_bytes bytes" >&2
+        exit 1
+    }
+done
+
+# The compiler runs in its own process. Without the helper, every preview
+# would report a configuration error instead of compiling, so fail the build.
+helper_product="$products/SonovoMDXHelper"
+[[ -x "$helper_product" ]] || {
+    echo "missing $helper_product" >&2
+    exit 1
+}
+mkdir -p "$app/Contents/Helpers"
+cp "$helper_product" "$app/Contents/Helpers/SonovoMDXHelper"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -91,6 +161,10 @@ case "$sign_mode" in
     *) echo "SONOVO_PACKAGE_SIGN must be adhoc or none" >&2; exit 2 ;;
 esac
 if [ "$sign_mode" = adhoc ]; then
+    # Nested code is signed first; signing the app records the helper in its
+    # seal, so a replaced helper fails verification.
+    codesign --force --sign - --timestamp=none \
+        "$app/Contents/Helpers/SonovoMDXHelper" > /dev/null
     codesign --force --sign - --timestamp=none \
         --entitlements "$entitlements" "$app" > /dev/null
     codesign --verify --strict "$app"

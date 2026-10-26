@@ -68,4 +68,19 @@ struct MarkdownRenderedSearchTests {
         #expect(texts.contains { $0.contains("a b") || $0.contains("1") })
         #expect(texts.contains { $0.contains("inside") })
     }
+
+    @Test("Formula source is not visible searchable text")
+    func mathIsNotSearchable() {
+        let texts = blocks("Before $\\frac{a}{b}$ after.\n")
+        #expect(texts.count == 1)
+        #expect(texts[0].contains("Before"))
+        #expect(texts[0].contains("after"))
+        #expect(!texts[0].contains("frac"))
+        #expect(
+            MarkdownRenderedSearch.matches(
+                query: "frac",
+                blocks: texts
+            ).isEmpty
+        )
+    }
 }

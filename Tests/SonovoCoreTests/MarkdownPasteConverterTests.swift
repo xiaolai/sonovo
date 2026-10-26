@@ -102,15 +102,18 @@ struct MarkdownPasteConverterTests {
         )
     }
 
-    @Test("HTML alone stays plain until the F0.8b gate passes")
-    func htmlFallsBackToPlain() {
+    @Test("HTML alone converts now that the clipboard corpus passes")
+    func htmlConverts() {
         let input = MarkdownPasteInput(
             flavors: [.html("<p>Hello <b>world</b></p>")],
             selectionText: ""
         )
-        #expect(
+        guard case let .insert(_, replacement, _) =
             MarkdownPasteConverter.plan(input: input, selection: 0..<0)
-                == .plain
-        )
+        else {
+            Issue.record("HTML paste did not convert")
+            return
+        }
+        #expect(replacement == "Hello **world**\n")
     }
 }

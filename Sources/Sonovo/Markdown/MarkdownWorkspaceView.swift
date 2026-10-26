@@ -5,6 +5,31 @@ import SwiftUI
 /// conflict and close flows.
 struct MarkdownWorkspaceView: View {
     @Bindable var workspace: MarkdownWorkspace
+    /// Project-aware availability for `sonovo:` media links. The document
+    /// URL is the pane's own, so a relative link resolves against the file
+    /// that displays it, not whichever pane has focus.
+    var mediaReferenceState: ((MediaReference, URL?) -> MediaReferenceState)?
+    var onOpenMedia: ((MediaReference, URL?) -> Void)?
+
+    init(workspace: MarkdownWorkspace) {
+        _workspace = Bindable(workspace)
+    }
+
+    /// A workspace hosted by a project resolves and opens `sonovo:` media
+    /// links through the project's assets, so the rendered availability and
+    /// the click route can never disagree.
+    init(project: Project) {
+        _workspace = Bindable(project.markdown)
+        mediaReferenceState = { reference, documentURL in
+            project.mediaAsset(
+                for: reference,
+                documentURL: documentURL
+            ) == nil ? .missing : .available
+        }
+        onOpenMedia = { reference, documentURL in
+            project.openMediaReference(reference, documentURL: documentURL)
+        }
+    }
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.zero) {
@@ -13,8 +38,8 @@ struct MarkdownWorkspaceView: View {
                 Divider()
             }
 
-            if let document = workspace.selectedDocument {
-                editorPage(document)
+            if let primary = workspace.primaryDocument {
+                paneLayout(primary)
                     .padding(AppTheme.Spacing.lg)
             } else {
                 emptyState
@@ -33,6 +58,16 @@ struct MarkdownWorkspaceView: View {
                 MarkdownReviewView(document: document, workspace: workspace)
             }
         }
+        .sheet(isPresented: $workspace.isProposalVisible) {
+            if let preview = workspace.proposalPreview,
+               let document = workspace.selectedDocument {
+                MarkdownProposalView(
+                    preview: preview,
+                    document: document,
+                    workspace: workspace
+                )
+            }
+        }
         .sheet(isPresented: $workspace.isQuickOpenVisible) {
             MarkdownQuickOpenView(
                 workspace: workspace,
@@ -49,6 +84,44 @@ struct MarkdownWorkspaceView: View {
         // The unsaved-changes alert lives on the window root. This view is
         // mounted only while the Markdown tab is selected, so an alert here
         // would never appear when termination starts from an audio tab.
+    }
+
+    // MARK: - Panes
+
+    /// One or two document surfaces. The second pane is either absent or a
+    /// different document; duplicate documents are focused, never cloned.
+    private func paneLayout(_ primary: MarkdownDocument) -> some View {
+        HStack(spacing: AppTheme.Spacing.zero) {
+            editorPage(primary)
+                .overlay(paneFocusBorder(primary))
+                .simultaneousGesture(
+                    TapGesture().onEnded { workspace.focus(primary) }
+                )
+            if let secondary = workspace.secondaryDocument {
+                Divider()
+                editorPage(secondary)
+                    .overlay(paneFocusBorder(secondary))
+                    .simultaneousGesture(
+                        TapGesture().onEnded { workspace.focus(secondary) }
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func paneFocusBorder(_ document: MarkdownDocument) -> some View {
+        if workspace.secondaryDocument != nil,
+           workspace.focusedDocument?.id == document.id {
+            RoundedRectangle(
+                cornerRadius: AppTheme.Radius.surface,
+                style: .continuous
+            )
+            .strokeBorder(
+                Color.accentColor,
+                lineWidth: AppTheme.BorderWidth.hairline
+            )
+        }
     }
 
     // MARK: - Editor page
@@ -88,6 +161,13 @@ struct MarkdownWorkspaceView: View {
             HStack(spacing: AppTheme.Spacing.zero) {
                 documentContent(document)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if workspace.reviewComments.isVisible {
+                    Divider()
+                    MarkdownCommentsView(
+                        document: document,
+                        workspace: workspace
+                    )
+                }
                 if workspace.isOutlineVisible {
                     Divider()
                     MarkdownOutlinePanel(
@@ -133,7 +213,7 @@ struct MarkdownWorkspaceView: View {
     /// window's tab bar, so this strip never repeats it.
     private func editorToolbar(_ document: MarkdownDocument) -> some View {
         HStack(spacing: AppTheme.Spacing.xs) {
-            documentMenu
+            documentMenu(document)
 
             if document.isReadOnly {
                 Label("Read-only", systemImage: "lock")
@@ -159,6 +239,7 @@ struct MarkdownWorkspaceView: View {
             .buttonStyle(.plain)
             .help("Outline")
             Button {
+                workspace.focus(document)
                 workspace.isHistoryVisible = true
             } label: {
                 Image(systemName: "clock.arrow.circlepath")
@@ -166,28 +247,78 @@ struct MarkdownWorkspaceView: View {
             .buttonStyle(.plain)
             .help("Version History")
             Button {
+                workspace.focus(document)
                 workspace.isReviewVisible = true
             } label: {
                 Image(systemName: "eye")
             }
             .buttonStyle(.plain)
             .help("Review Observed Changes")
+            Button {
+                workspace.focus(document)
+                workspace.reviewComments.isVisible.toggle()
+            } label: {
+                HStack(spacing: AppTheme.Spacing.xxs) {
+                    Image(systemName: "text.bubble")
+                    let count = workspace.reviewComments
+                        .openCount(for: document)
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(
+                                .system(
+                                    size: AppTheme.TypeScale.xxs,
+                                    weight: .medium
+                                )
+                            )
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Comments")
+            .accessibilityLabel(
+                "Comments, \(workspace.reviewComments.openCount(for: document)) open"
+            )
+            Button {
+                workspace.focus(document)
+                workspace.presentProposal(for: document)
+            } label: {
+                Image(systemName: "arrow.triangle.branch")
+            }
+            .buttonStyle(.plain)
+            .help("Review Proposal")
+            .accessibilityLabel("Review proposal")
+            secondPaneMenu(document)
+            if workspace.secondaryDocument?.id == document.id {
+                Button {
+                    workspace.closeSplitPane()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .help("Close Pane")
+                .accessibilityLabel("Close Pane")
+            }
+            splitControls(document)
             modePicker(document)
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
         .frame(height: AppTheme.Layout.tabBarHeight)
     }
 
-    private var documentMenu: some View {
+    private func documentMenu(_ document: MarkdownDocument) -> some View {
         Menu {
             if !workspace.documents.isEmpty {
                 Section("Open Documents") {
-                    ForEach(workspace.documents) { document in
+                    ForEach(workspace.documents) { candidate in
                         Button {
-                            workspace.select(document)
+                            workspace.show(
+                                candidate,
+                                inPane: workspace.pane(of: document)
+                                    ?? .primary
+                            )
                         } label: {
                             Text(
-                                document.fileURL?.lastPathComponent
+                                candidate.fileURL?.lastPathComponent
                                     ?? "Untitled"
                             )
                         }
@@ -195,22 +326,32 @@ struct MarkdownWorkspaceView: View {
                 }
                 Divider()
             }
-            Button("New Document") { workspace.newDocument() }
-            Button("Open…") { workspace.presentOpenPanel() }
-            Button("Open Folder…") { workspace.presentOpenFolderPanel() }
+            Button("New Document") {
+                workspace.focus(document)
+                workspace.newDocument()
+            }
+            Button("Open…") {
+                workspace.focus(document)
+                workspace.presentOpenPanel()
+            }
+            Button("Open Folder…") {
+                workspace.focus(document)
+                workspace.presentOpenFolderPanel()
+            }
             Divider()
             Button("Save") {
+                workspace.focus(document)
                 Task { await workspace.saveSelected() }
             }
-            .disabled(!(workspace.selectedDocument?.isDirty ?? false))
+            .disabled(!document.isDirty)
             Button("Save As…") {
+                workspace.focus(document)
                 Task { await workspace.saveSelectedAs() }
             }
-            if let document = workspace.selectedDocument {
-                Divider()
-                Button("Close Document") {
-                    Task { await workspace.close(document) }
-                }
+            Divider()
+            Button("Close Document") {
+                workspace.focus(document)
+                Task { await workspace.close(document) }
             }
         } label: {
             Image(systemName: "doc.on.doc")
@@ -253,7 +394,10 @@ struct MarkdownWorkspaceView: View {
                 "Mode",
                 selection: Binding(
                     get: { document.mode },
-                    set: { document.mode = $0 }
+                    set: {
+                        workspace.setSplitView(false, for: document)
+                        workspace.setMode($0, for: document)
+                    }
                 )
             ) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
@@ -268,6 +412,84 @@ struct MarkdownWorkspaceView: View {
             .fixedSize()
             .help("Source or Rendered")
             .accessibilityLabel("Source or Rendered")
+        }
+    }
+
+    @ViewBuilder
+    private func secondPaneMenu(_ document: MarkdownDocument) -> some View {
+        if workspace.secondaryDocument == nil {
+            let candidates = workspace.documents.filter {
+                $0.id != document.id
+            }
+            if !candidates.isEmpty {
+                Menu {
+                    ForEach(candidates) { candidate in
+                        Button(
+                            candidate.fileURL?.lastPathComponent
+                                ?? "Untitled"
+                        ) {
+                            workspace.show(candidate, inPane: .secondary)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Open a Second Document Pane")
+                .accessibilityLabel("Open a second document pane")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func splitControls(_ document: MarkdownDocument) -> some View {
+        if !document.isSourceOnly, workspace.secondaryDocument == nil {
+            Button {
+                workspace.toggleSplitView(for: document)
+            } label: {
+                Image(systemName: "rectangle.split.2x1")
+                    .foregroundStyle(
+                        workspace.isSplitView(document)
+                            ? Color.accentColor : Color.primary
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(
+                workspace.isSplitView(document)
+                    ? "Close Split View"
+                    : "Split Source and Rendered"
+            )
+            .accessibilityLabel("Split Source and Rendered")
+            .accessibilityValue(
+                workspace.isSplitView(document) ? "On" : "Off"
+            )
+
+            if workspace.isSplitView(document) {
+                Button {
+                    workspace.isSplitScrollSynced.toggle()
+                } label: {
+                    Image(systemName: "link")
+                        .foregroundStyle(
+                            workspace.isSplitScrollSynced
+                                ? Color.accentColor : Color.secondary
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(
+                    workspace.splitSyncRefusalReason(for: document) != nil
+                )
+                .help(
+                    workspace.splitSyncRefusalReason(for: document)
+                        ?? (workspace.isSplitScrollSynced
+                            ? "Turn Scroll Sync Off"
+                            : "Turn Scroll Sync On")
+                )
+                .accessibilityLabel("Scroll Sync")
+                .accessibilityValue(
+                    workspace.isSplitScrollSynced ? "On" : "Off"
+                )
+            }
         }
     }
 
@@ -345,29 +567,72 @@ struct MarkdownWorkspaceView: View {
 
     @ViewBuilder
     private func documentContent(_ document: MarkdownDocument) -> some View {
-        // A persisted `.rendered` mode from before the document was known to
-        // be large must not reach the parser.
-        switch document.isSourceOnly ? .source : document.mode {
-        case .source:
-            VStack(spacing: AppTheme.Spacing.zero) {
-                MarkdownFrontmatterPanel(
-                    document: document,
-                    workspace: workspace
-                )
-                MarkdownSourceEditor(
-                    document: document,
-                    cache: workspace.editorCache,
-                    parseCoordinator: workspace.parseCoordinator
-                )
+        if workspace.isSplitView(document) {
+            HStack(spacing: AppTheme.Spacing.zero) {
+                sourceContent(document)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                renderedContent(document)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .id(document.id)
-        case .rendered:
-            MarkdownRenderedDocumentView(
+        } else {
+            // A persisted `.rendered` mode from before the document was
+            // known to be large must not reach the parser.
+            switch document.isSourceOnly ? .source : document.mode {
+            case .source:
+                sourceContent(document)
+                    .id(document.id)
+            case .rendered:
+                renderedContent(document)
+                    .id(document.id)
+            }
+        }
+    }
+
+    private func sourceContent(_ document: MarkdownDocument) -> some View {
+        VStack(spacing: AppTheme.Spacing.zero) {
+            MarkdownFrontmatterPanel(
                 document: document,
                 workspace: workspace
             )
-            .id(document.id)
+            MarkdownSourceEditor(
+                document: document,
+                cache: workspace.editorCache,
+                parseCoordinator: workspace.parseCoordinator,
+                readingAnchor: workspace.sourceReadingAnchor(for: document),
+                scrollTargetOffset: Binding(
+                    get: { workspace.sourceScrollTargets[document.id] },
+                    set: { workspace.sourceScrollTargets[document.id] = $0 }
+                ),
+                onVisibleAnchorChange: { anchor in
+                    workspace.sourceDidScroll(anchor, in: document)
+                },
+                onFocus: {
+                    workspace.focus(document)
+                },
+                onOpenLocalLink: { path in
+                    Task {
+                        await workspace.openLocalLink(path, from: document)
+                    }
+                },
+                onOpenMediaLink: onOpenMedia.map { handler in
+                    { reference in handler(reference, document.fileURL) }
+                },
+                onOpenWikiLink: { link in
+                    Task { await workspace.openWikiLink(link, in: document) }
+                }
+            )
         }
+    }
+
+    private func renderedContent(_ document: MarkdownDocument) -> some View {
+        MarkdownRenderedDocumentView(
+            document: document,
+            workspace: workspace,
+            mediaReferenceState: mediaReferenceState,
+            onOpenMedia: onOpenMedia
+        )
     }
 
     private var emptyState: some View {
@@ -458,14 +723,18 @@ struct MarkdownWorkspaceView: View {
 
 // MARK: - Frontmatter
 
-/// A collapsed marker that expands into a raw text editor over exactly the
-/// frontmatter range. It never parses or rewrites the YAML.
+/// A collapsed marker that expands into a read-only production summary and a
+/// raw text editor over exactly the frontmatter range. Only the editor
+/// writes; the summary never rewrites a byte of the source.
 private struct MarkdownFrontmatterPanel: View {
     let document: MarkdownDocument
     let workspace: MarkdownWorkspace
 
     @State private var expanded = false
     @State private var text = ""
+    /// The frontmatter slice as last loaded, so a revision elsewhere in the
+    /// document does not look like a frontmatter change.
+    @State private var loadedSlice = ""
 
     private var frontmatter: Frontmatter? {
         if case .ready(let output) = workspace.parseCoordinator
@@ -504,8 +773,15 @@ private struct MarkdownFrontmatterPanel: View {
             .buttonStyle(.plain)
             .padding(.horizontal, AppTheme.Spacing.md)
             .padding(.vertical, AppTheme.Spacing.xs)
+            .accessibilityLabel("Frontmatter")
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(
+                expanded ? "Collapses the frontmatter editor"
+                    : "Shows the production fields and frontmatter source"
+            )
 
             if expanded {
+                productionFields
                 TextEditor(text: $text)
                     .font(
                         .system(
@@ -517,10 +793,14 @@ private struct MarkdownFrontmatterPanel: View {
                         height: AppTheme.MarkdownChrome.Frontmatter.height
                     )
                     .padding(.horizontal, AppTheme.Spacing.md)
+                    .accessibilityLabel("Frontmatter source")
                     .onExitCommand { load(sourceRange) }
                 HStack {
                     Spacer()
                     Button("Revert") { load(sourceRange) }
+                        .accessibilityHint(
+                            "Reloads the text from the document"
+                        )
                     Button("Commit") {
                         workspace.commitFrontmatter(
                             document,
@@ -529,6 +809,9 @@ private struct MarkdownFrontmatterPanel: View {
                         )
                         expanded = false
                     }
+                    .accessibilityHint(
+                        "Writes the frontmatter as one undoable edit"
+                    )
                     .keyboardShortcut(.return, modifiers: [.command])
                 }
                 .padding(AppTheme.Spacing.md)
@@ -536,22 +819,108 @@ private struct MarkdownFrontmatterPanel: View {
         }
         .background(AppTheme.MarkdownChrome.Popover.background)
         .onChange(of: document.revision) { _, _ in
-            if expanded { load(sourceRange) }
+            guard expanded else { return }
+            // Reload only when the authored frontmatter itself changed. A
+            // body edit earlier in the document shifts nothing here, and
+            // reloading on every revision silently discarded the draft.
+            let current = slice(sourceRange)
+            if current != loadedSlice { load(sourceRange) }
         }
     }
 
     private func load(_ range: Range<Int>) {
+        loadedSlice = slice(range)
+        text = loadedSlice
+    }
+
+    private func slice(_ range: Range<Int>) -> String {
         let ns = document.source as NSString
         guard range.lowerBound >= 0,
               range.upperBound <= ns.length else {
-            return
+            return ""
         }
-        text = ns.substring(
+        return ns.substring(
             with: NSRange(
                 location: range.lowerBound,
                 length: range.upperBound - range.lowerBound
             )
         )
+    }
+
+    /// A read-only summary of the documented production keys. It sits above
+    /// the raw editor and never writes: the editor remains the only path
+    /// that changes the frontmatter, so unknown keys, comments, order,
+    /// anchors, and block scalars are preserved exactly.
+    @ViewBuilder
+    private var productionFields: some View {
+        let model = ProductionFrontmatter(body: frontmatter?.body ?? "")
+        if !model.fields.isEmpty || !model.diagnostics.isEmpty {
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xxs) {
+                Grid(
+                    alignment: .leading,
+                    horizontalSpacing: AppTheme.Spacing.sm,
+                    verticalSpacing: AppTheme.Spacing.xxs
+                ) {
+                    ForEach(model.fields) { field in
+                        GridRow {
+                            Text(field.key.displayName)
+                                .font(.system(size: AppTheme.TypeScale.xs))
+                                .foregroundStyle(
+                                    AppTheme.Palette.secondaryLabel
+                                )
+                            HStack(spacing: AppTheme.Spacing.xxs) {
+                                Text(displayValue(field))
+                                    .font(.system(size: AppTheme.TypeScale.sm))
+                                    .foregroundStyle(
+                                        field.isDuplicate
+                                            ? AppTheme.Palette.warning
+                                            : Color.primary
+                                    )
+                                    .lineLimit(2)
+                                if field.isDuplicate {
+                                    Image(
+                                        systemName:
+                                            "exclamationmark.triangle.fill"
+                                    )
+                                    .font(
+                                        .system(size: AppTheme.TypeScale.xs)
+                                    )
+                                    .foregroundStyle(
+                                        AppTheme.Palette.warning
+                                    )
+                                }
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(fieldLabel(field))
+                    }
+                }
+                ForEach(model.diagnostics) { diagnostic in
+                    Text(diagnostic.message)
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(AppTheme.Palette.warning)
+                        .accessibilityLabel(diagnostic.message)
+                }
+            }
+            .padding(.horizontal, AppTheme.Spacing.md)
+            .padding(.bottom, AppTheme.Spacing.xs)
+        }
+    }
+
+    private func displayValue(
+        _ field: ProductionFrontmatter.Field
+    ) -> String {
+        field.displayValue.isEmpty ? "—" : field.displayValue
+    }
+
+    private func fieldLabel(
+        _ field: ProductionFrontmatter.Field
+    ) -> String {
+        let value = field.displayValue.isEmpty ? "empty" : field.displayValue
+        if field.isDuplicate {
+            return "\(field.key.displayName): \(value), duplicate key"
+        }
+        return "\(field.key.displayName): \(value)"
     }
 }
 
@@ -560,6 +929,8 @@ private struct MarkdownFrontmatterPanel: View {
 private struct MarkdownRenderedDocumentView: View {
     let document: MarkdownDocument
     let workspace: MarkdownWorkspace
+    let mediaReferenceState: ((MediaReference, URL?) -> MediaReferenceState)?
+    let onOpenMedia: ((MediaReference, URL?) -> Void)?
 
     @State private var parseTimedOut = false
 
@@ -576,19 +947,12 @@ private struct MarkdownRenderedDocumentView: View {
             .lastSuccessfulOutput(for: document.id)
     }
 
-    @AppStorage(PreferenceKey.readingTheme) private var readingThemeID = "paper"
-    @AppStorage(PreferenceKey.readingBodySize) private var readingBodySize = 0.0
-    @AppStorage(PreferenceKey.readingMeasure) private var readingMeasure = 0.0
     @AppStorage(PreferenceKey.readingThemeRevision) private var readingThemeRevision = 0
 
     private var readingTheme: MarkdownTheme {
         // Read the revision so a Settings reload invalidates this body.
         _ = readingThemeRevision
-        return MarkdownThemeStore.shared.theme(id: readingThemeID)
-            .withOverrides(
-                bodySize: readingBodySize,
-                measure: readingMeasure
-            )
+        return MarkdownReadingSettings.currentTheme()
     }
 
     /// Two documents can share a revision number. Keying the task only by
@@ -613,8 +977,18 @@ private struct MarkdownRenderedDocumentView: View {
                     wikiLinkState: { link in
                         workspace.wikiState(for: link, in: document)
                     },
+                    mediaReferenceState: mediaReferenceState.map { handler in
+                        { reference in
+                            handler(reference, document.fileURL)
+                        }
+                    },
                     onOpenWikiLink: { link in
                         Task { await workspace.openWikiLink(link, in: document) }
+                    },
+                    onOpenMedia: onOpenMedia.map { handler in
+                        { reference in
+                            handler(reference, document.fileURL)
+                        }
                     },
                     onOpenLocalLink: { path in
                         Task {
@@ -630,13 +1004,39 @@ private struct MarkdownRenderedDocumentView: View {
                             )
                         }
                     },
+                    onSetDetailsOpen: document.isReadOnly ? nil : { range, open in
+                        workspace.setDetailsOpenDefault(
+                            at: range,
+                            expectedSource: output.parsed.source,
+                            open: open,
+                            in: document
+                        )
+                    },
+                    source: output.parsed.source,
+                    onCommitBlockEdit: document.isReadOnly ? nil : {
+                        range, expectedSlice, replacement in
+                        workspace.commitBlockEdit(
+                            range: range,
+                            expectedSlice: expectedSlice,
+                            replacement: replacement,
+                            in: document
+                        )
+                    },
                     scrollTarget: Binding(
                         get: { workspace.scrollTargets[document.id] },
                         set: { workspace.scrollTargets[document.id] = $0 }
                     ),
-                    lintDiagnostics: workspace.lintResults[document.id]?
-                        .diagnostics ?? [],
-                    find: workspace.renderedFind
+                    restoreAnchor: Binding(
+                        get: { workspace.pendingRenderedAnchors[document.id] },
+                        set: { workspace.pendingRenderedAnchors[document.id] = $0 }
+                    ),
+                    onReadingAnchorChange: { anchor in
+                        workspace.renderedDidScroll(anchor, in: document)
+                    },
+                    lintDiagnostics: workspace.lintDiagnostics(for: document),
+                    find: workspace.renderedFind(for: document),
+                    isFocusedPane: workspace.secondaryDocument == nil
+                        || workspace.focusedDocument?.id == document.id
                 )
             } else if parseTimedOut {
                 Text(
@@ -707,6 +1107,7 @@ private struct MarkdownCommandPaletteView: View {
 
     @State private var query = ""
     @State private var selected = 0
+    @FocusState private var fieldFocused: Bool
 
     private let registry = MarkdownCommandRegistry()
 
@@ -726,7 +1127,14 @@ private struct MarkdownCommandPaletteView: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: AppTheme.TypeScale.sm))
                 .padding(AppTheme.Spacing.md)
+                .focused($fieldFocused)
+                .accessibilityLabel("Command search")
                 .onSubmit { executeSelected() }
+                .onChange(of: query) {
+                    // A narrower list can leave the old row index past the
+                    // end, which made Enter do nothing.
+                    selected = 0
+                }
             Divider()
             ScrollViewReader { proxy in
                 ScrollView {
@@ -756,6 +1164,7 @@ private struct MarkdownCommandPaletteView: View {
             onClose()
             return .handled
         }
+        .onAppear { fieldFocused = true }
     }
 
     private func row(index: Int) -> some View {
@@ -782,6 +1191,9 @@ private struct MarkdownCommandPaletteView: View {
         }
         .buttonStyle(.plain)
         .id(index)
+        .accessibilityLabel(registry.title(for: entry.command))
+        .accessibilityValue(entry.category)
+        .accessibilityHint("Runs this command")
     }
 
     private func executeSelected() {
@@ -836,6 +1248,7 @@ private struct MarkdownOutlinePanel: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: AppTheme.TypeScale.xs))
                 .padding(AppTheme.Spacing.sm)
+                .accessibilityLabel("Filter headings")
             Divider()
             if rows.isEmpty {
                 Text("No headings")
@@ -874,6 +1287,11 @@ private struct MarkdownOutlinePanel: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(row.text)
+        .accessibilityValue(
+            row.scrollID == activeID ? "Current section" : ""
+        )
+        .accessibilityHint("Scrolls to this heading")
     }
 }
 
@@ -893,9 +1311,14 @@ private struct MarkdownQuickOpenView: View {
 
     @State private var mode: Mode = .open
     @State private var query = ""
+    /// The query the current `matches` were produced by. The field stays
+    /// editable while results are shown, so reading it at click time would
+    /// seed Find with text the results never matched.
+    @State private var submittedQuery = ""
     @State private var matches: [CodeSearchMatch] = []
     @State private var searching = false
     @State private var searchGeneration = 0
+    @FocusState private var fieldFocused: Bool
 
     private var entries: [MarkdownQuickOpenEntry] {
         MarkdownQuickOpen.filter(
@@ -916,6 +1339,12 @@ private struct MarkdownQuickOpenView: View {
 
             TextField("Search", text: $query)
                 .textFieldStyle(.roundedBorder)
+                .focused($fieldFocused)
+                .accessibilityLabel(
+                    mode == .open
+                        ? "Search documents"
+                        : "Search file contents"
+                )
                 .onSubmit { submit() }
 
             if mode == .find, searching {
@@ -940,6 +1369,7 @@ private struct MarkdownQuickOpenView: View {
         .frame(width: AppTheme.MarkdownChrome.PaletteChrome.width)
         .frame(height: AppTheme.MarkdownChrome.PaletteChrome.height)
         .background(AppTheme.MarkdownChrome.PaletteChrome.background)
+        .onAppear { fieldFocused = true }
     }
 
     private func quickRow(_ entry: MarkdownQuickOpenEntry) -> some View {
@@ -960,6 +1390,9 @@ private struct MarkdownQuickOpenView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(entry.title)
+        .accessibilityValue(entry.kind == .tab ? "Open tab" : entry.relativePath)
+        .accessibilityHint("Opens this document")
     }
 
     private func searchRow(_ match: CodeSearchMatch) -> some View {
@@ -967,7 +1400,8 @@ private struct MarkdownQuickOpenView: View {
             workspace.openResult(
                 url: match.url,
                 line: match.line,
-                column: match.column
+                column: match.column,
+                query: submittedQuery
             )
             onClose()
         } label: {
@@ -985,6 +1419,9 @@ private struct MarkdownQuickOpenView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(match.relativePath), line \(match.line)")
+        .accessibilityValue(match.preview)
+        .accessibilityHint("Opens the match in Source")
     }
 
     private func submit() {
@@ -995,6 +1432,7 @@ private struct MarkdownQuickOpenView: View {
             }
         case .find:
             let query = query
+            submittedQuery = query
             searchGeneration += 1
             let generation = searchGeneration
             searching = true
@@ -1076,15 +1514,21 @@ private struct MarkdownHistoryView: View {
                     records = await workspace.historyRecords(for: document)
                 }
             }
+            .accessibilityLabel("Restore snapshot from \(timestamp(record))")
             Button("Delete") {
                 Task {
                     await workspace.deleteSnapshot(record)
                     records = await workspace.historyRecords(for: document)
                 }
             }
+            .accessibilityLabel("Delete snapshot from \(timestamp(record))")
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.xs)
+    }
+
+    private func timestamp(_ record: MarkdownSnapshotRecord) -> String {
+        record.capturedAt.formatted(date: .abbreviated, time: .standard)
     }
 }
 
@@ -1150,6 +1594,9 @@ private struct MarkdownReviewView: View {
                     )
                 }
             }
+            .accessibilityLabel(
+                "Keep change observed \(observed(transition))"
+            )
             Button("Revert") {
                 Task {
                     await workspace.revertTransition(
@@ -1161,8 +1608,15 @@ private struct MarkdownReviewView: View {
                     )
                 }
             }
+            .accessibilityLabel(
+                "Revert change observed \(observed(transition))"
+            )
         }
         .padding(.horizontal, AppTheme.Spacing.sm)
         .padding(.vertical, AppTheme.Spacing.xs)
+    }
+
+    private func observed(_ transition: MarkdownReviewTransition) -> String {
+        transition.observedAt.formatted(date: .abbreviated, time: .standard)
     }
 }

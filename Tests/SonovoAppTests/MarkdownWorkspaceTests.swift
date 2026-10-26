@@ -12,6 +12,29 @@ final class MarkdownWorkspaceTests: XCTestCase {
         return url
     }
 
+    private func sourceRange(_ offsets: Range<Int>) -> SourceRange {
+        SourceRange(
+            start: SourcePosition(
+                line: 1,
+                column: offsets.lowerBound,
+                offset: offsets.lowerBound
+            ),
+            end: SourcePosition(
+                line: 1,
+                column: offsets.upperBound,
+                offset: offsets.upperBound
+            )
+        )
+    }
+
+    private func searchField(in view: NSView) -> NSSearchField? {
+        if let field = view as? NSSearchField { return field }
+        for subview in view.subviews {
+            if let field = searchField(in: subview) { return field }
+        }
+        return nil
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2,
         _ condition: @MainActor () -> Bool
@@ -41,6 +64,111 @@ final class MarkdownWorkspaceTests: XCTestCase {
         XCTAssertEqual(document.source, "**abc**")
         XCTAssertEqual(controller.textView.string, "**abc**")
         XCTAssertTrue(document.isDirty)
+    }
+
+    func testDetailsDefaultRoutesThroughTheCommandRegistry() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("details.md")
+        let source = "<details><summary>S</summary>\n\nbody\n</details>\n"
+        try Data(source.utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        let document = try XCTUnwrap(workspace.open(url: url))
+        document.mode = .rendered
+        let range = sourceRange(0..<((source as NSString).length - 1))
+
+        workspace.setDetailsOpenDefault(
+            at: range,
+            expectedSource: source,
+            open: true,
+            in: document
+        )
+        XCTAssertTrue(document.source.hasPrefix("<details open>"))
+        XCTAssertEqual(
+            workspace.controller(for: document).textView.string,
+            document.source
+        )
+
+        let opened = document.source
+        workspace.setDetailsOpenDefault(
+            at: range,
+            expectedSource: opened,
+            open: false,
+            in: document
+        )
+        XCTAssertTrue(document.source.hasPrefix("<details>"))
+        XCTAssertNil(workspace.lastError)
+    }
+
+    func testDetailsDefaultRefusesAChangedBlock() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("details.md")
+        let source = "<details><summary>S</summary>\n\nbody\n</details>\n"
+        try Data(source.utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        let document = try XCTUnwrap(workspace.open(url: url))
+        let range = sourceRange(0..<((source as NSString).length - 1))
+        try document.replaceSource(
+            "<details><summary>S</summary>\n\nchanged\n</details>\n"
+        )
+        let changed = document.source
+
+        workspace.setDetailsOpenDefault(
+            at: range,
+            expectedSource: source,
+            open: true,
+            in: document
+        )
+        XCTAssertEqual(document.source, changed)
+        XCTAssertNotNil(workspace.lastError)
+    }
+
+    func testRenderedAnchorsAreHandedBackOnRestore() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("read.md")
+        try Data("# A\n\nbody\n".utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        let document = try XCTUnwrap(workspace.open(url: url))
+        document.mode = .rendered
+        let anchor = RenderedReadingAnchor(
+            blockOffset: 0,
+            blockKind: .heading,
+            fraction: 0.4
+        )
+        workspace.recordRenderedAnchor(anchor, for: document)
+        workspace.restoreReadingPosition(for: document)
+        XCTAssertEqual(workspace.pendingRenderedAnchors[document.id], anchor)
+
+        // The viewer clears the anchor after it restores.
+        workspace.pendingRenderedAnchors[document.id] = nil
+        XCTAssertNil(workspace.pendingRenderedAnchors[document.id])
+    }
+
+    func testModeSwitchCapturesTheSourceSelection() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("selection.md")
+        try Data("hello world\n".utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        let document = try XCTUnwrap(workspace.open(url: url))
+        document.mode = .source
+        let controller = workspace.controller(for: document)
+        controller.textView.setSelectedRange(NSRange(location: 2, length: 4))
+        // The source view's delegate owns this in production; a view without
+        // a window has no delegate callbacks.
+        document.selection = 2..<6
+        workspace.setMode(.rendered, for: document)
+        XCTAssertEqual(document.mode, .rendered)
+
+        document.selection = 0..<0
+        workspace.setMode(.source, for: document)
+        XCTAssertEqual(document.selection, 2..<6)
     }
 
     func testSaveRecordsAHistorySnapshot() async throws {
@@ -314,6 +442,71 @@ final class MarkdownWorkspaceTests: XCTestCase {
         XCTAssertNil(document.conflict)
     }
 
+    func testReloadRestoresTheSourceReadingPosition() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        let lines = (0..<300)
+            .map { "line \($0) of the reload fixture" }
+            .joined(separator: "\n")
+        try Data((lines + "\n").utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        workspace.open(url: url)
+        let document = try XCTUnwrap(workspace.selectedDocument)
+        try document.replaceSource(lines + "\nlocal edit\n")
+        document.mode = .source
+
+        let controller = workspace.controller(for: document)
+        controller.syncFromDocument()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = controller.scrollView
+        controller.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 320
+        )
+        window.layoutIfNeeded()
+        controller.textView.layoutSubtreeIfNeeded()
+
+        let ns = document.source as NSString
+        let target = ns.range(of: "line 200").location
+        controller.select(range: target..<target)
+        controller.textView.layoutSubtreeIfNeeded()
+        let anchor = try XCTUnwrap(controller.readingAnchor())
+        XCTAssertGreaterThan(anchor.lineOffset, 0)
+
+        let shorter = (0..<40)
+            .map { "line \($0) of the shorter fixture" }
+            .joined(separator: "\n") + "\n"
+        try Data(shorter.utf8).write(to: url)
+        let conflicted = await waitUntil { document.conflict != nil }
+        XCTAssertTrue(conflicted)
+
+        workspace.reload(document)
+        XCTAssertEqual(document.source, shorter)
+        controller.syncFromDocument()
+        controller.textView.layoutSubtreeIfNeeded()
+
+        let maximum = max(
+            0,
+            controller.textView.bounds.height
+                - controller.scrollView.contentView.bounds.height
+        )
+        XCTAssertGreaterThan(maximum, 0)
+        XCTAssertEqual(
+            controller.scrollView.contentView.bounds.origin.y,
+            maximum,
+            accuracy: 2
+        )
+    }
+
     func testEditInSourceSelectsTheExactRange() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -356,6 +549,114 @@ final class MarkdownWorkspaceTests: XCTestCase {
             NSRange(location: startOffset, length: endOffset - startOffset)
         )
         XCTAssertNil(workspace.lastError)
+    }
+
+    func testOpenResultSelectsTheReportedUTF16Column() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        let source = "hello world\n"
+        try Data(source.utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        workspace.open(url: url)
+        let document = try XCTUnwrap(workspace.selectedDocument)
+        let controller = workspace.controller(for: document)
+
+        workspace.openResult(url: url, line: 1, column: 7)
+        XCTAssertEqual(
+            controller.textView.selectedRange(),
+            NSRange(location: 6, length: 0)
+        )
+    }
+
+    func testOpenResultMapsAstralCharactersBeforeTheColumn() throws {
+        // U+1F600 is one Character but two UTF-16 units, and project search
+        // reports UTF-16 columns. Counting the column in Characters lands
+        // inside the match instead of on its first character.
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        let source = "😀😀 value-60\n"
+        try Data(source.utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        workspace.open(url: url)
+        let document = try XCTUnwrap(workspace.selectedDocument)
+        let controller = workspace.controller(for: document)
+
+        workspace.openResult(url: url, line: 1, column: 6)
+        XCTAssertEqual(
+            controller.textView.selectedRange(),
+            NSRange(location: 5, length: 0)
+        )
+    }
+
+    func testSearchScopeSeparatesCodeFromMarkdown() {
+        XCTAssertTrue(CodeSearchScope.markdown.includes("doc.md"))
+        XCTAssertTrue(CodeSearchScope.markdown.includes("DOC.MARKDOWN"))
+        XCTAssertFalse(CodeSearchScope.markdown.includes("main.swift"))
+        XCTAssertTrue(CodeSearchScope.code.includes("main.swift"))
+        XCTAssertFalse(CodeSearchScope.code.includes("doc.md"))
+    }
+
+    func testFindInFilesReturnsTheOpenDocument() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data("value-60\n".utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        workspace.setWorkspaceRoot(directory)
+        workspace.open(url: url)
+        _ = try XCTUnwrap(workspace.selectedDocument)
+
+        let result = await workspace.findInFiles("value-60")
+        let search = try XCTUnwrap(result)
+        let match = try XCTUnwrap(search.matches.first)
+        XCTAssertEqual(
+            match.url.standardizedFileURL.path,
+            url.standardizedFileURL.path
+        )
+        XCTAssertEqual(match.line, 1)
+        XCTAssertEqual(match.column, 1)
+    }
+
+    func testOpenResultSeedsTheSourceFindBarOnTheMatch() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        let source = "hello world\n"
+        try Data(source.utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        workspace.open(url: url)
+        let document = try XCTUnwrap(workspace.selectedDocument)
+        let controller = workspace.controller(for: document)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = controller.scrollView
+        controller.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: 480,
+            height: 320
+        )
+        window.layoutIfNeeded()
+
+        workspace.openResult(url: url, line: 1, column: 7, query: "world")
+        XCTAssertEqual(
+            controller.textView.selectedRange(),
+            NSRange(location: 6, length: 5)
+        )
+        window.layoutIfNeeded()
+        let field = searchField(in: controller.scrollView)
+        XCTAssertNotNil(field, "the source find bar did not appear")
+        XCTAssertEqual(field?.stringValue, "world")
     }
 
     func testEditInSourceRefusesAStaleSlice() async throws {

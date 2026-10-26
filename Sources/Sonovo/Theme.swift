@@ -48,6 +48,8 @@ enum AppTheme {
 
         static let pageMaxWidth: CGFloat = 760
         static let markdownSidebarWidth: CGFloat = 220
+        static let mdxSourceMinWidth: CGFloat = 280
+        static let mdxPreviewMinWidth: CGFloat = 320
         static let mediaMaxWidth: CGFloat = 900
         static let mediaVolumeMaxWidth: CGFloat = 120
         static let documentMetadataCardWidth: CGFloat = 300
@@ -367,6 +369,12 @@ enum AppTheme {
         static let sourceH4: CGFloat = 15
         static let sourceH5: CGFloat = 14
         static let sourceH6: CGFloat = 13.5
+
+        // Footnote references
+        /// A footnote reference scales with the body text it sits in.
+        static let footnoteScale: CGFloat = 0.72
+        /// How far the superscript number rises above the baseline, in points.
+        static let footnoteBaselineOffset: Double = 4.5
 
         static func sourceHeadingSize(_ level: Int) -> CGFloat {
             switch level {
@@ -812,10 +820,106 @@ enum AppTheme {
             static let stale = Palette.tertiaryLabel
         }
 
+        /// Source Peek and semantic block editing: the projection editor.
+        enum BlockEditor {
+            static let minHeight: CGFloat = 88
+            static let maxHeight: CGFloat = 280
+            static let popoverWidth: CGFloat = 480
+            static let padding = Spacing.sm
+            static let background = Palette.text
+            static let border = Palette.separator
+        }
+
+        /// The inline table grid: a popover over the table's source range.
+        enum TableGrid {
+            static let width: CGFloat = 560
+            static let height: CGFloat = 440
+            static let cellWidth: CGFloat = 150
+            static let cellMinHeight: CGFloat = 24
+            static let headerBackground = Palette.card
+            static let backdrop = Palette.text
+        }
+
+        /// Agent proposal diffs: the sheet that previews hunks before an
+        /// undoable, compare-and-swap source edit.
+        enum Proposal {
+            static let width: CGFloat = 680
+            static let height: CGFloat = 560
+            static let lineNumberWidth: CGFloat = 44
+            static let added = Palette.success
+            static let removed = Palette.error
+            static let tint = Opacity.tintSoft
+        }
+
+        /// Focus mode dims source blocks outside the current one. The
+        /// decoration owns only the foreground key; syntax stays underneath.
+        enum Focus {
+            static let dim = Palette.tertiaryLabel
+        }
+
+        /// Typewriter mode keeps the caret line near 40% of the viewport.
+        enum Typewriter {
+            static let centerFraction: CGFloat = 0.4
+            static let jitter: CGFloat = 12
+        }
+
+        /// Review comments: the source margin that marks anchored threads
+        /// and the trailing panel that lists them.
+        enum Comments {
+            static let gutterWidth: CGFloat = 14
+            static let markerDiameter: CGFloat = 7
+            static let markerHitRadius: CGFloat = 9
+            static let markerCenterDivisor: CGFloat = 2
+            static let open = Palette.info
+            static let resolved = Palette.tertiaryLabel
+            static let unresolved = Palette.warning
+            static let panelWidth: CGFloat = 300
+            static let panelMinHeight: CGFloat = 240
+            static let quoteLineLimit: Int = 2
+            static let bodyLineLimit: Int = 6
+            static let selectionTint = Opacity.tint
+        }
+
         enum ReadingPosition {
             static let indicator = Palette.tertiaryLabel
             static let opacity = Opacity.borderStrong
             static let width = BorderWidth.medium
+        }
+
+        /// HTML and PDF export. The exported page uses the reading theme's
+        /// own typography and colors; these values are only the fixed parts
+        /// the theme does not carry, such as A4 pagination.
+        enum Export {
+            /// A4 in PostScript points, the PDF page the print operation
+            /// produces.
+            static let paperWidth: CGFloat = 595.28
+            static let paperHeight: CGFloat = 841.89
+            /// 18 mm of print margin on every edge.
+            static let printMargin: CGFloat = 51.02
+            /// The printable area the offscreen web view is laid out in.
+            static var printableWidth: CGFloat {
+                paperWidth - printMargin * 2
+            }
+            static var printableHeight: CGFloat {
+                paperHeight - printMargin * 2
+            }
+            /// CSS has no theme value for heading leading; the viewer's
+            /// default line height is close to 1.2.
+            static let headingLineHeight: Double = 1.2
+            /// The inline code pill, which the viewer draws as a colored
+            /// text run with no padding.
+            static let inlineCodeHorizontalPadding = Spacing.xs
+            static let inlineCodeVerticalPadding = Spacing.xxs
+            /// A sub-point difference between a measured block boundary and
+            /// the page limit is rounding, not a real boundary.
+            static let geometryEpsilon: CGFloat = 0.5
+        }
+
+        /// Math typesetting. Formulas are vector Core Graphics layouts; the
+        /// export rasterizes them at this multiple so print output stays
+        /// sharp.
+        enum Math {
+            static let exportScale: CGFloat = 3
         }
     }
 }
