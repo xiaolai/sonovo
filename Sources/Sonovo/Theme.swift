@@ -633,6 +633,12 @@ enum AppTheme {
         return Color(nsColor: mixed)
     }
 
+    /// The SwiftUI form of a syntax role. Kept here so a content renderer
+    /// can color a token without constructing a raw color.
+    static func syntaxColor(for role: SyntaxRole) -> Color {
+        Color(nsColor: Syntax.color(for: role))
+    }
+
     // MARK: - Color
 
     enum Palette {
@@ -738,6 +744,79 @@ enum AppTheme {
             x: 0,
             y: 1
         )
+    }
+
+    /// Tokens for the Markdown surfaces added by the authoring roadmap.
+    /// Content renderers still draw content; these are chrome values.
+    enum MarkdownChrome {
+        enum CodeHeader {
+            static let height: CGFloat = 28
+            static let inset = Spacing.sm
+            static let background = Palette.content
+            static let feedback = Palette.success
+            static let copyFeedbackSeconds: Double = 1.5
+        }
+
+        enum Alerts {
+            static let note = Palette.info
+            static let tip = Palette.success
+            static let important = Palette.info
+            static let warning = Palette.warning
+            static let caution = Palette.error
+            static let borderWidth = BorderWidth.thick
+            static let inset = Spacing.md
+        }
+
+        enum Frontmatter {
+            static let height: CGFloat = 140
+        }
+
+        enum Popover {
+            static let width: CGFloat = 320
+            static let padding = Spacing.md
+            static let background = Palette.card
+            /// Side of the point-sized anchor rect for a zero-width range.
+            static let anchorSize: CGFloat = 1
+        }
+
+        enum Lint {
+            static let error = Palette.error
+            static let warning = Palette.warning
+            static let tint = Opacity.muted
+            static let markerWidth = BorderWidth.medium
+        }
+
+        enum TableCell {
+            static let highlight = Palette.selection
+            static let opacity = Opacity.muted
+        }
+
+        enum Outline {
+            static let selection = Palette.selection
+            static let inset = Spacing.sm
+            static let rowHeight: CGFloat = 22
+            static let width: CGFloat = 220
+        }
+
+        enum PaletteChrome {
+            static let width: CGFloat = 520
+            static let height: CGFloat = 420
+            static let background = Palette.card
+            static let padding = Spacing.md
+        }
+
+        enum Review {
+            static let unreviewed = Palette.info
+            static let seen = Palette.success
+            static let changesRequested = Palette.warning
+            static let stale = Palette.tertiaryLabel
+        }
+
+        enum ReadingPosition {
+            static let indicator = Palette.tertiaryLabel
+            static let opacity = Opacity.borderStrong
+            static let width = BorderWidth.medium
+        }
     }
 }
 

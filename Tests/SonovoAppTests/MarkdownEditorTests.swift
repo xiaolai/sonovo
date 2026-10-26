@@ -27,7 +27,9 @@ final class MarkdownEditorTests: XCTestCase {
         let cache = MarkdownEditorCache()
         let entry = cache.entry(
             for: document,
-            parseService: MarkdownParseService(),
+            parseCoordinator: MarkdownParseCoordinator(
+                service: MarkdownParseService()
+            ),
             parseDebounce: 0
         )
         return (document, cache, entry.controller)
@@ -68,7 +70,9 @@ final class MarkdownEditorTests: XCTestCase {
 
         let again = cache.entry(
             for: document,
-            parseService: MarkdownParseService()
+            parseCoordinator: MarkdownParseCoordinator(
+                service: MarkdownParseService()
+            )
         )
         XCTAssertTrue(again.textView === textView)
     }
@@ -200,7 +204,9 @@ final class MarkdownEditorTests: XCTestCase {
         let cache = MarkdownEditorCache()
         let controller = cache.entry(
             for: document,
-            parseService: MarkdownParseService(),
+            parseCoordinator: MarkdownParseCoordinator(
+                service: MarkdownParseService()
+            ),
             parseDebounce: 0
         ).controller
 
@@ -270,7 +276,9 @@ final class MarkdownEditorTests: XCTestCase {
         let cache = MarkdownEditorCache()
         let controller = cache.entry(
             for: document,
-            parseService: MarkdownParseService(),
+            parseCoordinator: MarkdownParseCoordinator(
+                service: MarkdownParseService()
+            ),
             parseDebounce: 0
         ).controller
 
@@ -341,5 +349,37 @@ final class MarkdownEditorTests: XCTestCase {
             "Markdown source"
         )
         XCTAssertEqual(controller.textView.accessibilityRole(), .textArea)
+    }
+
+    func testTypingPolicyRunsThroughTheEditorInOneUndo() {
+        let (document, _, controller) = makeController(source: "- item")
+        let textView = controller.textView
+        textView.setSelectedRange(NSRange(location: 3, length: 0))
+
+        let handled = controller.textView(
+            textView,
+            doCommandBy: #selector(NSResponder.insertTab(_:))
+        )
+        XCTAssertTrue(handled)
+        XCTAssertEqual(document.source, "  - item")
+        XCTAssertEqual(textView.string, "  - item")
+
+        document.undoManager.undo()
+        XCTAssertEqual(document.source, "- item")
+    }
+
+    func testBackspacePolicyDeletesAnEmptyPairInOneUndo() {
+        let (document, _, controller) = makeController(source: "f()")
+        let textView = controller.textView
+        textView.setSelectedRange(NSRange(location: 2, length: 0))
+
+        let handled = controller.textView(
+            textView,
+            doCommandBy: #selector(NSResponder.deleteBackward(_:))
+        )
+        XCTAssertTrue(handled)
+        XCTAssertEqual(document.source, "f")
+        document.undoManager.undo()
+        XCTAssertEqual(document.source, "f()")
     }
 }

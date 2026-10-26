@@ -25,8 +25,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     private var preferenceObserver: NSObjectProtocol?
     private var visibleHighlightTask: Task<Void, Never>?
 
-    private let parseService: MarkdownParseService
+    private let parseCoordinator: MarkdownParseCoordinator
     private let parseDebounce: TimeInterval
+    private var parseObserverToken: UUID?
     private let registry = MarkdownCommandRegistry()
     private let assetStore = MarkdownAssetStore()
     private(set) var lastCommandError: Error? {
@@ -41,6 +42,11 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     private var parseTask: Task<Void, Never>?
     private var pendingParseRevision: UInt64?
+    private var linkPopover: MarkdownLinkPopoverController?
+    private(set) var lintDiagnostics: [MarkdownDiagnostic] = []
+    /// The workspace's effective-root generation, captured into action
+    /// targets so a project switch refuses a stale popover commit.
+    var rootGenerationProvider: () -> UInt64 = { 0 }
     /// The document state when the current input-method composition began.
     private var compositionBaseline: CompositionBaseline?
     /// The action name for the edit currently being applied through the
@@ -65,11 +71,11 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     init(
         document: MarkdownDocument,
-        parseService: MarkdownParseService,
+        parseCoordinator: MarkdownParseCoordinator,
         parseDebounce: TimeInterval
     ) {
         self.document = document
-        self.parseService = parseService
+        self.parseCoordinator = parseCoordinator
         self.parseDebounce = parseDebounce
         self.textView = MarkdownTextView(usingTextLayoutManager: true)
         self.scrollView = NSScrollView()
@@ -81,9 +87,23 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         textView.onPasteImage = { [weak self] data, fileExtension in
             self?.insertImageAsset(data, fileExtension: fileExtension) ?? false
         }
+        textView.onSmartSelectAll = { [weak self] in
+            self?.smartSelectAll() ?? false
+        }
+        textView.onEscapeSelection = { [weak self] in
+            self?.collapseSmartSelection() ?? false
+        }
+        textView.onSmartPaste = { [weak self] in
+            self?.smartPaste() ?? false
+        }
         textView.delegate = self
         textView.string = document.source
         applyBaseAttributesOnly()
+        parseObserverToken = parseCoordinator.addObserver(
+            for: document.id
+        ) { [weak self] state in
+            self?.handleParseState(state)
+        }
         observeDocument()
         preferenceObserver = NotificationCenter.default.addObserver(
             forName: .sonovoEditorPreferencesChanged,
@@ -109,6 +129,19 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         if let preferenceObserver {
             NotificationCenter.default.removeObserver(preferenceObserver)
         }
+        detach()
+    }
+
+    /// Stops consuming parse publications for this document.
+    func detach() {
+        if let parseObserverToken {
+            parseCoordinator.removeObserver(parseObserverToken, for: document.id)
+            self.parseObserverToken = nil
+        }
+        parseTask?.cancel()
+        parseTask = nil
+        visibleHighlightTask?.cancel()
+        visibleHighlightTask = nil
     }
 
     /// Applies a Settings change to an open editor: the wrap mode and font
@@ -180,8 +213,205 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         visibleHighlightTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 16_000_000)
             guard !Task.isCancelled, let self else { return }
-            self.applyHighlight(output)
+            self.applyHighlight(
+                output,
+                decorations: self.currentDecorations
+            )
         }
+    }
+
+    /// The cell the caret is in, when the source is a valid table. The
+    /// selection must be collapsed: a multi-cell selection has no single
+    /// cell to highlight.
+    private var tableCellRange: Range<Int>? {
+        let selection = textView.selectedRange()
+        guard selection.length == 0,
+              let table = MarkdownTableScanner.table(
+                  at: selection.location,
+                  in: textView.string
+              ),
+              table.isValid else {
+            return nil
+        }
+        for row in [table.header] + table.body {
+            if let cell = row.cells.first(where: {
+                selection.location >= $0.segmentRange.lowerBound
+                    && selection.location <= $0.segmentRange.upperBound
+            }) {
+                let lower = cell.segmentRange.lowerBound
+                let upper = cell.segmentRange.upperBound
+                return lower..<upper
+            }
+        }
+        return nil
+    }
+
+    /// The decoration layers that are independent of the parse output.
+    private var currentDecorations: MarkdownDecorationSet {
+        var decorations = MarkdownDecorationSet()
+        if let range = tableCellRange {
+            decorations.cell = [
+                MarkdownDecoration(
+                    layer: .cell,
+                    range: NSRange(
+                        location: range.lowerBound,
+                        length: range.upperBound - range.lowerBound
+                    ),
+                    attributes: [
+                        .backgroundColor: NSColor(
+                            AppTheme.MarkdownChrome.TableCell.highlight
+                        )
+                    ]
+                )
+            ]
+        }
+        decorations.lint = lintDiagnostics.map { diagnostic in
+            MarkdownDecoration(
+                layer: .lint,
+                range: NSRange(
+                    location: diagnostic.range.lowerBound,
+                    length: diagnostic.range.upperBound
+                        - diagnostic.range.lowerBound
+                ),
+                attributes: [
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                    .underlineColor: NSColor(
+                        diagnostic.severity == .error
+                            ? AppTheme.MarkdownChrome.Lint.error
+                            : AppTheme.MarkdownChrome.Lint.warning
+                    )
+                ]
+            )
+        }
+        return decorations
+    }
+
+    /// Shows the diagnostics from an explicit "Check Markdown" run. An edit
+    /// clears them immediately; they are never stale last-run counts.
+    func setLintDiagnostics(_ diagnostics: [MarkdownDiagnostic]) {
+        lintDiagnostics = diagnostics
+        scheduleVisibleHighlight()
+    }
+
+    private func clearLintDiagnostics() {
+        guard !lintDiagnostics.isEmpty else { return }
+        lintDiagnostics = []
+        scheduleVisibleHighlight()
+    }
+
+    /// The fixed paste chain. A conversion replaces the selection in one
+    /// undoable edit; plain content returns false so AppKit pastes it.
+    func smartPaste() -> Bool {
+        guard !textView.hasMarkedText() else { return false }
+        let pasteboard = NSPasteboard.general
+        var flavors: [MarkdownPasteInput.Flavor] = []
+        if let url = pasteboard.string(forType: .URL) {
+            flavors.append(.url(url))
+        }
+        if let text = pasteboard.string(forType: .string) {
+            flavors.append(.text(text))
+        }
+        if let html = pasteboard.string(forType: .html) {
+            flavors.append(.html(html))
+        }
+        guard !flavors.isEmpty else { return false }
+
+        let selection = Range(textView.selectedRange()) ?? 0..<0
+        let ns = textView.string as NSString
+        guard selection.upperBound <= ns.length else { return false }
+        let selectionText = ns.substring(
+            with: NSRange(
+                location: selection.lowerBound,
+                length: selection.upperBound - selection.lowerBound
+            )
+        )
+        let input = MarkdownPasteInput(
+            flavors: flavors,
+            selectionText: selectionText,
+            isInsideFence: MarkdownTypingPolicy.isInsideFence(
+                textView.string,
+                at: selection.lowerBound
+            )
+        )
+        guard case let .insert(range, replacement, newSelection) =
+            MarkdownPasteConverter.plan(input: input, selection: selection)
+        else {
+            return false
+        }
+        let newSource = ns.replacingCharacters(
+            in: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            ),
+            with: replacement
+        )
+        return apply(
+            MarkdownCommandResult(
+                source: newSource,
+                selection: newSelection,
+                actionName: "Paste",
+                previousSource: textView.string
+            )
+        )
+    }
+
+    /// Commands the palette may offer for the current context.
+    func availableCommands() -> [MarkdownCommandKind] {
+        let context = commandContext()
+        return MarkdownCommandCatalog.paletteEntries {
+            registry.isAvailable($0, in: context)
+        }.map(\.command)
+    }
+
+    /// Cmd+A expands to the next enclosing container. Selection-only: no
+    /// undo entry is created.
+    func smartSelectAll() -> Bool {
+        guard let output = lastOutput else { return false }
+        let selection = Range(textView.selectedRange()) ?? 0..<0
+        guard let next = MarkdownSmartSelect.next(
+            source: textView.string,
+            selection: selection,
+            ast: output.ast
+        ) else {
+            return false
+        }
+        textView.setSelectedRange(
+            NSRange(location: next.lowerBound, length: next.count)
+        )
+        return true
+    }
+
+    /// Escape collapses a smart selection to a caret at its start.
+    func collapseSmartSelection() -> Bool {
+        let selection = textView.selectedRange()
+        guard selection.length > 0 else { return false }
+        textView.setSelectedRange(
+            NSRange(location: selection.location, length: 0)
+        )
+        return true
+    }
+
+    /// Selects the next or previous diagnostic, wrapping around.
+    func goToDiagnostic(backwards: Bool) {
+        guard !lintDiagnostics.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let sorted = lintDiagnostics.sorted {
+            $0.range.lowerBound < $1.range.lowerBound
+        }
+        let caret = textView.selectedRange().location
+        let index: Int
+        if backwards {
+            index = sorted.lastIndex {
+                $0.range.upperBound <= caret
+            } ?? (sorted.count - 1)
+        } else {
+            index = sorted.firstIndex {
+                $0.range.lowerBound > caret
+            } ?? 0
+        }
+        select(range: sorted[index].range)
     }
 
     /// The range highlighting may touch: the visible text plus a margin.
@@ -401,6 +631,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             document.selection = range
         }
 
+        clearLintDiagnostics()
         scheduleParse()
         flushPendingCommands()
     }
@@ -418,6 +649,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         if let range = Range(textView.selectedRange()) {
             document.selection = range
         }
+        scheduleVisibleHighlight()
     }
 
     func undoManager(for view: NSTextView) -> UndoManager? {
@@ -425,14 +657,317 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     func textView(_ view: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard commandSelector == #selector(NSResponder.insertNewline(_:)) else {
+        guard !view.hasMarkedText() else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            let selection = Range(view.selectedRange()) ?? 0..<0
+            if let event = NSApp.currentEvent,
+               event.modifierFlags.contains(.command) {
+                guard MarkdownTableScanner.table(
+                    at: selection.lowerBound,
+                    in: view.string
+                ) != nil else {
+                    return false
+                }
+                let above = event.modifierFlags.contains(.shift)
+                _ = perform(
+                    above ? .insertTableRowAbove : .insertTableRowBelow
+                )
+                return true
+            }
+            return handleListReturn(in: view)
+        }
+
+        let selection = Range(view.selectedRange()) ?? 0..<0
+        let plan: MarkdownEditPlan
+        switch commandSelector {
+        case #selector(NSResponder.insertTab(_:)):
+            plan = MarkdownTypingPolicy.tab(
+                source: view.string,
+                selection: selection,
+                backwards: false
+            )
+        case #selector(NSResponder.insertBacktab(_:)):
+            plan = MarkdownTypingPolicy.tab(
+                source: view.string,
+                selection: selection,
+                backwards: true
+            )
+        case #selector(NSResponder.deleteBackward(_:)):
+            plan = MarkdownTypingPolicy.backspace(
+                source: view.string,
+                selection: selection
+            )
+        case #selector(NSResponder.deleteForward(_:)):
+            plan = MarkdownTypingPolicy.deleteForward(
+                source: view.string,
+                selection: selection
+            )
+        default:
             return false
         }
-        guard !view.hasMarkedText() else { return false }
-        return handleListReturn(in: view)
+        return apply(plan, in: view)
+    }
+
+    /// Apply a pure typing plan in one edit/undo group. A refused plan makes
+    /// no change and beeps; notApplicable lets AppKit handle the key.
+    private func apply(_ plan: MarkdownEditPlan, in view: NSTextView) -> Bool {
+        switch plan.outcome {
+        case .notApplicable:
+            return false
+        case .refused:
+            NSSound.beep()
+            return true
+        case .handled:
+            if let range = plan.range {
+                let nsRange = NSRange(
+                    location: range.lowerBound,
+                    length: range.upperBound - range.lowerBound
+                )
+                guard view.shouldChangeText(
+                    in: nsRange,
+                    replacementString: plan.replacement
+                ) else {
+                    return true
+                }
+                view.textStorage?.replaceCharacters(
+                    in: nsRange,
+                    with: plan.replacement
+                )
+            }
+            if let selection = plan.selection {
+                let length = (view.string as NSString).length
+                let location = min(selection.lowerBound, length)
+                let selected = min(
+                    selection.upperBound - selection.lowerBound,
+                    length - location
+                )
+                view.setSelectedRange(
+                    NSRange(location: location, length: selected)
+                )
+            }
+            // A selection-only plan is navigation, not an edit: it must not
+            // post a text-change notification or touch undo.
+            if plan.range != nil {
+                view.didChangeText()
+            }
+            return true
+        }
+    }
+
+    // MARK: - Link popover
+
+    /// Opens the link popover over the link at the caret. With no link there,
+    /// it falls back to inserting one.
+    func presentLinkPopover() {
+        guard !textView.hasMarkedText(),
+              let output = lastOutput else {
+            _ = perform(.insertLink(destination: ""))
+            return
+        }
+        let selection = Range(textView.selectedRange()) ?? 0..<0
+        guard let target = MarkdownLinkEditor.target(
+            at: selection.lowerBound,
+            in: output.ast,
+            source: textView.string
+        ) else {
+            _ = perform(.insertLink(destination: ""))
+            return
+        }
+        let nsRange = NSRange(
+            location: target.range.lowerBound,
+            length: target.range.upperBound - target.range.lowerBound
+        )
+        let expectedSlice = (textView.string as NSString)
+            .substring(with: nsRange)
+        let actionTarget = MarkdownActionTarget(
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            sourceRevision: document.revision,
+            range: target.range,
+            expectedSlice: expectedSlice,
+            rootGeneration: rootGenerationProvider()
+        )
+        guard let window = textView.window else { return }
+        let screenRect = textView.firstRect(
+            forCharacterRange: nsRange,
+            actualRange: nil
+        )
+        var viewRect = textView.convert(
+            window.convertFromScreen(screenRect),
+            from: nil
+        )
+        if viewRect.isEmpty {
+            viewRect = NSRect(
+                x: viewRect.midX,
+                y: viewRect.midY,
+                width: AppTheme.MarkdownChrome.Popover.anchorSize,
+                height: AppTheme.MarkdownChrome.Popover.anchorSize
+            )
+        }
+
+        let controller = linkPopover ?? MarkdownLinkPopoverController()
+        linkPopover = controller
+        controller.show(
+            target: target,
+            headings: output.headings.headings,
+            relativeTo: viewRect,
+            of: textView,
+            onCommit: { [weak self] values in
+                self?.commitLink(values, target: target, action: actionTarget)
+                controller.close()
+            },
+            onRemove: { [weak self] in
+                self?.removeLink(target: target, action: actionTarget)
+                controller.close()
+            },
+            onCopy: { destination in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    destination,
+                    forType: .string
+                )
+            },
+            onOpen: { destination in
+                guard let url = URL(string: destination),
+                      url.scheme != nil else {
+                    return
+                }
+                NSWorkspace.shared.open(url)
+            },
+            onOpenDefinition: { [weak self] in
+                guard let range = target.definitionRange else { return }
+                self?.select(range: range)
+                controller.close()
+            }
+        )
+    }
+
+    private func commitLink(
+        _ values: MarkdownLinkValues,
+        target: MarkdownLinkTarget,
+        action: MarkdownActionTarget
+    ) {
+        guard action.isCurrent(in: commandContext()) else {
+            lastCommandError = MarkdownCommandError.staleTarget
+            return
+        }
+        do {
+            let result = try MarkdownLinkEditor.commit(
+                values,
+                to: target,
+                source: textView.string,
+                selection: Range(textView.selectedRange()) ?? 0..<0
+            )
+            _ = apply(result)
+        } catch {
+            lastCommandError = error
+        }
+    }
+
+    private func removeLink(
+        target: MarkdownLinkTarget,
+        action: MarkdownActionTarget
+    ) {
+        guard action.isCurrent(in: commandContext()) else {
+            lastCommandError = MarkdownCommandError.staleTarget
+            return
+        }
+        let ns = textView.string as NSString
+        let newSource = ns.replacingCharacters(
+            in: NSRange(
+                location: target.range.lowerBound,
+                length: target.range.upperBound - target.range.lowerBound
+            ),
+            with: ""
+        )
+        let caret = min(
+            target.range.lowerBound,
+            (newSource as NSString).length
+        )
+        _ = apply(
+            MarkdownCommandResult(
+                source: newSource,
+                selection: caret..<caret,
+                actionName: "Remove Link",
+                previousSource: textView.string
+            )
+        )
+    }
+
+    private func commandContext(
+        target: MarkdownActionTarget? = nil
+    ) -> MarkdownCommandContext {
+        MarkdownCommandContext(
+            source: textView.string,
+            selection: Range(textView.selectedRange()) ?? 0..<0,
+            isReadOnly: document.isReadOnly,
+            hasMarkedText: textView.hasMarkedText(),
+            mode: document.mode,
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            sourceRevision: document.revision,
+            rootGeneration: rootGenerationProvider(),
+            target: target
+        )
+    }
+
+    /// Commits the raw frontmatter text over exactly the range the panel
+    /// opened on. A stale target refuses before any edit.
+    func commitFrontmatter(range: Range<Int>, text: String) {
+        let ns = textView.string as NSString
+        guard range.lowerBound >= 0,
+              range.upperBound <= ns.length else {
+            lastCommandError = MarkdownCommandError.staleTarget
+            return
+        }
+        let expectedSlice = ns.substring(
+            with: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            )
+        )
+        let target = MarkdownActionTarget(
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            sourceRevision: document.revision,
+            range: range,
+            expectedSlice: expectedSlice,
+            rootGeneration: rootGenerationProvider()
+        )
+        performCommand { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.registry.apply(
+                    .replaceFrontmatter(range: range, text: text),
+                    to: self.commandContext(target: target)
+                )
+                _ = self.apply(result)
+                self.lastCommandError = nil
+            } catch {
+                self.lastCommandError = error
+            }
+        }
     }
 
     // MARK: - Commands and IME affinity
+
+    /// Select an exact UTF-16 range and reveal it. Used by Edit in Source;
+    /// this changes no bytes and creates no undo entry.
+    func select(range: Range<Int>) {
+        let length = (textView.string as NSString).length
+        guard range.lowerBound >= 0,
+              range.upperBound <= length,
+              range.lowerBound <= range.upperBound else {
+            return
+        }
+        let nsRange = NSRange(
+            location: range.lowerBound,
+            length: range.upperBound - range.lowerBound
+        )
+        textView.setSelectedRange(nsRange)
+        textView.scrollRangeToVisible(nsRange)
+        textView.window?.makeFirstResponder(textView)
+    }
 
     /// Executes one registered command through the text view, so the edit
     /// participates in the document's undo stack.
@@ -614,12 +1149,14 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             return
         }
 
-        let documentID = document.id
         let revision = document.revision
         let source = textView.string
         let delay = immediate ? 0 : parseDebounce
         pendingParseRevision = revision
 
+        // The debounce is input scheduling, not parse ownership: after it
+        // elapses the document-owned coordinator does the work and publishes
+        // to every consumer.
         parseTask = Task { @MainActor [weak self] in
             if delay > 0 {
                 try? await Task.sleep(
@@ -627,34 +1164,43 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 )
             }
             guard !Task.isCancelled, let self else { return }
-
-            let output = await self.parseService.parse(
-                MarkdownParseInput(
-                    documentID: documentID,
-                    revision: revision,
-                    source: source
-                )
-            )
-            guard !Task.isCancelled else { return }
-
-            // The request is settled whether or not the service produced a
-            // result. Clear the pending marker so a dropped request (backlog
-            // pressure) can be retried by the next sync, but never clear a
-            // newer request's marker.
             if self.pendingParseRevision == revision {
                 self.pendingParseRevision = nil
             }
-            guard let output, output.revision == self.document.revision else {
-                return
-            }
+            self.parseCoordinator.request(
+                documentID: self.document.id,
+                identityGeneration: self.document.identityGeneration,
+                revision: revision,
+                source: source
+            )
+        }
+    }
 
-            self.lastOutput = output
-            self.applyHighlight(output)
+    /// Applies a publication from the document-owned parse state.
+    private func handleParseState(_ state: MarkdownParseState) {
+        switch state {
+        case .ready(let output):
+            guard output.documentID == document.id else { return }
+            lastOutput = output
+            document.setNestingLimit(false)
+            applyHighlight(output, decorations: currentDecorations)
+        case .refused(let reason, _):
+            if reason == .nestingLimit {
+                document.setNestingLimit(true)
+            }
+        case .idle, .parsing:
+            break
         }
     }
 
     /// Applies semantic attributes without touching text or undo history.
-    func applyHighlight(_ output: MarkdownParseOutput) {
+    ///
+    /// Syntax, lint, cell highlight, and focus dimming go through one
+    /// compositor pass so no layer erases another.
+    func applyHighlight(
+        _ output: MarkdownParseOutput,
+        decorations: MarkdownDecorationSet = .empty
+    ) {
         // A delayed viewport task can outlive the document or revision it
         // captured. Applying it would paint stale ranges over edited text.
         guard output.documentID == document.id,
@@ -677,14 +1223,20 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             }
         }
 
+        lastOutput = output
         let affected = affectedRange()
-        storage.beginEditing()
-        storage.setAttributes(baseAttributes, range: affected)
-        MarkdownHighlighter(affectedRange: affected).apply(
-            ast: output.ast,
-            to: storage
+        MarkdownDecorationCompositor.apply(
+            syntax: { storage in
+                MarkdownHighlighter(affectedRange: affected).apply(
+                    ast: output.ast,
+                    to: storage
+                )
+            },
+            decorations: decorations,
+            to: storage,
+            affectedRange: affected,
+            baseAttributes: baseAttributes
         )
-        storage.endEditing()
 
         textView.typingAttributes = baseAttributes
         lastHighlightedRevision = output.revision
@@ -833,10 +1385,26 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 /// An NSTextView that accepts pasted and dropped images through the controller.
 final class MarkdownTextView: NSTextView {
     var onPasteImage: ((Data, String) -> Bool)?
+    /// Returns true when the controller consumed the whole-document select.
+    var onSmartSelectAll: (() -> Bool)?
+    var onSmartPaste: (() -> Bool)?
+    /// Returns true when the controller collapsed a smart selection.
+    var onEscapeSelection: (() -> Bool)?
     private var dragHasImage = false
+
+    override func selectAll(_ sender: Any?) {
+        if onSmartSelectAll?() == true { return }
+        super.selectAll(sender)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if onEscapeSelection?() == true { return }
+        super.cancelOperation(sender)
+    }
 
     override func paste(_ sender: Any?) {
         if handleImage(from: NSPasteboard.general) { return }
+        if onSmartPaste?() == true { return }
         super.paste(sender)
     }
 
@@ -1591,22 +2159,22 @@ private struct MarkdownHighlighter {
 struct MarkdownSourceEditor: NSViewRepresentable {
     let document: MarkdownDocument
     var cache: MarkdownEditorCache?
-    var parseService: MarkdownParseService?
+    var parseCoordinator: MarkdownParseCoordinator?
 
     init(
         document: MarkdownDocument,
         cache: MarkdownEditorCache? = nil,
-        parseService: MarkdownParseService? = nil
+        parseCoordinator: MarkdownParseCoordinator? = nil
     ) {
         self.document = document
         self.cache = cache
-        self.parseService = parseService
+        self.parseCoordinator = parseCoordinator
     }
 
     func makeNSView(context: Context) -> NSScrollView {
         let entry = resolvedCache.entry(
             for: document,
-            parseService: resolvedParseService
+            parseCoordinator: resolvedCoordinator
         )
         if entry.scrollView.superview != nil {
             entry.scrollView.removeFromSuperview()
@@ -1618,7 +2186,7 @@ struct MarkdownSourceEditor: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         let entry = resolvedCache.entry(
             for: document,
-            parseService: resolvedParseService
+            parseCoordinator: resolvedCoordinator
         )
         // The representable is given a document identity at the call site,
         // so a different document should have produced a new scroll view.
@@ -1631,10 +2199,12 @@ struct MarkdownSourceEditor: NSViewRepresentable {
         cache ?? .shared
     }
 
-    private var resolvedParseService: MarkdownParseService {
-        if let parseService { return parseService }
-        return MarkdownSourceEditor.sharedParseService
+    private var resolvedCoordinator: MarkdownParseCoordinator {
+        if let parseCoordinator { return parseCoordinator }
+        return MarkdownSourceEditor.sharedCoordinator
     }
 
-    private static let sharedParseService = MarkdownParseService()
+    private static let sharedCoordinator = MarkdownParseCoordinator(
+        service: MarkdownParseService()
+    )
 }

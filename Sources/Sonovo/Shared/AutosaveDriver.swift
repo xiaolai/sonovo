@@ -50,16 +50,19 @@ final class AutosaveDriver<Document: Autosaveable> {
 
     private let documents: () -> [Document]
     private let reportsError: (String) -> Void
+    private let onSaved: ((UUID) -> Void)?
     private let tick: Duration
 
     init(
         tick: Duration = .milliseconds(500),
         documents: @escaping () -> [Document],
-        reportsError: @escaping (String) -> Void
+        reportsError: @escaping (String) -> Void,
+        onSaved: ((UUID) -> Void)? = nil
     ) {
         self.tick = tick
         self.documents = documents
         self.reportsError = reportsError
+        self.onSaved = onSaved
     }
 
     func start() {
@@ -105,6 +108,7 @@ final class AutosaveDriver<Document: Autosaveable> {
             do {
                 try await document.autosave()
                 didSave(document.id)
+                onSaved?(document.id)
             } catch {
                 if document.isClosedError(error) {
                     continue

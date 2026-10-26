@@ -177,6 +177,50 @@ final class ProjectNavigationTests: XCTestCase {
         return condition()
     }
 
+    func testProjectBindsMarkdownWorkspaceRoot() async throws {
+        let workspace = makeWorkspace()
+        let root = try makeRoot()
+        let project = try XCTUnwrap(workspace.openProject(at: root))
+        let bound = await waitUntil {
+            project.markdown.workspaceRoot != nil
+        }
+        XCTAssertTrue(bound)
+        XCTAssertEqual(
+            project.markdown.workspaceRoot?.standardizedFileURL.path,
+            root.standardizedFileURL.path
+        )
+    }
+
+    func testLastUsedTabTogglesAndPositionalTabsWrap() async throws {        let workspace = makeWorkspace()
+        let project = try XCTUnwrap(
+            workspace.openProject(
+                at: try makeRoot(files: [
+                    "a.md": "one",
+                    "b.md": "two"
+                ])
+            )
+        )
+        let loaded = await waitUntil { project.assets.count == 2 }
+        XCTAssertTrue(loaded)
+        let first = EditorTab(asset: project.assets[0])
+        let second = EditorTab(asset: project.assets[1])
+        project.openTabs = [first, second]
+
+        project.selectTab(first.id)
+        project.selectTab(second.id)
+        XCTAssertEqual(project.lastUsedTabID, first.id)
+
+        project.toggleLastUsedTab()
+        XCTAssertEqual(project.selectedTabID, first.id)
+        project.toggleLastUsedTab()
+        XCTAssertEqual(project.selectedTabID, second.id)
+
+        project.selectNextTab()
+        XCTAssertEqual(project.selectedTabID, first.id)
+        project.selectPreviousTab()
+        XCTAssertEqual(project.selectedTabID, second.id)
+    }
+
     private func makeWorkspace() -> Workspace {
         let demo = Project.demo(
             production: .sample,

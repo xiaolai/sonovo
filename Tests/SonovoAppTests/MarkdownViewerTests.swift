@@ -60,6 +60,15 @@ final class MarkdownViewerTests: XCTestCase {
 
         > A quote
 
+        > [!NOTE]
+        > A note callout.
+
+        > [!WARNING]
+        > A warning callout.
+
+        > [!FOO]
+        > An unknown marker stays an ordinary quote.
+
         - bullet
         - [x] task
 

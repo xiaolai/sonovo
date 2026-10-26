@@ -24,7 +24,10 @@ struct MarkdownViewer: View {
     let onOpenWikiLink: ((WikiLink) -> Void)?
     let onOpenLocalLink: ((String) -> Void)?
     let onOpenExternalURL: ((URL) -> Void)?
+    let onEditInSource: ((SourceRange) -> Void)?
     let scrollTarget: Binding<String?>?
+    let lintDiagnostics: [MarkdownDiagnostic]
+    let find: RenderedFindController
 
     private let detailsIndices: [Int: Int]
     private let detailsRanges: [(index: Int, range: SourceRange)]
@@ -49,7 +52,10 @@ struct MarkdownViewer: View {
         onOpenWikiLink: ((WikiLink) -> Void)? = nil,
         onOpenLocalLink: ((String) -> Void)? = nil,
         onOpenExternalURL: ((URL) -> Void)? = nil,
-        scrollTarget: Binding<String?>? = nil
+        onEditInSource: ((SourceRange) -> Void)? = nil,
+        scrollTarget: Binding<String?>? = nil,
+        lintDiagnostics: [MarkdownDiagnostic] = [],
+        find: RenderedFindController = RenderedFindController()
     ) {
         self.ast = ast
         self.headings = headings
@@ -60,7 +66,10 @@ struct MarkdownViewer: View {
         self.onOpenWikiLink = onOpenWikiLink
         self.onOpenLocalLink = onOpenLocalLink
         self.onOpenExternalURL = onOpenExternalURL
+        self.onEditInSource = onEditInSource
         self.scrollTarget = scrollTarget
+        self.lintDiagnostics = lintDiagnostics
+        self.find = find
 
         let metadata = Self.detailsMetadata(for: ast)
         self.detailsIndices = metadata.map
@@ -82,26 +91,48 @@ struct MarkdownViewer: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: theme.blockSpacing) {
-                    blocksView(ast.blocks, proxy: proxy)
+            VStack(spacing: AppTheme.Spacing.zero) {
+                if find.isVisible {
+                    RenderedFindBar(find: find)
                 }
-                .frame(maxWidth: theme.measure, alignment: .leading)
-                .padding(.horizontal, theme.pagePadding)
-                .padding(.vertical, theme.pagePadding)
-                .frame(maxWidth: .infinity, alignment: .center)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: theme.blockSpacing) {
+                        blocksView(ast.blocks, proxy: proxy)
+                    }
+                    .frame(maxWidth: theme.measure, alignment: .leading)
+                    .padding(.horizontal, theme.pagePadding)
+                    .padding(.vertical, theme.pagePadding)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .background(palette.paper.color)
+                .onAppear {
+                    reconcile(initial: true)
+                    consumeScrollTarget(proxy: proxy)
+                    // A document switch remounts the viewer while the bar can
+                    // stay open; matches must follow the new document.
+                    recomputeFind(proxy: proxy)
+                }
+                .onChange(of: ast) { _, _ in
+                    reconcile(initial: false)
+                    consumeScrollTarget(proxy: proxy)
+                    recomputeFind(proxy: proxy)
+                }
+                .onChange(of: scrollTarget?.wrappedValue) { _, _ in
+                    consumeScrollTarget(proxy: proxy)
+                }
             }
-            .background(palette.paper.color)
-            .onAppear {
-                reconcile(initial: true)
-                consumeScrollTarget(proxy: proxy)
+            .onChange(of: find.isVisible) { _, visible in
+                if visible {
+                    recomputeFind(proxy: proxy)
+                } else {
+                    find.setMatches([])
+                }
             }
-            .onChange(of: ast) { _, _ in
-                reconcile(initial: false)
-                consumeScrollTarget(proxy: proxy)
+            .onChange(of: find.query) { _, _ in
+                recomputeFind(proxy: proxy)
             }
-            .onChange(of: scrollTarget?.wrappedValue) { _, _ in
-                consumeScrollTarget(proxy: proxy)
+            .onChange(of: find.currentIndex) { _, _ in
+                scrollToCurrent(proxy)
             }
         }
     }
@@ -119,17 +150,63 @@ struct MarkdownViewer: View {
         }
     }
 
+    // MARK: - Find
+
+    private func recomputeFind(proxy: ScrollViewProxy) {
+        guard find.isVisible else {
+            find.setMatches([])
+            return
+        }
+        let blocks = MarkdownRenderedSearch.blocks(ast)
+        find.setMatches(
+            MarkdownRenderedSearch.matches(
+                query: find.query,
+                blocks: blocks
+            )
+        )
+        scrollToCurrent(proxy)
+    }
+
+    private func scrollToCurrent(_ proxy: ScrollViewProxy) {
+        guard let match = find.current,
+              match.blockIndex < ast.blocks.count else {
+            return
+        }
+        let anchor = blockAnchor(
+            ast.blocks[match.blockIndex],
+            index: match.blockIndex
+        )
+        withAnimation { proxy.scrollTo(anchor, anchor: .center) }
+    }
+
+    private func blockAnchor(_ block: Block, index: Int) -> String {
+        if case .heading(_, _, let range) = block,
+           let range,
+           let id = headingIDs[range.lowerBound] {
+            return id
+        }
+        return "block-\(index)"
+    }
+
     // MARK: - Blocks
 
     private func blocksView(_ blocks: [Block], proxy: ScrollViewProxy) -> AnyView {
         AnyView(
             VStack(alignment: .leading, spacing: theme.blockSpacing) {
                 ForEach(blocks.indices, id: \.self) { index in
-                    blockView(
-                        blocks[index],
+                    let block = blocks[index]
+                    let content = blockView(
+                        block,
                         previous: index > 0 ? blocks[index - 1] : nil,
                         proxy: proxy
                     )
+                    if case .heading(_, _, let range) = block,
+                       let range,
+                       headingIDs[range.lowerBound] != nil {
+                        content
+                    } else {
+                        content.id("block-\(index)")
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -141,21 +218,68 @@ struct MarkdownViewer: View {
         previous: Block?,
         proxy: ScrollViewProxy
     ) -> AnyView {
+        let content: AnyView
         switch block {
         case let .heading(level, inlines, range):
-            return headingBlockView(
+            content = headingBlockView(
                 level: level,
                 inlines: inlines,
                 range: range,
                 proxy: proxy
             )
         case let .paragraph(inlines, _):
-            return paragraphBlockView(
+            content = paragraphBlockView(
                 inlines,
                 indented: isIndentedParagraph(after: previous),
                 proxy: proxy
             )
         case let .blockQuote(blocks, _):
+            content = blockQuoteView(blocks, proxy: proxy)
+        case let .list(list, _):
+            content = AnyView(listView(list, proxy: proxy))
+        case let .codeBlock(code, _):
+            content = AnyView(codeBlockView(code))
+        case .thematicBreak:
+            content = AnyView(
+                Rectangle()
+                    .fill(palette.rule.color)
+                    .frame(height: AppTheme.BorderWidth.hairline)
+            )
+        case let .table(table, _):
+            content = AnyView(tableView(table, proxy: proxy))
+        case let .details(details, range):
+            content = detailsBlockView(
+                details,
+                range: range,
+                proxy: proxy
+            )
+        case .tableOfContents:
+            content = AnyView(tocView(proxy: proxy))
+        case .htmlBlock:
+            content = AnyView(EmptyView())
+        }
+
+        let display = lintMarked(content, for: block)
+        guard let range = block.range, let onEditInSource else {
+            return display
+        }
+        return AnyView(
+            display.contextMenu {
+                Button("Edit in Source") {
+                    onEditInSource(range)
+                }
+            }
+        )
+    }
+
+    /// A blockquote whose first text begins with a GitHub alert marker is
+    /// presented as a labelled callout. Source bytes are never changed; the
+    /// marker is stripped only from this projection.
+    private func blockQuoteView(
+        _ blocks: [Block],
+        proxy: ScrollViewProxy
+    ) -> AnyView {
+        guard let kind = alertKind(for: blocks) else {
             return AnyView(
                 HStack(alignment: .top, spacing: AppTheme.Spacing.md) {
                     RoundedRectangle(cornerRadius: AppTheme.Radius.line)
@@ -165,25 +289,83 @@ struct MarkdownViewer: View {
                 }
                 .padding(.leading, AppTheme.Spacing.xs)
             )
-        case let .list(list, _):
-            return AnyView(listView(list, proxy: proxy))
-        case let .codeBlock(code, _):
-            return AnyView(codeBlockView(code))
-        case .thematicBreak:
-            return AnyView(
-                Rectangle()
-                    .fill(palette.rule.color)
-                    .frame(height: AppTheme.BorderWidth.hairline)
-            )
-        case let .table(table, _):
-            return AnyView(tableView(table, proxy: proxy))
-        case let .details(details, range):
-            return detailsBlockView(details, range: range, proxy: proxy)
-        case .tableOfContents:
-            return AnyView(tocView(proxy: proxy))
-        case .htmlBlock:
-            return AnyView(EmptyView())
         }
+
+        let content = strippingAlertMarker(blocks, kind: kind)
+        return AnyView(
+            VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                Label(kind.label, systemImage: kind.icon)
+                    .font(
+                        theme.uiFont.font(
+                            size: theme.captionSize,
+                            weight: .semibold
+                        )
+                    )
+                    .foregroundStyle(kind.color)
+                blocksView(content, proxy: proxy)
+            }
+            .padding(AppTheme.MarkdownChrome.Alerts.inset)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(kind.color.opacity(AppTheme.Opacity.subtle))
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(kind.color)
+                    .frame(width: AppTheme.MarkdownChrome.Alerts.borderWidth)
+            }
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: theme.codeRadius,
+                    style: .continuous
+                )
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(kind.label) callout")
+        )
+    }
+
+    private func alertKind(for blocks: [Block]) -> AlertKind? {
+        guard case .paragraph(let inlines, _) = blocks.first,
+              case .text(let text, _) = inlines.first else {
+            return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        for kind in AlertKind.allCases
+        where trimmed.lowercased().hasPrefix(kind.marker) {
+            return kind
+        }
+        return nil
+    }
+
+    private func strippingAlertMarker(
+        _ blocks: [Block],
+        kind: AlertKind
+    ) -> [Block] {
+        guard !blocks.isEmpty,
+              case .paragraph(var inlines, let range) = blocks[0],
+              case .text(let text, let textRange) = inlines.first,
+              let marker = text.range(
+                  of: kind.marker,
+                  options: .caseInsensitive
+              ) else {
+            return blocks
+        }
+        var newText = text
+        newText.removeSubrange(marker)
+        while newText.first == " " || newText.first == "\t" {
+            newText.removeFirst()
+        }
+        if newText.isEmpty {
+            inlines.removeFirst()
+        } else {
+            inlines[0] = .text(newText, range: textRange)
+        }
+        var result = blocks
+        if inlines.isEmpty {
+            result.removeFirst()
+        } else {
+            result[0] = .paragraph(inlines: inlines, range: range)
+        }
+        return result
     }
 
     /// Book-style paragraph indent applies as a block indent to a paragraph
@@ -193,6 +375,45 @@ struct MarkdownViewer: View {
         guard theme.paragraphIndent > 0, let previous else { return false }
         if case .paragraph = previous { return true }
         return false
+    }
+
+    /// A block that intersects a diagnostic carries a leading severity bar.
+    /// Only source-available blocks have a range, so a block without one is
+    /// never marked.
+    private func lintMarked(_ content: AnyView, for block: Block) -> AnyView {
+        guard let range = block.range,
+              let severity = lintSeverity(
+                  intersecting: range.lowerBound..<range.upperBound
+              ) else {
+            return content
+        }
+        let color = severity == .error
+            ? AppTheme.MarkdownChrome.Lint.error
+            : AppTheme.MarkdownChrome.Lint.warning
+        return AnyView(
+            HStack(alignment: .top, spacing: AppTheme.Spacing.xs) {
+                Rectangle()
+                    .fill(color)
+                    .frame(width: AppTheme.MarkdownChrome.Lint.markerWidth)
+                    .frame(maxHeight: .infinity)
+                content
+            }
+        )
+    }
+
+    private func lintSeverity(
+        intersecting range: Range<Int>
+    ) -> MarkdownDiagnostic.Severity? {
+        var found: MarkdownDiagnostic.Severity?
+        for diagnostic in lintDiagnostics {
+            guard diagnostic.range.lowerBound < range.upperBound,
+                  range.lowerBound < diagnostic.range.upperBound else {
+                continue
+            }
+            if diagnostic.severity == .error { return .error }
+            found = .warning
+        }
+        return found
     }
 
     private func headingBlockView(
@@ -229,7 +450,10 @@ struct MarkdownViewer: View {
                     documentURL: documentURL,
                     workspaceRoot: workspaceRoot,
                     theme: theme,
-                    palette: palette
+                    palette: palette,
+                    onOpen: onOpenLocalLink.map { open in
+                        { open(destination) }
+                    }
                 )
             )
         }
@@ -330,30 +554,11 @@ struct MarkdownViewer: View {
     }
 
     private func codeBlockView(_ code: CodeBlock) -> some View {
-        VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
-            if let language = code.language, !language.isEmpty {
-                Text(language)
-                    .font(
-                        theme.uiFont.font(
-                            size: theme.captionSize,
-                            weight: .medium
-                        )
-                    )
-                    .foregroundStyle(palette.secondaryInk.color)
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code.code)
-                    .font(theme.codeFont.font(size: theme.codeSize))
-                    .lineSpacing(theme.codeLineSpacing)
-                    .foregroundStyle(palette.codeInk.color)
-                    .textSelection(.enabled)
-            }
-        }
-        .padding(theme.codePadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.codeGround.color)
-        .clipShape(
-            RoundedRectangle(cornerRadius: theme.codeRadius, style: .continuous)
+        MarkdownCodeBlockView(
+            code: code,
+            theme: theme,
+            palette: palette,
+            highlightQuery: find.isVisible ? find.query : nil
         )
     }
 
@@ -490,6 +695,22 @@ struct MarkdownViewer: View {
     private func attributed(_ inlines: [Inline]) -> AttributedString {
         var result = AttributedString()
         append(inlines, to: &result)
+        return highlighted(result)
+    }
+
+    /// Marks every occurrence of the find query inside this block.
+    private func highlighted(_ text: AttributedString) -> AttributedString {
+        guard find.isVisible, !find.query.isEmpty else { return text }
+        var result = text
+        var start = result.startIndex
+        while start < result.endIndex,
+              let range = result[start...].range(
+                  of: find.query,
+                  options: .caseInsensitive
+              ) {
+            result[range].backgroundColor = AppTheme.Palette.selection
+            start = range.upperBound
+        }
         return result
     }
 
@@ -724,6 +945,7 @@ private struct MarkdownImageView: View {
     let workspaceRoot: URL?
     let theme: MarkdownTheme
     let palette: ThemePalette
+    var onOpen: (() -> Void)?
 
     @State private var image: NSImage?
     /// The file exists but could not be decoded — most often because it
@@ -754,6 +976,7 @@ private struct MarkdownImageView: View {
                     )
                 )
                 .accessibilityLabel(alt.isEmpty ? (title ?? destination) : alt)
+                .onTapGesture { onOpen?() }
             } else {
                 HStack(spacing: AppTheme.Spacing.s6) {
                     Image(systemName: "photo")
@@ -864,5 +1087,311 @@ private struct MarkdownImageView: View {
         Self.cache.setObject(decoded, forKey: key, cost: max(cost, 0))
         image = decoded
         decodeFailed = false
+    }
+}
+
+// MARK: - Code block
+
+/// Rendered code with a language label and a copy button. Syntax colors come
+/// from the same lexer the code workspace uses; an unknown language stays
+/// plain. The view owns its highlighted value, so a document re-render does
+/// not re-lex every block.
+private struct MarkdownCodeBlockView: View {
+    let code: CodeBlock
+    let theme: MarkdownTheme
+    let palette: ThemePalette
+    let highlightQuery: String?
+
+    @State private var copied = false
+    @State private var highlightedText: AttributedString?
+
+    /// The language is part of the task identity: changing `swift` to `text`
+    /// must clear the previous highlighting even when the body is identical.
+    private var highlightKey: String {
+        "\(code.language ?? "")\u{1F}\(code.code)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+            HStack(spacing: AppTheme.Spacing.sm) {
+                if let language = code.language, !language.isEmpty {
+                    Text(language)
+                        .font(
+                            theme.uiFont.font(
+                                size: theme.captionSize,
+                                weight: .medium
+                            )
+                        )
+                        .foregroundStyle(palette.secondaryInk.color)
+                }
+                Spacer(minLength: AppTheme.Spacing.sm)
+                Button {
+                    copy()
+                } label: {
+                    Label(
+                        copied ? "Copied" : "Copy",
+                        systemImage: copied ? "checkmark" : "doc.on.doc"
+                    )
+                    .font(theme.uiFont.font(size: theme.captionSize))
+                    .foregroundStyle(
+                        copied
+                            ? AppTheme.MarkdownChrome.CodeHeader.feedback
+                            : palette.secondaryInk.color
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Copy this code block")
+                .accessibilityLabel("Copy code block")
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(displayText)
+                    .font(theme.codeFont.font(size: theme.codeSize))
+                    .lineSpacing(theme.codeLineSpacing)
+                    .foregroundStyle(palette.codeInk.color)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(theme.codePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.codeGround.color)
+        .clipShape(
+            RoundedRectangle(cornerRadius: theme.codeRadius, style: .continuous)
+        )
+        .task(id: highlightKey) {
+            highlightedText = makeHighlighted()
+        }
+    }
+
+    /// Find highlighting is applied on top of the lexer's colors, so a match
+    /// inside a code block is marked like every other block.
+    private var displayText: AttributedString {
+        var text = highlightedText ?? AttributedString(code.code)
+        guard let query = highlightQuery, !query.isEmpty else {
+            return text
+        }
+        var start = text.startIndex
+        while start < text.endIndex,
+              let range = text[start...].range(
+                  of: query,
+                  options: .caseInsensitive
+              ) {
+            text[range].backgroundColor = AppTheme.Palette.selection
+            start = range.upperBound
+        }
+        return text
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(code.code, forType: .string)
+        copied = true
+        Task { @MainActor in
+            try? await Task.sleep(
+                for: .seconds(
+                    AppTheme.MarkdownChrome.CodeHeader.copyFeedbackSeconds
+                )
+            )
+            copied = false
+        }
+    }
+
+    private func makeHighlighted() -> AttributedString? {
+        guard let language = fenceLanguage(code.language),
+              language != .plainText else {
+            return nil
+        }
+        let snapshot = CodeSyntaxHighlighter.lex(
+            text: code.code,
+            language: language,
+            revision: 0
+        )
+        let ns = code.code as NSString
+        let tokens = snapshot.tokens(
+            intersecting: NSRange(location: 0, length: ns.length)
+        ).sorted { $0.range.location < $1.range.location }
+        guard !tokens.isEmpty else { return nil }
+
+        var result = AttributedString()
+        var cursor = 0
+        for token in tokens {
+            let location = token.range.location
+            guard location >= cursor,
+                  location + token.range.length <= ns.length else {
+                continue
+            }
+            if location > cursor {
+                result += AttributedString(
+                    ns.substring(
+                        with: NSRange(
+                            location: cursor,
+                            length: location - cursor
+                        )
+                    )
+                )
+            }
+            var piece = AttributedString(
+                ns.substring(with: token.range)
+            )
+            piece.foregroundColor = AppTheme.syntaxColor(
+                for: CodeEditorController.role(for: token.kind)
+            )
+            result += piece
+            cursor = location + token.range.length
+        }
+        if cursor < ns.length {
+            result += AttributedString(ns.substring(from: cursor))
+        }
+        return result
+    }
+
+    private func fenceLanguage(_ raw: String?) -> CodeLanguage? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let name = raw
+            .split(separator: " ", maxSplits: 1)
+            .first
+            .map(String.init)?
+            .lowercased() ?? raw.lowercased()
+        if let exact = CodeLanguage(rawValue: name) {
+            return exact
+        }
+        switch name {
+        case "js", "jsx", "javascript": return .javascript
+        case "ts", "tsx", "typescript": return .typescript
+        case "py", "python": return .python
+        case "sh", "bash", "zsh", "shell", "console": return .shell
+        case "yml": return .yaml
+        case "c++": return .cpp
+        case "objc", "objective-c": return .objectiveC
+        case "text", "plaintext", "plain": return .plainText
+        default: return CodeLanguage.language(forExtension: name)
+        }
+    }
+}
+
+// MARK: - GitHub alerts
+
+private enum AlertKind: String, CaseIterable {
+    case note
+    case tip
+    case important
+    case warning
+    case caution
+
+    var marker: String { "[!\(rawValue)]" }
+    var label: String { rawValue.capitalized }
+
+    var icon: String {
+        switch self {
+        case .note: "info.circle"
+        case .tip: "lightbulb"
+        case .important: "exclamationmark.circle"
+        case .warning: "exclamationmark.triangle"
+        case .caution: "xmark.octagon"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .note: AppTheme.MarkdownChrome.Alerts.note
+        case .tip: AppTheme.MarkdownChrome.Alerts.tip
+        case .important: AppTheme.MarkdownChrome.Alerts.important
+        case .warning: AppTheme.MarkdownChrome.Alerts.warning
+        case .caution: AppTheme.MarkdownChrome.Alerts.caution
+        }
+    }
+}
+
+// MARK: - Rendered find bar
+
+private struct RenderedFindBar: View {
+    @Bindable var find: RenderedFindController
+    @FocusState private var fieldFocused: Bool
+    @State private var keyMonitor: Any?
+
+    var body: some View {
+        HStack(spacing: AppTheme.Spacing.xs) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .foregroundStyle(.secondary)
+            TextField("Find in view", text: $find.query)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .focused($fieldFocused)
+                .onAppear { fieldFocused = true }
+                .onChange(of: find.focusRequest) { _, _ in
+                    fieldFocused = true
+                }
+                .onSubmit { find.step(1) }
+            Text(find.countLabel)
+                .font(.system(size: AppTheme.TypeScale.xs))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Button {
+                find.step(-1)
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.plain)
+            .help("Previous match")
+            .accessibilityLabel("Previous match")
+            Button {
+                find.step(1)
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.plain)
+            .help("Next match")
+            .accessibilityLabel("Next match")
+            Button {
+                find.close()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .help("Close find")
+            .accessibilityLabel("Close find")
+        }
+        .padding(AppTheme.Spacing.sm)
+        .background(AppTheme.MarkdownChrome.Popover.background)
+        .overlay(alignment: .bottom) { Divider() }
+        .onAppear {
+            fieldFocused = true
+            installMonitor()
+        }
+        .onDisappear {
+            removeMonitor()
+        }
+        .onExitCommand { find.close() }
+    }
+
+    /// AppKit matches a lowercase menu equivalent without regard to Shift, so
+    /// Cmd+G and Shift+Cmd+G both reach "Find Next". The bar owns both chords
+    /// while it is visible, before menu dispatch.
+    private func installMonitor() {
+        guard keyMonitor == nil else { return }
+        let find = find
+        keyMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .keyDown
+        ) { event in
+            let flags = event.modifierFlags
+                .intersection(.deviceIndependentFlagsMask)
+            guard event.charactersIgnoringModifiers?.lowercased() == "g",
+                  flags.contains(.command),
+                  !flags.contains(.option),
+                  !flags.contains(.control) else {
+                return event
+            }
+            let backwards = flags.contains(.shift)
+            MainActor.assumeIsolated {
+                find.step(backwards ? -1 : 1)
+            }
+            return nil
+        }
+    }
+
+    private func removeMonitor() {
+        guard let keyMonitor else { return }
+        NSEvent.removeMonitor(keyMonitor)
+        self.keyMonitor = nil
     }
 }

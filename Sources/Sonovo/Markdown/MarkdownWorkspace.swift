@@ -15,13 +15,31 @@ extension Notification.Name {
 @Observable
 final class MarkdownWorkspace {
     let parseService: MarkdownParseService
+    let parseCoordinator: MarkdownParseCoordinator
     let editorCache: MarkdownEditorCache
+    let linkProbe = MarkdownLinkProbeService()
+    private(set) var lintResults: [UUID: MarkdownLintResult] = [:]
+    var isPaletteVisible = false
+    var isOutlineVisible = false
+    var isQuickOpenVisible = false
+    var isHistoryVisible = false
+    let renderedFind = RenderedFindController()
+    var isReviewVisible = false
+    /// Bumped whenever snapshots or transitions change, so panels refresh.
+    private(set) var historyRevision = 0
+    /// The owning project routes a local asset link to its viewer. Returns
+    /// false when the project does not own the file, so the link falls back
+    /// to the default app.
+    var onOpenAsset: ((URL) -> Bool)?
 
     private let store: MarkdownFileStore
 
     private(set) var documents: [MarkdownDocument] = []
     var selectedDocumentID: UUID?
     private(set) var workspaceRoot: URL?
+    /// Incremented when the effective root changes, so a captured action
+    /// target can refuse after a project switch.
+    private(set) var rootGeneration: UInt64 = 0
     private(set) var workspaceFiles: [URL] = []
 
     var lastError: String?
@@ -54,6 +72,15 @@ final class MarkdownWorkspace {
     }
     var scrollTargets: [UUID: String] = [:]
 
+    /// Per-document reading state for the current session. Source keeps the
+    /// selection and the scroll origin; Rendered keeps its last scroll ID.
+    struct ReadingPosition {
+        var selection: Range<Int>?
+        var sourceScrollY: CGFloat?
+        var renderedAnchor: String?
+    }
+
+    private var readingPositions: [UUID: ReadingPosition] = [:]
     private var watchers: [UUID: MarkdownFileWatcher] = [:]
     @ObservationIgnored
     private var autosave: AutosaveDriver<MarkdownDocument>!
@@ -62,6 +89,14 @@ final class MarkdownWorkspace {
     private var workspaceScanTask: Task<Void, Never>?
     @ObservationIgnored
     private var watcherRetryTask: Task<Void, Never>?
+    /// An explicit folder open must survive a watcher rescan that starts
+    /// while the open is enumerating: the newer scan inherits the intent.
+    @ObservationIgnored
+    private let snapshotBaseDirectory: URL
+    @ObservationIgnored
+    private var snapshotStore: MarkdownSnapshotStore?
+    @ObservationIgnored
+    private var pendingOpenFirst = false
     private var workspaceScanGeneration = 0
     private var fileChangeObserver: NSObjectProtocol?
 
@@ -82,7 +117,7 @@ final class MarkdownWorkspace {
             editorCache.remove(for: document.id)
             autosave.forget(document.id)
             let id = document.id
-            Task { await parseService.release(documentID: id) }
+            parseCoordinator.release(documentID: id)
         }
         documents.removeAll()
         watchers.removeAll()
@@ -109,10 +144,14 @@ final class MarkdownWorkspace {
         store: MarkdownFileStore = MarkdownFileStore(),
         parseService: MarkdownParseService = MarkdownParseService(),
         editorCache: MarkdownEditorCache = .shared,
+        snapshotBaseDirectory: URL? = nil,
         readsDemoEnvironment: Bool = true
     ) {
         self.store = store
+        self.snapshotBaseDirectory = snapshotBaseDirectory
+            ?? Self.defaultSnapshotBaseDirectory
         self.parseService = parseService
+        self.parseCoordinator = MarkdownParseCoordinator(service: parseService)
         self.editorCache = editorCache
 
         fileChangeObserver = NotificationCenter.default.addObserver(
@@ -130,6 +169,20 @@ final class MarkdownWorkspace {
             documents: { [weak self] in self?.documents ?? [] },
             reportsError: { [weak self] message in
                 self?.lastError = message
+            },
+            onSaved: { [weak self] id in
+                guard let self,
+                      let document = self.documents.first(where: {
+                          $0.id == id
+                      }) else {
+                    return
+                }
+                Task { @MainActor in
+                    await self.recordSaveHistory(
+                        for: document,
+                        kind: .autosave
+                    )
+                }
             }
         )
         startAutosaveLoop()
@@ -295,7 +348,7 @@ final class MarkdownWorkspace {
         autosave.forget(id)
         // The parse service otherwise retains this document's AST, heading
         // index, and source for the life of the process.
-        Task { await parseService.release(documentID: id) }
+        parseCoordinator.release(documentID: id)
 
         if selectedDocumentID == id {
             selectedDocumentID = documents.first?.id
@@ -319,6 +372,7 @@ final class MarkdownWorkspace {
             try await document.save()
             autosave.didSave(document.id)
             lastError = nil
+            await recordSaveHistory(for: document, kind: .explicit)
         } catch {
             lastError = "Save failed: \(error)"
         }
@@ -365,6 +419,7 @@ final class MarkdownWorkspace {
             startWatcher(for: document)
             registerWorkspaceFile(target)
             lastError = nil
+            await recordSaveHistory(for: document, kind: .explicit)
             if let previousURL {
                 onDocumentMoved?(previousURL, target)
             } else if document === selectedDocument {
@@ -436,8 +491,142 @@ final class MarkdownWorkspace {
     // MARK: - Mode
 
     func toggleMode() {
+        renderedFind.close()
         guard let document = selectedDocument else { return }
+        if document.isSourceOnly {
+            document.mode = .source
+            return
+        }
         document.mode = document.mode == .source ? .rendered : .source
+    }
+
+    /// Select the source range of a rendered block. The slice the viewer
+    /// parsed is compared with the current bytes; a changed block refuses
+    /// rather than selecting the wrong paragraph.
+    func editInSource(
+        range: SourceRange,
+        expectedSource: String,
+        in document: MarkdownDocument
+    ) async {
+        let expected = expectedSource as NSString
+        guard range.lowerBound >= 0,
+              range.upperBound <= expected.length else {
+            lastError = "This block is no longer available."
+            return
+        }
+        let expectedSlice = expected.substring(
+            with: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            )
+        )
+        let current = document.source as NSString
+        guard range.upperBound <= current.length else {
+            lastError = "This block changed. Switch to Source and try again."
+            return
+        }
+        let currentSlice = current.substring(
+            with: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            )
+        )
+        guard currentSlice == expectedSlice else {
+            lastError = "This block changed. Switch to Source and try again."
+            return
+        }
+        let target = MarkdownActionTarget(
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            sourceRevision: document.revision,
+            range: range.lowerBound..<range.upperBound,
+            expectedSlice: expectedSlice,
+            rootGeneration: rootGeneration
+        )
+        let context = MarkdownCommandContext(
+            source: document.source,
+            selection: target.range,
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            sourceRevision: document.revision,
+            rootGeneration: rootGeneration,
+            target: target
+        )
+        guard target.isCurrent(in: context) else {
+            lastError = "This block changed. Switch to Source and try again."
+            return
+        }
+        document.mode = .source
+        controller(for: document).select(range: target.range)
+    }
+
+    /// Capture the current surface's reading state before a tab or mode
+    /// switch. Source keeps the selection and the scroll origin; Rendered
+    /// keeps its last scroll ID. Selection changes are view state, not undo.
+    func captureReadingPosition(for document: MarkdownDocument) {
+        var position = readingPositions[document.id] ?? ReadingPosition()
+        position.selection = document.selection
+        if document.mode == .source,
+           let entry = editorCache.cachedEntry(for: document.id) {
+            position.sourceScrollY = entry.scrollView.contentView.bounds.origin.y
+        }
+        position.renderedAnchor = scrollTargets[document.id]
+        readingPositions[document.id] = position
+    }
+
+    /// Restore a captured position without changing the document or its
+    /// undo history.
+    func restoreReadingPosition(for document: MarkdownDocument) {
+        guard let position = readingPositions[document.id] else { return }
+        if document.mode == .source,
+           let entry = editorCache.cachedEntry(for: document.id) {
+            if let selection = position.selection {
+                document.selection = selection
+            }
+            if let y = position.sourceScrollY {
+                entry.scrollView.contentView.scroll(
+                    to: NSPoint(x: 0, y: y)
+                )
+                entry.scrollView.reflectScrolledClipView(
+                    entry.scrollView.contentView
+                )
+            }
+        } else if let anchor = position.renderedAnchor {
+            scrollTargets[document.id] = anchor
+        }
+    }
+
+    /// Re-parse before offering Rendered after a nesting refusal. The reason
+    /// clears only on a successful current-revision parse.
+    /// Re-parses before offering Rendered after a nesting refusal. The reason
+    /// clears only on a successful current-revision parse.
+    func tryRendered(_ document: MarkdownDocument) async {
+        guard !document.isLarge, !document.isReadOnly else { return }
+        let revision = document.revision
+        parseCoordinator.request(
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            revision: revision,
+            source: document.source
+        )
+        guard let state = await parseCoordinator.awaitSettled(
+            documentID: document.id,
+            revision: revision
+        ), document.revision == revision else {
+            lastError = "The document changed while parsing. Try again."
+            return
+        }
+        switch state {
+        case .ready:
+            document.setNestingLimit(false)
+            if !document.isSourceOnly {
+                document.mode = .rendered
+            }
+        case .refused:
+            document.setNestingLimit(true)
+        case .idle, .parsing:
+            lastError = "The document changed while parsing. Try again."
+        }
     }
 
     // MARK: - Commands
@@ -445,12 +634,182 @@ final class MarkdownWorkspace {
     func controller(for document: MarkdownDocument) -> MarkdownEditorController {
         let controller = editorCache.entry(
             for: document,
-            parseService: parseService
+            parseCoordinator: parseCoordinator
         ).controller
         controller.onCommandError = { [weak self] message in
             self?.lastError = message
         }
+        controller.rootGenerationProvider = { [weak self] in
+            self?.rootGeneration ?? 0
+        }
         return controller
+    }
+
+    /// Runs the correctness-only lint and the local link probe for one
+    /// document, then hands the diagnostics to its source editor.
+    func checkMarkdown(_ document: MarkdownDocument) async {
+        let revision = document.revision
+        parseCoordinator.request(
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            revision: revision,
+            source: document.source
+        )
+        guard let state = await parseCoordinator.awaitSettled(
+            documentID: document.id,
+            revision: revision
+        ), document.revision == revision,
+           case .ready(let output) = state else {
+            return
+        }
+        let base = MarkdownLintEngine.lint(
+            source: document.source,
+            ast: output.ast,
+            documentID: document.id,
+            revision: revision
+        )
+        let targets = MarkdownLintEngine.probeTargets(ast: output.ast)
+        let outcomes = await linkProbe.check(
+            destinations: targets.map(\.destination),
+            documentURL: document.fileURL,
+            root: workspaceRoot
+        )
+        guard document.revision == revision else { return }
+        let result = MarkdownLintEngine.appendingProbeResults(
+            outcomes,
+            targets: targets,
+            to: base
+        )
+        lintResults[document.id] = result
+        controller(for: document).setLintDiagnostics(result.diagnostics)
+    }
+
+    /// Scrolls to a heading in the current surface.
+    func jumpToHeading(_ row: TOCRow, in document: MarkdownDocument) {
+        if document.mode == .source, let range = row.range {
+            controller(for: document).select(
+                range: range.lowerBound..<range.upperBound
+            )
+        } else if let scrollID = row.scrollID {
+            scrollTargets[document.id] = scrollID
+        }
+    }
+
+    func quickOpenEntries() -> [MarkdownQuickOpenEntry] {
+        let tabs = documents.compactMap(\.fileURL)
+        return MarkdownQuickOpen.entries(
+            tabs: tabs,
+            files: workspaceFiles,
+            root: workspaceRoot
+        )
+    }
+
+    func openQuickEntry(_ entry: MarkdownQuickOpenEntry) {
+        isQuickOpenVisible = false
+        _ = open(url: entry.url)
+    }
+
+    /// Opens a file and selects the 1-based line and character column.
+    func openResult(
+        url: URL,
+        line: Int,
+        column: Int
+    ) {
+        guard let document = open(url: url) else { return }
+        document.mode = .source
+        let map = SourceMap(source: document.source)
+        guard let text = map.lineText(line) else { return }
+        let prefix = text.prefix(max(0, min(column - 1, text.count)))
+        let utf8Column = prefix.utf8.count
+        guard var offset = map.utf16Offset(
+            line: line,
+            utf8Column: utf8Column
+        ) else {
+            return
+        }
+        offset = min(offset, (document.source as NSString).length)
+        controller(for: document).select(range: offset..<offset)
+    }
+
+    func findInFiles(
+        _ query: String
+    ) async -> CodeSearchResult? {
+        guard let root = workspaceRoot else { return nil }
+        return await CodeProjectSearch().search(root: root, query: query)
+    }
+
+    func showRenderedFind() {
+        renderedFind.show()
+    }
+
+    func stepRenderedFind(_ delta: Int) {
+        renderedFind.step(delta)
+    }
+
+    func togglePalette() {
+        guard let document = selectedDocument,
+              document.mode == .source,
+              !document.isReadOnly else {
+            isPaletteVisible = false
+            return
+        }
+        isPaletteVisible.toggle()
+    }
+
+    func paletteEntries() -> [MarkdownCommandCatalog.Entry] {
+        guard let document = selectedDocument else { return [] }
+        let controller = controller(for: document)
+        let available = Set(controller.availableCommands())
+        return MarkdownCommandCatalog.paletteEntries {
+            available.contains($0)
+        }
+    }
+
+    func executePaletteCommand(_ command: MarkdownCommandKind) {
+        guard let document = selectedDocument else { return }
+        let controller = controller(for: document)
+        isPaletteVisible = false
+        if case .insertLink = command {
+            controller.presentLinkPopover()
+            return
+        }
+        _ = controller.perform(command)
+    }
+
+    func checkSelectedMarkdown() {
+        guard let document = selectedDocument else { return }
+        Task { await checkMarkdown(document) }
+    }
+
+    func goToNextProblem() {
+        guard let document = selectedDocument else { return }
+        controller(for: document).goToDiagnostic(backwards: false)
+    }
+
+    func goToPreviousProblem() {
+        guard let document = selectedDocument else { return }
+        controller(for: document).goToDiagnostic(backwards: true)
+    }
+
+    /// Replaces the frontmatter range through the one command path.
+    func commitFrontmatter(
+        _ document: MarkdownDocument,
+        range: Range<Int>,
+        text: String
+    ) {
+        controller(for: document).commitFrontmatter(
+            range: range,
+            text: text
+        )
+    }
+
+    /// Opens the link popover over the selected source document's caret, or
+    /// inserts a link when the caret is not on one.
+    func presentLinkPopoverOnSelected() {
+        guard let document = selectedDocument, document.mode == .source else {
+            return
+        }
+        controller(for: document).presentLinkPopover()
     }
 
     func perform(_ command: MarkdownCommandKind, on document: MarkdownDocument) {
@@ -491,9 +850,14 @@ final class MarkdownWorkspace {
         Task { @MainActor in
             do {
                 let change = try await document.checkExternalChange()
-                if change == .deleted {
+                switch change {
+                case .adopted, .conflict:
+                    await observeExternalChange(for: document)
+                case .deleted:
                     lastError = "The file was deleted on disk: "
                         + (document.fileURL?.lastPathComponent ?? "document")
+                case .none:
+                    break
                 }
             } catch {
                 lastError = "Cannot re-read "
@@ -553,16 +917,18 @@ final class MarkdownWorkspace {
     ) async {
         document.mode = .rendered
         guard let fragment, !fragment.isEmpty else { return }
-        let output = await parseService.parse(
-            MarkdownParseInput(
-                documentID: document.id,
-                revision: document.revision,
-                source: document.source
-            )
+        let revision = document.revision
+        parseCoordinator.request(
+            documentID: document.id,
+            identityGeneration: document.identityGeneration,
+            revision: revision,
+            source: document.source
         )
-        guard let output,
-              output.documentID == document.id,
-              output.revision == document.revision else {
+        guard let state = await parseCoordinator.awaitSettled(
+            documentID: document.id,
+            revision: revision
+        ), document.revision == revision,
+           case .ready(let output) = state else {
             return
         }
         if let scrollID = output.headings
@@ -616,11 +982,18 @@ final class MarkdownWorkspace {
             || url.pathExtension.lowercased() == "markdown" {
             guard let target = open(url: url) else { return }
             await navigate(to: target, fragment: fragment)
-        } else if let fragment, !fragment.isEmpty,
-                  var components = URLComponents(
-                      url: url,
-                      resolvingAgainstBaseURL: false
-                  ) {
+            return
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            lastError = "File not found: \(path)"
+            return
+        }
+        if onOpenAsset?(url) == true { return }
+        if let fragment, !fragment.isEmpty,
+           var components = URLComponents(
+               url: url,
+               resolvingAgainstBaseURL: false
+           ) {
             components.fragment = fragment
             NSWorkspace.shared.open(components.url ?? url)
         } else {
@@ -652,6 +1025,26 @@ final class MarkdownWorkspace {
         }
     }
 
+    /// Binds the project root without opening a document. The project owns
+    /// its tabs; binding only makes project-relative resolution and the
+    /// Markdown file index available.
+    func setWorkspaceRoot(_ url: URL) {
+        let root = MarkdownSecurity.canonical(url)
+        guard workspaceRoot != root else { return }
+        workspaceScanTask?.cancel()
+        workspaceScanTask = nil
+        workspaceRoot = root
+        rootGeneration &+= 1
+        pendingOpenFirst = false
+        configureSnapshots(for: root)
+        workspaceWatcher?.stop()
+        watcherRetryTask?.cancel()
+        startWorkspaceWatcher(for: root)
+        workspaceScanTask = Task { @MainActor [weak self] in
+            await self?.rescanWorkspaceIndex(root: root, openFirst: false)
+        }
+    }
+
     func openFolder(_ url: URL) async {
         let root = MarkdownSecurity.canonical(url)
         // A debounced rescan from the previous folder must not survive the
@@ -659,18 +1052,197 @@ final class MarkdownWorkspace {
         workspaceScanTask?.cancel()
         workspaceScanTask = nil
         workspaceRoot = root
+        rootGeneration &+= 1
+        pendingOpenFirst = false
+        configureSnapshots(for: root)
         workspaceWatcher?.stop()
         watcherRetryTask?.cancel()
 
         startWorkspaceWatcher(for: root)
 
-        await rescanWorkspaceIndex(root: root)
+        await rescanWorkspaceIndex(root: root, openFirst: true)
     }
 
     /// Starts the folder watcher, retrying a failed start while this folder
     /// remains the workspace. FSEvents can fail transiently (for example
     /// during a volume mount), and requiring the user to reopen the folder
     /// would silently leave the index stale.
+    /// The snapshot store follows the project root; a new root is a new
+    /// store, and old evidence stays under the old root.
+    private func configureSnapshots(for root: URL) {
+        snapshotStore = MarkdownSnapshotStore(
+            baseDirectory: snapshotBaseDirectory,
+            projectRoot: root
+        )
+    }
+
+    private static var defaultSnapshotBaseDirectory: URL {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        .appendingPathComponent(
+            "Sonovo/MarkdownSnapshots",
+            isDirectory: true
+        )
+    }
+
+    private func relativeSnapshotPath(for url: URL) -> String? {
+        guard let root = workspaceRoot else { return nil }
+        let rootPath = MarkdownSecurity.canonical(root).path
+        let path = MarkdownSecurity.canonical(url).path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        return String(path.dropFirst(prefix.count))
+    }
+
+    private func diskBytes(at url: URL) -> Data? {
+        try? Data(contentsOf: url)
+    }
+
+    @discardableResult
+    private func recordSaveHistory(
+        for document: MarkdownDocument,
+        kind: MarkdownHistoryPolicy.SaveKind
+    ) async -> MarkdownSnapshotRecord? {
+        guard let snapshots = snapshotStore,
+              let url = document.fileURL,
+              let relative = relativeSnapshotPath(for: url),
+              let bytes = diskBytes(at: url) else {
+            return nil
+        }
+        let result = await snapshots.recordHistory(
+            rawBytes: bytes,
+            relativePath: relative,
+            kind: kind
+        )
+        historyRevision &+= 1
+        switch result {
+        case .captured(let record):
+            await snapshots.setBaseline(
+                relativePath: relative,
+                recordID: record.id
+            )
+            return record
+        case .merged(let record):
+            await snapshots.setBaseline(
+                relativePath: relative,
+                recordID: record.id
+            )
+            return record
+        case .evidenceUnavailable:
+            return nil
+        }
+    }
+
+    private func observeExternalChange(for document: MarkdownDocument) async {
+        guard let snapshots = snapshotStore,
+              let url = document.fileURL,
+              let relative = relativeSnapshotPath(for: url),
+              let bytes = diskBytes(at: url) else {
+            return
+        }
+        _ = await snapshots.observe(
+            relativePath: relative,
+            diskBytes: bytes
+        )
+        historyRevision &+= 1
+    }
+
+    // MARK: - History and review panels
+
+    func historyRecords(
+        for document: MarkdownDocument
+    ) async -> [MarkdownSnapshotRecord] {
+        guard let snapshots = snapshotStore,
+              let url = document.fileURL,
+              let relative = relativeSnapshotPath(for: url) else {
+            return []
+        }
+        return await snapshots.records(for: relative)
+    }
+
+    func reviewTransitions(
+        for document: MarkdownDocument
+    ) async -> [MarkdownReviewTransition] {
+        guard let snapshots = snapshotStore,
+              let url = document.fileURL,
+              let relative = relativeSnapshotPath(for: url) else {
+            return []
+        }
+        return await snapshots.transitions(for: relative)
+    }
+
+    func restoreSnapshot(
+        _ record: MarkdownSnapshotRecord,
+        in document: MarkdownDocument
+    ) async {
+        // Keep the pre-restore state in history; a restore is never the only
+        // copy of what it replaced.
+        await recordSaveHistory(for: document, kind: .restore)
+        guard let snapshots = snapshotStore,
+              case let .bytes(rawBytes, _) = await snapshots.load(id: record.id),
+              let url = document.fileURL,
+              let current = diskBytes(at: url) else {
+            lastError = "Snapshot evidence is unavailable."
+            return
+        }
+        do {
+            _ = try await document.restore(
+                rawBytes: rawBytes,
+                expectedDiskBytes: current
+            )
+            historyRevision &+= 1
+        } catch {
+            lastError = "Restore failed: \(error)"
+        }
+    }
+
+    func deleteSnapshot(_ record: MarkdownSnapshotRecord) async {
+        await snapshotStore?.delete(id: record.id)
+        historyRevision &+= 1
+    }
+
+    func keepTransition(_ transition: MarkdownReviewTransition) async {
+        _ = await snapshotStore?.decide(
+            transitionID: transition.id,
+            keep: true
+        )
+        historyRevision &+= 1
+    }
+
+    func revertTransition(
+        _ transition: MarkdownReviewTransition,
+        in document: MarkdownDocument
+    ) async {
+        guard let snapshots = snapshotStore,
+              let url = document.fileURL,
+              let current = diskBytes(at: url) else { return }
+        let decision = await snapshots.decide(
+            transitionID: transition.id,
+            keep: false,
+            currentDiskBytes: current
+        )
+        switch decision {
+        case .revert(let rawBytes):
+            do {
+                _ = try await document.restore(
+                    rawBytes: rawBytes,
+                    expectedDiskBytes: current
+                )
+            } catch {
+                lastError = "Revert failed: \(error)"
+            }
+        case .staleDisk:
+            lastError = "The file changed again; review the new state."
+        case .evidenceUnavailable:
+            lastError = "Snapshot evidence is unavailable."
+        case .kept, .alreadyDecided:
+            break
+        }
+        historyRevision &+= 1
+    }
+
     private func startWorkspaceWatcher(for root: URL) {
         let watcher = WorkspaceDirectoryWatcher(path: root.path) {
             [weak self] in
@@ -715,12 +1287,18 @@ final class MarkdownWorkspace {
     }
 
     /// Rebuilds the index off the main actor. A scan that finishes after a
-    /// newer one has started is discarded.
-    private func rescanWorkspaceIndex(root: URL) async {
+    /// newer one has started is discarded. Rescans are index-only unless a
+    /// caller explicitly opens the folder; a filesystem change must never
+    /// open a document on the user's behalf.
+    func rescanWorkspaceIndex(
+        root: URL,
+        openFirst: Bool = false
+    ) async {
         // Reject a scan for an old root before touching the generation;
         // otherwise it invalidates the new root's scan and then discards
         // itself, leaving no index at all.
         guard workspaceRoot == root else { return }
+        if openFirst { pendingOpenFirst = true }
         workspaceScanGeneration += 1
         let generation = workspaceScanGeneration
         let files = await Task.detached(priority: .userInitiated) {
@@ -732,7 +1310,11 @@ final class MarkdownWorkspace {
             return
         }
         workspaceFiles = files
-        if documents.isEmpty, let first = files.first {
+        // The intent belongs to the folder, not to one scan: a watcher
+        // rescan that superseded an explicit open still opens the document.
+        let shouldOpen = pendingOpenFirst
+        pendingOpenFirst = false
+        if shouldOpen, documents.isEmpty, let first = files.first {
             open(url: first)
         }
     }

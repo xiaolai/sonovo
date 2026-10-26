@@ -14,6 +14,31 @@ private func cleanup(_ url: URL) {
     try? FileManager.default.removeItem(at: url)
 }
 
+/// Pauses a save at a hook so a test can edit the document mid-write.
+private final class SaveGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = false
+    private var released = false
+
+    func markEntered() {
+        lock.lock(); entered = true; lock.unlock()
+    }
+
+    var hasEntered: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return entered
+    }
+
+    func release() {
+        lock.lock(); released = true; lock.unlock()
+    }
+
+    var isReleased: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return released
+    }
+}
+
 @Suite("Encoding")
 struct EncodingTests {
     @Test("Decodes LF, CRLF, BOM, and mixed line endings")
@@ -544,31 +569,7 @@ struct MarkdownDocumentTests {
 
         // The hook runs on the detached save task. A lock-backed gate lets
         // the async test wait without blocking an async context.
-        final class Gate: @unchecked Sendable {
-            private let lock = NSLock()
-            private var entered = false
-            private var released = false
-
-            func markEntered() {
-                lock.lock(); entered = true; lock.unlock()
-            }
-
-            var hasEntered: Bool {
-                lock.lock(); defer { lock.unlock() }
-                return entered
-            }
-
-            func release() {
-                lock.lock(); released = true; lock.unlock()
-            }
-
-            var isReleased: Bool {
-                lock.lock(); defer { lock.unlock() }
-                return released
-            }
-        }
-
-        let gate = Gate()
+        let gate = SaveGate()
         let hooks = SaveHooks(beforeRename: { _ in
             gate.markEntered()
             while !gate.isReleased {
@@ -607,6 +608,72 @@ struct MarkdownDocumentTests {
         #expect(outcome.artifacts.newContent != nil)
     }
 
+    @Test("Save As keeps a live-grown buffer editable")
+    func saveAsKeepsLiveGrowthEditable() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let destination = directory.appendingPathComponent("big.md")
+
+        let document = MarkdownDocument(untitledWith: MarkdownFileStore())
+        let big = String(
+            repeating: "a",
+            count: MarkdownLimits.maxEditableDocumentBytes + 1
+        )
+        try document.replaceSource(big)
+        #expect(document.isLarge)
+        #expect(!document.isReadOnly)
+
+        _ = try await document.saveAs(to: destination)
+        #expect(document.isLarge)
+        #expect(!document.isReadOnly)
+        #expect(document.forcedSourceReason == .largeBuffer)
+
+        try document.replaceSource("small")
+        #expect(!document.isLarge)
+        #expect(!document.isReadOnly)
+    }
+
+    @Test("Save As recomputes size from the buffer, not the saved bytes")
+    func saveAsSizeFollowsBufferDuringWrite() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let destination = directory.appendingPathComponent("saved.md")
+        try Data("old\n".utf8).write(to: destination)
+
+        let document = MarkdownDocument(untitledWith: MarkdownFileStore())
+        try document.replaceSource("first\n")
+
+        let gate = SaveGate()
+        let hooks = SaveHooks(beforeRename: { _ in
+            gate.markEntered()
+            while !gate.isReleased {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        })
+
+        let saveTask = Task {
+            try await document.saveAs(to: destination, hooks: hooks)
+        }
+        for _ in 0..<500 where !gate.hasEntered {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(gate.hasEntered)
+        let big = String(
+            repeating: "a",
+            count: MarkdownLimits.maxEditableDocumentBytes + 1
+        )
+        try document.replaceSource(big)
+        gate.release()
+        _ = try await saveTask.value
+
+        // The saved bytes were small; the buffer is not.
+        #expect(document.isLarge)
+        #expect(!document.isReadOnly)
+        #expect(document.forcedSourceReason == .largeBuffer)
+        try document.replaceSource("small")
+        #expect(!document.isLarge)
+    }
+
     @Test("Save As does not mark edits made during the write as saved")
     func saveAsDuringEdit() async throws {
         let directory = try temporaryDirectory()
@@ -617,31 +684,7 @@ struct MarkdownDocumentTests {
         let document = MarkdownDocument(untitledWith: MarkdownFileStore())
         try document.replaceSource("first\n")
 
-        final class Gate: @unchecked Sendable {
-            private let lock = NSLock()
-            private var entered = false
-            private var released = false
-
-            func markEntered() {
-                lock.lock(); entered = true; lock.unlock()
-            }
-
-            var hasEntered: Bool {
-                lock.lock(); defer { lock.unlock() }
-                return entered
-            }
-
-            func release() {
-                lock.lock(); released = true; lock.unlock()
-            }
-
-            var isReleased: Bool {
-                lock.lock(); defer { lock.unlock() }
-                return released
-            }
-        }
-
-        let gate = Gate()
+        let gate = SaveGate()
         let hooks = SaveHooks(beforeRename: { _ in
             gate.markEntered()
             while !gate.isReleased {

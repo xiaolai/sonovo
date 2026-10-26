@@ -18,6 +18,32 @@ public enum MarkdownCommandKind: Sendable, Equatable, Hashable {
     case insertTOC
     case replaceAll(query: String, replacement: String, caseSensitive: Bool)
     case setDetailsOpen(Bool)
+    case insertTable(rows: Int, columns: Int)
+    case insertTableRowAbove
+    case insertTableRowBelow
+    case deleteTableRow
+    case insertTableColumnLeft
+    case insertTableColumnRight
+    case deleteTableColumn
+    case deleteTable
+    case setTableAlignment(TableBlock.Alignment)
+    case formatTable
+    /// Replaces exactly the frontmatter range the panel was opened on.
+    case replaceFrontmatter(range: Range<Int>, text: String)
+    case lineUp
+    case lineDown
+    case duplicateLine
+    case deleteLine
+    case joinLines
+    case removeBlankLines
+    case sortLinesAscending
+    case sortLinesDescending
+    case uppercase
+    case lowercase
+    case titleCase
+    case toggleCase
+    case trimTrailingSpaces
+    case collapseBlankLines
 }
 
 /// The list shapes a toggle can produce.
@@ -25,6 +51,61 @@ public enum MarkdownListKind: Sendable, Equatable, Hashable {
     case bullet
     case ordered
     case task
+}
+
+/// The exact bytes and identity an action was prepared against.
+///
+/// A command that presents UI, schedules asynchronous work, or applies an edit
+/// captures a target first and refuses when any component differs. The source
+/// slice check catches a moved or edited range even when the revision counter
+/// was not advanced by the caller.
+public struct MarkdownActionTarget: Sendable, Equatable {
+    public let documentID: UUID
+    public let identityGeneration: UInt64
+    public let sourceRevision: UInt64
+    public let range: Range<Int>
+    public let expectedSlice: String
+    public let rootGeneration: UInt64
+
+    public init(
+        documentID: UUID,
+        identityGeneration: UInt64,
+        sourceRevision: UInt64,
+        range: Range<Int>,
+        expectedSlice: String,
+        rootGeneration: UInt64
+    ) {
+        self.documentID = documentID
+        self.identityGeneration = identityGeneration
+        self.sourceRevision = sourceRevision
+        self.range = range
+        self.expectedSlice = expectedSlice
+        self.rootGeneration = rootGeneration
+    }
+
+    /// Whether the target still names the same bytes in the same document.
+    public func isCurrent(in context: MarkdownCommandContext) -> Bool {
+        guard let documentID = context.documentID,
+              documentID == self.documentID,
+              context.identityGeneration == identityGeneration,
+              context.sourceRevision == sourceRevision,
+              context.rootGeneration == rootGeneration else {
+            return false
+        }
+        let ns = context.source as NSString
+        guard range.lowerBound >= 0,
+              range.upperBound <= ns.length,
+              range.lowerBound <= range.upperBound else {
+            return false
+        }
+        let slice = ns.substring(
+            with: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            )
+        )
+        return slice == expectedSlice
+    }
 }
 
 /// Everything a command needs to decide availability and apply itself.
@@ -35,19 +116,41 @@ public struct MarkdownCommandContext: Sendable, Equatable {
     public var isReadOnly: Bool
     public var hasMarkedText: Bool
     public var mode: MarkdownDocumentMode
+    /// The document identity. `nil` in pure command tests that do not need a
+    /// stale-target check.
+    public var documentID: UUID?
+    /// Incremented by Save As or another identity change.
+    public var identityGeneration: UInt64
+    /// The source revision the caller believes it is editing.
+    public var sourceRevision: UInt64
+    /// Incremented when the effective root changes or a document is
+    /// re-resolved to a different path.
+    public var rootGeneration: UInt64
+    /// The captured target for an action that must prove it still applies.
+    public var target: MarkdownActionTarget?
 
     public init(
         source: String,
         selection: Range<Int>,
         isReadOnly: Bool = false,
         hasMarkedText: Bool = false,
-        mode: MarkdownDocumentMode = .source
+        mode: MarkdownDocumentMode = .source,
+        documentID: UUID? = nil,
+        identityGeneration: UInt64 = 0,
+        sourceRevision: UInt64 = 0,
+        rootGeneration: UInt64 = 0,
+        target: MarkdownActionTarget? = nil
     ) {
         self.source = source
         self.selection = selection
         self.isReadOnly = isReadOnly
         self.hasMarkedText = hasMarkedText
         self.mode = mode
+        self.documentID = documentID
+        self.identityGeneration = identityGeneration
+        self.sourceRevision = sourceRevision
+        self.rootGeneration = rootGeneration
+        self.target = target
     }
 }
 
@@ -119,6 +222,12 @@ public enum MarkdownCommandError: Error, Equatable {
     case invalidSelection
     case invalidDestination(String)
     case detailsNotFound
+    case staleTarget
+    /// The caret is not in a context the command can edit.
+    case notApplicable(String)
+    /// The enclosing table is malformed or the operation is structurally
+    /// impossible.
+    case tableRefused(String)
 }
 
 /// The single command registry.
@@ -136,6 +245,9 @@ public struct MarkdownCommandRegistry: Sendable {
         guard !context.isReadOnly,
               !context.hasMarkedText,
               context.mode == .source else {
+            return false
+        }
+        if let target = context.target, !target.isCurrent(in: context) {
             return false
         }
         switch command {
@@ -175,6 +287,34 @@ public struct MarkdownCommandRegistry: Sendable {
         case .replaceAll: "Replace All"
         case .setDetailsOpen(true): "Open Details"
         case .setDetailsOpen(false): "Close Details"
+        case .insertTable: "Insert Table"
+        case .insertTableRowAbove: "Insert Row Above"
+        case .insertTableRowBelow: "Insert Row Below"
+        case .deleteTableRow: "Delete Row"
+        case .insertTableColumnLeft: "Insert Column Left"
+        case .insertTableColumnRight: "Insert Column Right"
+        case .deleteTableColumn: "Delete Column"
+        case .deleteTable: "Delete Table"
+        case .setTableAlignment(.none): "Clear Column Alignment"
+        case .setTableAlignment(.left): "Align Column Left"
+        case .setTableAlignment(.center): "Align Column Center"
+        case .setTableAlignment(.right): "Align Column Right"
+        case .formatTable: "Format Table"
+        case .replaceFrontmatter: "Edit Frontmatter"
+        case .lineUp: "Move Line Up"
+        case .lineDown: "Move Line Down"
+        case .duplicateLine: "Duplicate Line"
+        case .deleteLine: "Delete Line"
+        case .joinLines: "Join Lines"
+        case .removeBlankLines: "Remove Blank Lines"
+        case .sortLinesAscending: "Sort Lines Ascending"
+        case .sortLinesDescending: "Sort Lines Descending"
+        case .uppercase: "Uppercase"
+        case .lowercase: "Lowercase"
+        case .titleCase: "Title Case"
+        case .toggleCase: "Toggle Case"
+        case .trimTrailingSpaces: "Remove Trailing Spaces"
+        case .collapseBlankLines: "Collapse Blank Lines"
         }
     }
 
@@ -182,6 +322,9 @@ public struct MarkdownCommandRegistry: Sendable {
         _ command: MarkdownCommandKind,
         to context: MarkdownCommandContext
     ) throws -> MarkdownCommandResult {
+        if let target = context.target, !target.isCurrent(in: context) {
+            throw MarkdownCommandError.staleTarget
+        }
         guard isAvailable(command, in: context) else {
             throw MarkdownCommandError.unavailable(title(for: command))
         }
@@ -234,6 +377,218 @@ public struct MarkdownCommandRegistry: Sendable {
             )
         case .setDetailsOpen(let open):
             return try setDetailsOpen(open, context)
+        case .insertTable(let rows, let columns):
+            return try applyTable(
+                .insert(rows: rows, columns: columns),
+                name: title(for: command),
+                context
+            )
+        case .insertTableRowAbove:
+            return try applyTable(
+                .insertRowAbove,
+                name: title(for: command),
+                context
+            )
+        case .insertTableRowBelow:
+            return try applyTable(
+                .insertRowBelow,
+                name: title(for: command),
+                context
+            )
+        case .deleteTableRow:
+            return try applyTable(
+                .deleteRow,
+                name: title(for: command),
+                context
+            )
+        case .insertTableColumnLeft:
+            return try applyTable(
+                .insertColumnLeft,
+                name: title(for: command),
+                context
+            )
+        case .insertTableColumnRight:
+            return try applyTable(
+                .insertColumnRight,
+                name: title(for: command),
+                context
+            )
+        case .deleteTableColumn:
+            return try applyTable(
+                .deleteColumn,
+                name: title(for: command),
+                context
+            )
+        case .deleteTable:
+            return try applyTable(
+                .deleteTable,
+                name: title(for: command),
+                context
+            )
+        case .setTableAlignment(let alignment):
+            return try applyTable(
+                .setAlignment(alignment),
+                name: title(for: command),
+                context
+            )
+        case .formatTable:
+            return try applyTable(
+                .format,
+                name: title(for: command),
+                context
+            )
+        case .replaceFrontmatter(let range, let text):
+            return try replaceFrontmatter(
+                range: range,
+                text: text,
+                context
+            )
+        case .lineUp, .lineDown, .duplicateLine, .deleteLine, .joinLines,
+             .removeBlankLines, .sortLinesAscending, .sortLinesDescending,
+             .uppercase, .lowercase, .titleCase, .toggleCase,
+             .trimTrailingSpaces, .collapseBlankLines:
+            return try applyLine(
+                lineCommand(for: command),
+                name: title(for: command),
+                context
+            )
+        }
+    }
+
+    private func lineCommand(
+        for command: MarkdownCommandKind
+    ) -> MarkdownLineCommand {
+        switch command {
+        case .lineUp: return .moveUp
+        case .lineDown: return .moveDown
+        case .duplicateLine: return .duplicate
+        case .deleteLine: return .delete
+        case .joinLines: return .join
+        case .removeBlankLines: return .removeBlankLines
+        case .sortLinesAscending: return .sortAscending
+        case .sortLinesDescending: return .sortDescending
+        case .uppercase: return .uppercase
+        case .lowercase: return .lowercase
+        case .titleCase: return .titleCase
+        case .toggleCase: return .toggleCase
+        case .trimTrailingSpaces: return .trimTrailingSpaces
+        case .collapseBlankLines: return .collapseBlankLines
+        default: return .join
+        }
+    }
+
+    private func applyLine(
+        _ command: MarkdownLineCommand,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let edit = MarkdownLineEditor.edit(
+            command,
+            source: context.source,
+            selection: context.selection
+        )
+        switch edit.outcome {
+        case .notApplicable:
+            throw MarkdownCommandError.notApplicable(name)
+        case .refused:
+            throw MarkdownCommandError.notApplicable(name)
+        case .handled:
+            guard let range = edit.range,
+                  let replacement = edit.replacement else {
+                throw MarkdownCommandError.notApplicable(name)
+            }
+            let ns = context.source as NSString
+            guard range.lowerBound >= 0,
+                  range.upperBound <= ns.length else {
+                throw MarkdownCommandError.invalidSelection
+            }
+            let newSource = ns.replacingCharacters(
+                in: NSRange(
+                    location: range.lowerBound,
+                    length: range.upperBound - range.lowerBound
+                ),
+                with: replacement
+            )
+            return MarkdownCommandResult(
+                source: newSource,
+                selection: edit.selection ?? context.selection,
+                actionName: name,
+                previousSource: context.source
+            )
+        }
+    }
+
+    /// Replaces exactly the frontmatter range. The caller captures the range
+    /// and slice in a target; a stale target refuses before this runs.
+    private func replaceFrontmatter(
+        range: Range<Int>,
+        text: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        guard range.lowerBound >= 0,
+              range.upperBound <= ns.length,
+              range.lowerBound <= range.upperBound else {
+            throw MarkdownCommandError.invalidSelection
+        }
+        let newSource = ns.replacingCharacters(
+            in: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            ),
+            with: text
+        )
+        let caret = min(
+            range.lowerBound + (text as NSString).length,
+            (newSource as NSString).length
+        )
+        return MarkdownCommandResult(
+            source: newSource,
+            selection: caret..<caret,
+            actionName: "Edit Frontmatter",
+            previousSource: context.source
+        )
+    }
+
+    /// Applies a source-level table edit through the one command path.
+    private func applyTable(
+        _ command: MarkdownTableCommand,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let edit = MarkdownTableEditor.edit(
+            command,
+            source: context.source,
+            selection: context.selection
+        )
+        switch edit.outcome {
+        case .notApplicable:
+            throw MarkdownCommandError.notApplicable(name)
+        case .refused(let reason):
+            throw MarkdownCommandError.tableRefused(reason.rawValue)
+        case .handled:
+            guard let range = edit.range,
+                  let replacement = edit.replacement else {
+                throw MarkdownCommandError.notApplicable(name)
+            }
+            let ns = context.source as NSString
+            guard range.lowerBound >= 0,
+                  range.upperBound <= ns.length else {
+                throw MarkdownCommandError.invalidSelection
+            }
+            let newSource = ns.replacingCharacters(
+                in: NSRange(
+                    location: range.lowerBound,
+                    length: range.upperBound - range.lowerBound
+                ),
+                with: replacement
+            )
+            return MarkdownCommandResult(
+                source: newSource,
+                selection: edit.selection ?? context.selection,
+                actionName: name,
+                previousSource: context.source
+            )
         }
     }
 

@@ -22,7 +22,7 @@ final class MarkdownEditorCache {
 
     func entry(
         for document: MarkdownDocument,
-        parseService: MarkdownParseService,
+        parseCoordinator: MarkdownParseCoordinator,
         parseDebounce: TimeInterval = 0.12
     ) -> Entry {
         if let existing = entries[document.id] {
@@ -31,7 +31,7 @@ final class MarkdownEditorCache {
 
         let controller = MarkdownEditorController(
             document: document,
-            parseService: parseService,
+            parseCoordinator: parseCoordinator,
             parseDebounce: parseDebounce
         )
         let entry = Entry(
@@ -48,6 +48,6 @@ final class MarkdownEditorCache {
     }
 
     func remove(for id: UUID) {
-        entries.removeValue(forKey: id)
+        entries.removeValue(forKey: id)?.controller.detach()
     }
 }

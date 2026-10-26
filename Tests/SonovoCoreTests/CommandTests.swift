@@ -20,6 +20,76 @@ struct CommandTests {
         )
     }
 
+    @Test("A table command rewrites only the table block")
+    func tableCommand() throws {
+        let source = "before\n| a | b |\n| --- | --- |\n| 1 | 2 |\nafter"
+        let caret = (source as NSString).range(of: "1").location
+        let result = try apply(
+            .insertTableRowBelow,
+            to: source,
+            selection: caret..<caret
+        )
+        #expect(result.source.hasPrefix("before\n"))
+        #expect(result.source.hasSuffix("\nafter"))
+        #expect(result.source.contains("| 1 | 2 |\n|     |     |"))
+        #expect(result.actionName == "Insert Row Below")
+    }
+
+    @Test("Line commands run through the one command path")
+    func lineCommand() throws {
+        let moved = try apply(
+            .lineUp,
+            to: "A\nB\n",
+            selection: 3..<3
+        )
+        #expect(moved.source == "B\nA\n")
+        let upper = try apply(.uppercase, to: "abc", selection: 0..<3)
+        #expect(upper.source == "ABC")
+        #expect(upper.actionName == "Uppercase")
+    }
+
+    @Test("Frontmatter replacement touches only its range")
+    func frontmatterReplace() throws {
+        let source = "---\ntitle: A\n---\n\nBody\n"
+        let parsed = MarkdownParser.parseCanonical(source)
+        let frontmatter = try #require(parsed.ast.frontmatter?.range)
+        let range: Range<Int> = frontmatter.lowerBound..<frontmatter.upperBound
+        let result = try apply(
+            .replaceFrontmatter(
+                range: range,
+                text: "---\ntitle: B\n---"
+            ),
+            to: source,
+            selection: 0..<0
+        )
+        #expect(result.source == "---\ntitle: B\n---\n\nBody\n")
+        #expect(result.actionName == "Edit Frontmatter")
+    }
+
+    @Test("A malformed table refuses a semantic command")
+    func malformedTableCommand() {
+        let source = "| a | b |\n| --- |\n| 1 | 2 |"
+        let caret = (source as NSString).range(of: "a").location
+        #expect(throws: MarkdownCommandError.tableRefused("malformedTable")) {
+            try apply(
+                .deleteTableRow,
+                to: source,
+                selection: caret..<caret
+            )
+        }
+    }
+
+    @Test("A table command outside a table is not applicable")
+    func tableCommandOutside() {
+        #expect(throws: MarkdownCommandError.notApplicable("Delete Row")) {
+            try apply(
+                .deleteTableRow,
+                to: "plain",
+                selection: 0..<0
+            )
+        }
+    }
+
     @Test("Wrapping toggles are fixed points and preserve whitespace")
     func wrapping() throws {
         let bold = try apply(
@@ -567,5 +637,50 @@ struct CommandTests {
             selection: 0..<11
         )
         #expect(emptyChecked.source == "- [x]\n- [ ] plain")
+    }
+
+    @Test("A stale action target refuses before applying")
+    func staleTargetRefuses() throws {
+        let id = UUID()
+        let target = MarkdownActionTarget(
+            documentID: id,
+            identityGeneration: 1,
+            sourceRevision: 7,
+            range: 1..<4,
+            expectedSlice: "abc",
+            rootGeneration: 2
+        )
+        let current = MarkdownCommandContext(
+            source: "xabcx",
+            selection: 1..<4,
+            documentID: id,
+            identityGeneration: 1,
+            sourceRevision: 7,
+            rootGeneration: 2,
+            target: target
+        )
+        #expect(registry.isAvailable(.toggleStrong, in: current))
+        let result = try registry.apply(.toggleStrong, to: current)
+        #expect(result.source == "x**abc**x")
+
+        var newerRevision = current
+        newerRevision.sourceRevision = 8
+        #expect(!registry.isAvailable(.toggleStrong, in: newerRevision))
+        #expect(throws: MarkdownCommandError.staleTarget) {
+            try registry.apply(.toggleStrong, to: newerRevision)
+        }
+
+        var changedSlice = current
+        changedSlice.source = "xabdx"
+        #expect(!registry.isAvailable(.toggleStrong, in: changedSlice))
+        #expect(throws: MarkdownCommandError.staleTarget) {
+            try registry.apply(.toggleStrong, to: changedSlice)
+        }
+
+        var differentRoot = current
+        differentRoot.rootGeneration = 3
+        #expect(throws: MarkdownCommandError.staleTarget) {
+            try registry.apply(.toggleStrong, to: differentRoot)
+        }
     }
 }

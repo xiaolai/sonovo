@@ -49,6 +49,9 @@ final class Project: Identifiable {
     var openTabs: [EditorTab]
     var selectedTabID: String
     var selectedAssetID: String?
+    /// The tab that was active before the current one. Ctrl+Tab toggles
+    /// between the two; it is updated only by an explicit tab selection.
+    private(set) var lastUsedTabID: String?
 
     /// The file tabs worth restoring at launch. Synthetic workspace tabs are
     /// recreated on demand, and demo sample tabs have no scanned assets.
@@ -365,6 +368,18 @@ final class Project: Identifiable {
             sampleDocuments: nil
         )
         code.setWorkspaceRoot(root)
+        markdown.setWorkspaceRoot(root)
+        markdown.onOpenAsset = { [weak self] url in
+            guard let self else { return false }
+            let path = MarkdownSecurity.canonical(url).path
+            guard let asset = self.assets.first(where: {
+                MarkdownSecurity.canonical($0.url).path == path
+            }) else {
+                return false
+            }
+            self.openAsset(asset)
+            return true
+        }
     }
 
     static func demo(
@@ -1073,10 +1088,44 @@ final class Project: Identifiable {
     func selectTab(_ id: String) {
         guard let tab = openTabs.first(where: { $0.id == id }) else { return }
         noteSelectionChange()
+        if selectedTabID != id, !selectedTabID.isEmpty {
+            lastUsedTabID = selectedTabID
+        }
         selectedTabID = id
         selectedAssetID = tab.assetID
         bindDocument(for: tab)
         onSelectionChanged?()
+    }
+
+    /// Ctrl+Tab. Selecting the previous tab makes it the new previous, so a
+    /// second press returns to where the user started.
+    func toggleLastUsedTab() {
+        guard let lastUsedTabID,
+              lastUsedTabID != selectedTabID,
+              openTabs.contains(where: { $0.id == lastUsedTabID }) else {
+            return
+        }
+        selectTab(lastUsedTabID)
+    }
+
+    func selectNextTab() {
+        selectTab(offset: 1)
+    }
+
+    func selectPreviousTab() {
+        selectTab(offset: -1)
+    }
+
+    private func selectTab(offset: Int) {
+        guard openTabs.count > 1,
+              let current = openTabs.firstIndex(where: {
+                  $0.id == selectedTabID
+              }) else {
+            return
+        }
+        let count = openTabs.count
+        let index = ((current + offset) % count + count) % count
+        selectTab(openTabs[index].id)
     }
 
     private func bindDocument(for tab: EditorTab) {

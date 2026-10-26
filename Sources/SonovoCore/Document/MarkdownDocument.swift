@@ -58,6 +58,15 @@ public enum CloseOutcome: Sendable, Equatable {
     case needsDecision(CloseBlocker)
 }
 
+public enum MarkdownRestoreError: Error, Equatable {
+    case unsupportedEncoding
+    case tooLarge
+    case staleDisk
+    case readOnly
+    case untitled
+    case closed
+}
+
 public enum DocumentError: Error, Equatable {
     case readOnly
     case untitled
@@ -65,6 +74,29 @@ public enum DocumentError: Error, Equatable {
     case readFailed(String)
     case staleCompletion
     case editTooLarge
+}
+
+/// Why a document is forced to Source mode.
+public enum ForcedSourceReason: String, Sendable, Equatable {
+    /// The file was admitted read-only above the editable threshold.
+    case large
+    /// The open buffer grew past the editable threshold through editing.
+    case largeBuffer
+    /// A snapshot above the editable threshold was restored editable for
+    /// this session. Rendered/parse stays off, but the buffer is not
+    /// read-only: commit, undo, and the ordinary save path all apply.
+    case largeRestored
+    /// The parser refused the container nesting.
+    case nestingLimit
+    /// The live buffer exceeded the read cap or line cap.
+    case bufferCap
+}
+
+/// The external file's state while the document stays open.
+public enum MarkdownDiskState: Sendable, Equatable {
+    case readable
+    case tooLarge
+    case unreadable(String)
 }
 
 /// One open Markdown document.
@@ -91,6 +123,11 @@ public final class MarkdownDocument: Identifiable {
     public private(set) var hasBOM: Bool
     public private(set) var isReadOnly: Bool
     public private(set) var isLarge: Bool
+    /// A visible reason for Source-only presentation. `nil` when Rendered is
+    /// eligible.
+    public private(set) var forcedSourceReason: ForcedSourceReason?
+    /// The external file's state while this document stays open.
+    public private(set) var diskState: MarkdownDiskState = .readable
     /// The file this document was loaded from is gone from disk.
     public private(set) var isMissingOnDisk = false
     /// The workspace discarded this document. Queued saves must not run.
@@ -126,6 +163,12 @@ public final class MarkdownDocument: Identifiable {
         revision != savedRevision || (fileURL == nil && revision > 0)
     }
 
+    /// Source is the only eligible surface: a size state, a live-buffer
+    /// growth, or a parse refusal.
+    public var isSourceOnly: Bool {
+        isLarge || forcedSourceReason != nil
+    }
+
     // MARK: - Construction
 
     public init(
@@ -154,6 +197,7 @@ public final class MarkdownDocument: Identifiable {
         self.hasBOM = loaded.contents.hasBOM
         self.isReadOnly = loaded.isLarge
         self.isLarge = loaded.isLarge
+        self.forcedSourceReason = loaded.isLarge ? .large : nil
         undoManager.groupsByEvent = false
         undoManager.levelsOfUndo = DocumentHistoryLimits.undoLevels
     }
@@ -170,6 +214,20 @@ public final class MarkdownDocument: Identifiable {
         guard newSource != source else { return }
 
         let oldSource = source
+        let newBytes = newSource.utf8.count
+        // The reader refuses a file with more than `maxSourceLines` newlines
+        // no matter how few bytes it has. A document that could be saved but
+        // never reopened is a trap, so the same counting applies here. The
+        // byte floor keeps the scan off the per-keystroke path: a string
+        // with more newlines than the cap must have at least that many
+        // bytes.
+        if newBytes > MarkdownLimits.maxSourceLines {
+            let newLines = newlineCount(newSource)
+            if newLines > MarkdownLimits.maxSourceLines,
+               newLines > newlineCount(oldSource) {
+                throw DocumentError.editTooLarge
+            }
+        }
         // `groupsByEvent` is off so tests and commands are deterministic;
         // each edit therefore opens its own explicit undo group.
         undoManager.beginUndoGrouping()
@@ -180,6 +238,7 @@ public final class MarkdownDocument: Identifiable {
         undoManager.endUndoGrouping()
 
         source = newSource
+        updateLiveBufferState(byteCount: newBytes)
         revision += 1
         lastEdit = Date()
         if firstPendingEdit == nil {
@@ -358,10 +417,129 @@ public final class MarkdownDocument: Identifiable {
         identityGeneration += 1
         diskSnapshot = outcome.snapshot
         isMissingOnDisk = false
-        applySize(for: outcome.snapshot)
+        // Save As adopts a destination, not a foreign file: the buffer keeps
+        // the admission it already had. Marking a live-grown buffer
+        // read-only here would trap undo and every shrinking edit, and an
+        // edit made during the write could no longer be saved. The state
+        // follows the buffer as it stands now, not the bytes written at the
+        // start of the save.
+        updateLiveBufferState(byteCount: source.utf8.count)
         conflict = nil
         adoptSaveOutcome(outcome, revisionAtStart: revisionAtStart)
         return outcome
+    }
+
+    /// Replaces the buffer with a snapshot's exact bytes and saves through
+    /// the compare-and-swap path, in one undo group covering text, BOM/EOL
+    /// metadata, selection, and admission state.
+    ///
+    /// `expectedDiskBytes` is the disk content the caller believes is
+    /// current. When the disk no longer matches, the restore refuses before
+    /// mutation.
+    @discardableResult
+    public func restore(
+        rawBytes: Data,
+        expectedDiskBytes: Data?,
+        selection: Range<Int>? = nil
+    ) async throws -> SaveOutcome? {
+        guard !isClosed else { throw MarkdownRestoreError.closed }
+        guard fileURL != nil else { throw MarkdownRestoreError.untitled }
+        guard !isReadOnly else { throw MarkdownRestoreError.readOnly }
+        guard Self.hasLoneCarriageReturn(rawBytes) == false else {
+            throw MarkdownRestoreError.unsupportedEncoding
+        }
+        guard let contents = try? MarkdownEncoding.decode(rawBytes),
+              !contents.hadMixedLineEndings else {
+            throw MarkdownRestoreError.unsupportedEncoding
+        }
+        let newlineCount = rawBytes.reduce(into: 0) { count, byte in
+            if byte == 0x0A { count += 1 }
+        }
+        guard rawBytes.count <= MarkdownLimits.maxReadBytes,
+              newlineCount <= MarkdownLimits.maxSourceLines else {
+            throw MarkdownRestoreError.tooLarge
+        }
+        guard let url = fileURL,
+              let current = try store.diskSnapshot(at: url) else {
+            throw MarkdownRestoreError.staleDisk
+        }
+        if let expectedDiskBytes, expectedDiskBytes != current.bytes {
+            throw MarkdownRestoreError.staleDisk
+        }
+
+        diskSnapshot = current
+        let large = rawBytes.count > MarkdownLimits.maxEditableDocumentBytes
+        applyRestoredState(
+            text: contents.canonicalText,
+            hasBOM: contents.hasBOM,
+            lineEnding: contents.lineEnding,
+            selection: selection,
+            forcedReason: large ? .largeRestored : nil,
+            isLarge: large,
+            actionName: "Restore Snapshot"
+        )
+        return try await save(mode: .explicitOverwrite)
+    }
+
+    private static func hasLoneCarriageReturn(_ data: Data) -> Bool {
+        var index = data.startIndex
+        while index < data.endIndex {
+            if data[index] == 0x0D {
+                let next = data.index(after: index)
+                if next >= data.endIndex || data[next] != 0x0A {
+                    return true
+                }
+            }
+            index = data.index(after: index)
+        }
+        return false
+    }
+
+    /// Registers the previous text, metadata, selection, and admission as one
+    /// undo step, then applies the new state. Undo of this state registers the
+    /// reverse, so redo works through the same path.
+    private func applyRestoredState(
+        text: String,
+        hasBOM: Bool,
+        lineEnding: LineEnding,
+        selection: Range<Int>?,
+        forcedReason: ForcedSourceReason?,
+        isLarge: Bool,
+        actionName: String
+    ) {
+        let previousText = source
+        let previousBOM = self.hasBOM
+        let previousLineEnding = self.lineEnding
+        let previousSelection = self.selection
+        let previousForced = forcedSourceReason
+        let previousLarge = self.isLarge
+
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { document in
+            document.applyRestoredState(
+                text: previousText,
+                hasBOM: previousBOM,
+                lineEnding: previousLineEnding,
+                selection: previousSelection,
+                forcedReason: previousForced,
+                isLarge: previousLarge,
+                actionName: actionName
+            )
+        }
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
+
+        source = text
+        self.hasBOM = hasBOM
+        self.lineEnding = lineEnding
+        self.selection = selection
+        forcedSourceReason = forcedReason
+        self.isLarge = isLarge
+        revision += 1
+        lastEdit = Date()
+        if firstPendingEdit == nil {
+            firstPendingEdit = lastEdit
+        }
     }
 
     /// Marks the document as no longer owned by a workspace.
@@ -564,6 +742,14 @@ public final class MarkdownDocument: Identifiable {
         lastError = nil
     }
 
+    /// Newlines, not lines: the same convention `MarkdownFileStore.read`
+    /// uses when it enforces `maxSourceLines`.
+    private func newlineCount(_ text: String) -> Int {
+        text.utf8.reduce(into: 0) { count, byte in
+            if byte == 0x0A { count += 1 }
+        }
+    }
+
     private func readConflict(at url: URL? = nil) throws -> ExternalConflict {
         guard let url = url ?? fileURL else {
             throw DocumentError.untitled
@@ -581,6 +767,40 @@ public final class MarkdownDocument: Identifiable {
     private func applySize(for snapshot: DiskSnapshot) {
         isLarge = snapshot.byteCount > MarkdownLimits.maxEditableDocumentBytes
         isReadOnly = isLarge
+        forcedSourceReason = isLarge ? .large : nil
+    }
+
+    /// Live growth is not a read-only transition: turning a dirty buffer
+    /// read-only would trap undo and any shrinking edit. Rendered/parse is
+    /// disabled, but editing and saving remain available.
+    private func updateLiveBufferState(byteCount: Int) {
+        if byteCount > MarkdownLimits.maxEditableDocumentBytes {
+            isLarge = true
+            if forcedSourceReason == nil || forcedSourceReason == .largeBuffer {
+                forcedSourceReason = .largeBuffer
+            }
+        } else {
+            isLarge = isReadOnly
+            if forcedSourceReason == .largeBuffer {
+                forcedSourceReason = nil
+            }
+        }
+    }
+
+    /// The parser reports a nesting refusal. It is a separate reason from
+    /// size and clears only on a successful current-revision parse.
+    public func setNestingLimit(_ exceeded: Bool) {
+        if exceeded {
+            forcedSourceReason = .nestingLimit
+        } else if forcedSourceReason == .nestingLimit {
+            forcedSourceReason = isLarge ? .largeBuffer : nil
+        }
+    }
+
+    /// The watcher reports that the file on disk became too large or
+    /// unreadable. The open document is not replaced.
+    public func setDiskState(_ state: MarkdownDiskState) {
+        diskState = state
     }
 
     private func acquireSaveSlot() async {
