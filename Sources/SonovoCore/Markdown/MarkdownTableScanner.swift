@@ -422,7 +422,7 @@ public enum MarkdownTableScanner {
         guard !segments.isEmpty else { return nil }
 
         var cells: [(NSRange, NSRange, SourceRange)] = []
-        for (column, segment) in segments.enumerated() {
+        for segment in segments {
             let content = trimmedRange(text, segment: segment)
             let range = SourceRange(
                 start: position(

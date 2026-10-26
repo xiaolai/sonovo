@@ -137,7 +137,7 @@ public actor MarkdownSnapshotStore {
     // MARK: - Recovery
 
     public func recover() -> MarkdownSnapshotRecovery {
-        var index = readIndex()
+        let index = readIndex()
         guard index.version == Self.schemaVersion else {
             return MarkdownSnapshotRecovery(
                 orphanBlobsRemoved: 0,
@@ -238,7 +238,7 @@ public actor MarkdownSnapshotStore {
                 .filter { $0.relativePath == relativePath && $0.decision == nil }
                 .flatMap { [$0.beforeID, $0.afterID] }
         )
-        var records = index.entries
+        let records = index.entries
             .filter { $0.relativePath == relativePath }
             .sorted { $0.capturedAt > $1.capturedAt }
         var removed = 0
