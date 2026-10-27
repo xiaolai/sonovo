@@ -27,6 +27,10 @@ enum MDXCompilerError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Anchors `Bundle(for:)` to this module: under XCTest it resolves the test
+/// bundle, and in the app it resolves the app bundle.
+private final class MDXModuleAnchor {}
+
 /// Runs the vendored MDX compiler in a separate, sandboxed process.
 ///
 /// The helper receives every source in one request file; it never opens the
@@ -94,18 +98,21 @@ struct MDXHelperCompiler: Sendable {
         // A `swift test` run and a direct `.build/debug/Sonovo` run both keep
         // the helper next to the products, not inside an app bundle. This
         // fallback is for development; the shipped app uses Contents/Helpers.
-        let packageRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        for configuration in ["debug", "release"] {
-            candidates.append(
-                packageRoot
-                    .appendingPathComponent(
-                        ".build/\(configuration)/SonovoMDXHelper"
-                    )
-            )
+        // The search walks the ancestors of the bundle that contains this
+        // module's code — under XCTest, Bundle.main is the xctest tool and
+        // shares no ancestor with the build tree — instead of deriving a
+        // path from this file's location, which would embed the builder's
+        // home directory in the shipped binary. A candidate is considered
+        // only inside a build tree, so an executable that happens to share
+        // the helper's name next to an installed app is never run.
+        var ancestor = Bundle(for: MDXModuleAnchor.self).bundleURL
+        for _ in 0..<8 {
+            if ancestor.path.contains("/.build/") {
+                candidates.append(
+                    ancestor.appendingPathComponent("SonovoMDXHelper")
+                )
+            }
+            ancestor.deleteLastPathComponent()
         }
         return candidates.first {
             FileManager.default.isExecutableFile(atPath: $0.path)

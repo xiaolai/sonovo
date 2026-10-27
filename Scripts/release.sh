@@ -93,7 +93,13 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 SONOVO_PACKAGE_SIGN=none SONOVO_WARNINGS_AS_ERRORS=1 Scripts/package-app.sh "$APP"
 
-strip -S -x "$APP/Contents/MacOS/Sonovo" || fail "strip failed"
+# Every Mach-O executable in the bundle, not only the main one: a helper's
+# release debug information carries the same builder home path.
+while IFS= read -r -d '' executable; do
+    if file -b "$executable" | grep -q 'Mach-O'; then
+        strip -S -x "$executable" || fail "strip failed: $executable"
+    fi
+done < <(find "$APP" -type f -perm -u+x -print0)
 [[ -x "$APP/Contents/MacOS/Sonovo" ]] || fail "the app binary is missing after strip"
 
 # This machine's home path and internal hostnames must not ship. A third-party build path
