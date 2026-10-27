@@ -156,6 +156,67 @@ final class CodeEditorControllerTests: XCTestCase {
         XCTAssertGreaterThan(controller.symbolScanCount, scans)
     }
 
+    /// `CodeSourceView.updateNSView` calls `syncFromDocument`, which used to
+    /// write the text view's selection back on every update. `setSelectedRange`
+    /// posts `NSTextView.didChangeSelectionNotification`, SwiftUI observes it
+    /// and re-enters the update, and the document never finishes opening: the
+    /// 0.10.0 hang on every code document, JSON included. A sync that changes
+    /// nothing must post nothing.
+    func testSyncFromDocumentDoesNotPostSelectionChangesWhenNothingChanged() async throws {
+        let root = try support.makeRoot(files: [
+            "data.json": CodeTestData.utf8("{\n  \"a\": 1\n}\n")
+        ])
+        let document = CodeDocument(
+            url: root.appendingPathComponent("data.json")
+        )
+        await document.load()
+        let controller = CodeEditorController(
+            document: document,
+            settings: CodeEditorSettings()
+        )
+        controller.attach()
+        try await waitUntil("the first lex") {
+            controller.highlightSnapshot != nil
+        }
+        XCTAssertFalse(controller.textView.hasMarkedText())
+
+        // Make the sync's selection write observable: restoreSelection always
+        // republishes the document selection, so a nil here must become the
+        // text view's range again or the sync never reached it.
+        document.selection = nil
+        let posts = NotificationCounter()
+        let token = NotificationCenter.default.addObserver(
+            forName: NSTextView.didChangeSelectionNotification,
+            object: controller.textView,
+            queue: nil
+        ) { _ in
+            posts.increment()
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        controller.syncFromDocument()
+        XCTAssertNotNil(
+            document.selection,
+            "sync did not reach restoreSelection; the guard below proves nothing"
+        )
+        XCTAssertEqual(
+            posts.count,
+            0,
+            "sync reposted the selection change inside updateNSView; SwiftUI loops"
+        )
+
+        // Canary: a real selection change must still post, or the assertion
+        // above cannot fail.
+        controller.textView.setSelectedRange(
+            NSRange(location: 1, length: 0)
+        )
+        XCTAssertGreaterThan(
+            posts.count,
+            0,
+            "the selection notification harness is not live"
+        )
+    }
+
     private func waitUntil(
         _ description: String,
         timeout: TimeInterval = 8,
@@ -175,5 +236,25 @@ final class CodeEditorControllerTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(10))
         }
+    }
+}
+
+/// A counter for notification callbacks, which are `@Sendable`; delivery is
+/// synchronous when the observer registers with a nil queue, but the compiler
+/// cannot see that.
+private final class NotificationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

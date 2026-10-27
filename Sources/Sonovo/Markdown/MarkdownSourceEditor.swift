@@ -914,14 +914,21 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         suppressSync = false
     }
 
+    /// Restores the selection without republishing it. This runs from
+    /// `updateNSView`; `setSelectedRange` posts a selection notification on
+    /// every call, and a notification raised inside the update path is how a
+    /// SwiftUI representable re-enters itself. The document selection is
+    /// observable, so it is written only when it differs.
     private func restoreSelection(_ selected: NSRange) {
         let length = (textView.string as NSString).length
         let location = min(max(0, selected.location), length)
         let upper = min(length, location + max(0, selected.length))
-        textView.setSelectedRange(NSRange(location: location, length: upper - location))
-
-        if let range = Range(NSRange(location: location, length: upper - location)) {
-            document.selection = range
+        let range = NSRange(location: location, length: upper - location)
+        if textView.selectedRange() != range {
+            textView.setSelectedRange(range)
+        }
+        if let swiftRange = Range(range), document.selection != swiftRange {
+            document.selection = swiftRange
         }
     }
 
@@ -1063,7 +1070,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 }
             }
         }
-        if let range = Range(textView.selectedRange()) {
+        if let range = Range(textView.selectedRange()),
+           document.selection != range {
             document.selection = range
         }
         scheduleVisibleHighlight()

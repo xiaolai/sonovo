@@ -311,13 +311,21 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         !lhs.utf8.elementsEqual(rhs.utf8)
     }
 
+    /// Restores the selection without republishing it. This runs from
+    /// `updateNSView`; `setSelectedRange` posts a selection notification on
+    /// every call, SwiftUI observes it and re-enters the update, and the
+    /// document never finishes opening — an endless transaction at full CPU.
+    /// The document selection is observable too, so it is written only when
+    /// it actually differs.
     private func restoreSelection(_ selected: NSRange) {
         let length = (textView.string as NSString).length
         let location = min(max(0, selected.location), length)
         let upper = min(length, location + max(0, selected.length))
         let range = NSRange(location: location, length: upper - location)
-        textView.setSelectedRange(range)
-        if let swiftRange = Range(range) {
+        if textView.selectedRange() != range {
+            textView.setSelectedRange(range)
+        }
+        if let swiftRange = Range(range), document.selection != swiftRange {
             document.selection = swiftRange
         }
     }
@@ -383,7 +391,8 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
                 return
             }
         }
-        if let swiftRange = Range(textView.selectedRange()) {
+        if let swiftRange = Range(textView.selectedRange()),
+           document.selection != swiftRange {
             document.selection = swiftRange
         }
         scheduleHighlight(editedLine: pendingLine)
@@ -400,7 +409,8 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     }
 
     private func selectionDidMove() {
-        if let swiftRange = Range(textView.selectedRange()) {
+        if let swiftRange = Range(textView.selectedRange()),
+           document.selection != swiftRange {
             document.selection = swiftRange
         }
         updateCursorState()
@@ -419,9 +429,20 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
                 .components(separatedBy: "\n").count
         }
         let lineRange = ns.lineRange(for: NSRange(location: location, length: 0))
-        cursorLine = max(1, line)
-        cursorColumn = max(1, location - lineRange.location + 1)
-        selectionLength = textView.selectedRange().length
+        // The status bar reads these; republishing an unchanged value from the
+        // update path would invalidate it for nothing.
+        let newLine = max(1, line)
+        let newColumn = max(1, location - lineRange.location + 1)
+        let newSelectionLength = textView.selectedRange().length
+        if cursorLine != newLine {
+            cursorLine = newLine
+        }
+        if cursorColumn != newColumn {
+            cursorColumn = newColumn
+        }
+        if selectionLength != newSelectionLength {
+            selectionLength = newSelectionLength
+        }
         refreshSymbol()
     }
 
@@ -845,7 +866,9 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         let language = document.language
         guard language.supportsOutline else {
             symbolCache = nil
-            symbolName = nil
+            if symbolName != nil {
+                symbolName = nil
+            }
             return
         }
         let revision = document.revision
@@ -855,7 +878,10 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         if let cache = symbolCache,
            cache.revision == revision,
            cache.language == language {
-            symbolName = CodeSymbolIndex.symbol(at: line, in: cache.symbols)?.name
+            let name = CodeSymbolIndex.symbol(at: line, in: cache.symbols)?.name
+            if symbolName != name {
+                symbolName = name
+            }
             return
         }
         symbolTask = Task { @MainActor [weak self] in
@@ -867,10 +893,13 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
                 return
             }
             guard !Task.isCancelled else { return }
-            self.symbolName = CodeSymbolIndex.symbol(
+            let name = CodeSymbolIndex.symbol(
                 at: line,
                 in: symbols
             )?.name
+            if self.symbolName != name {
+                self.symbolName = name
+            }
         }
     }
 

@@ -194,13 +194,17 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
         suppressSync = false
     }
 
+    /// Restores the selection without reposting it: this runs from the update
+    /// path, and `setSelectedRange` posts a selection notification on every
+    /// call, which re-enters a SwiftUI representable that observes it.
     private func restoreSelection(_ selected: NSRange) {
         let length = (textView.string as NSString).length
         let location = min(max(0, selected.location), length)
         let upper = min(length, location + max(0, selected.length))
-        textView.setSelectedRange(
-            NSRange(location: location, length: upper - location)
-        )
+        let range = NSRange(location: location, length: upper - location)
+        if textView.selectedRange() != range {
+            textView.setSelectedRange(range)
+        }
     }
 
     private func observeDocument() {
