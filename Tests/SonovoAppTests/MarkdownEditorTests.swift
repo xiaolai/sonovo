@@ -667,4 +667,68 @@ final class MarkdownEditorTests: XCTestCase {
         XCTAssertEqual(document.source, source)
         XCTAssertFalse(document.undoManager.canUndo)
     }
+
+    /// The batch path reuses the cached caret-independent decoration layers,
+    /// so a keystroke does not rescan the document for the caret's table
+    /// cell. The full pass that follows must repaint that layer at the edited
+    /// offsets; a cache that is never refreshed would leave the highlight
+    /// frozen where the cell used to be.
+    func testTheCellHighlightTracksTheCaretAcrossABatch() async throws {
+        let source = "| a | b |\n| --- | --- |\n| 11 | 22 |\n\nafter\n"
+        let (document, _, controller) = makeController(source: source)
+        let textView = controller.textView
+        let cellColour = NSColor(AppTheme.MarkdownChrome.TableCell.highlight)
+        let eleven = (source as NSString).range(of: "11").location
+
+        func cellBackground(at offset: Int) -> NSColor? {
+            textView.textStorage?.attribute(
+                .backgroundColor,
+                at: offset,
+                effectiveRange: nil
+            ) as? NSColor
+        }
+
+        controller.scheduleParse(immediate: true)
+        let settled = await waitUntil {
+            controller.lastHighlightedRevision == document.revision
+        }
+        XCTAssertTrue(settled)
+        textView.setSelectedRange(NSRange(location: eleven, length: 0))
+        let painted = await waitUntil {
+            cellBackground(at: eleven)?.isEqual(cellColour) == true
+        }
+        XCTAssertTrue(painted)
+
+        controller.adoptMultiCursor(
+            try MultiCursorSelection(
+                [
+                    MultiCursorSelection.Caret(anchor: eleven, active: eleven),
+                    MultiCursorSelection.Caret(
+                        anchor: eleven + 1,
+                        active: eleven + 1
+                    )
+                ],
+                primary: 0,
+                source: source
+            )
+        )
+        XCTAssertTrue(controller.applyMultiCursor(.insert("x")))
+        XCTAssertEqual(
+            document.source,
+            "| a | b |\n| --- | --- |\n| x1x1 | 22 |\n\nafter\n"
+        )
+
+        // The parse publication is a full pass and must refresh the cache.
+        controller.scheduleParse(immediate: true)
+        let refreshed = await waitUntil {
+            controller.lastHighlightedRevision == document.revision
+        }
+        XCTAssertTrue(refreshed)
+        let edited = document.source as NSString
+        let cell = edited.range(of: "x1x1").location + 2
+        XCTAssertTrue(
+            cellBackground(at: cell)?.isEqual(cellColour) == true,
+            "the cell highlight did not follow the edit"
+        )
+    }
 }

@@ -126,4 +126,9 @@ public enum MarkdownLimits {
     /// quadratic in the padded output; above this the rows convert as plain
     /// text instead of a table.
     public static let maxPastedTableCells = 10_000
+
+    /// Maximum simultaneous carets. Each caret costs a decoration range, a
+    /// geometry lookup, and a slot in every batch; past this the editor
+    /// refuses placement instead of degrading under unbounded fan-out.
+    public static let maxCarets = 100
 }

@@ -313,7 +313,7 @@ public enum MarkdownLineEditor {
         )
     }
 
-    private static func isWordBoundary(_ character: unichar) -> Bool {
+    static func isWordBoundary(_ character: unichar) -> Bool {
         character == 0x20 || character == 0x09 || character == 0x0A
             || character == 0x28 || character == 0x5B
             || character == 0x7B || character == 0x22
@@ -724,6 +724,16 @@ struct LineTable {
             }
         }
         return low
+    }
+
+    func lineStart(containing offset: Int) -> Int {
+        guard let index = lineIndex(at: offset) else { return 0 }
+        return starts[index]
+    }
+
+    func lineEnd(containing offset: Int) -> Int {
+        guard let index = lineIndex(at: offset) else { return 0 }
+        return starts[index] + lines[index].utf16.count
     }
 
     /// The split keeps a trailing empty line for a source that ends with a

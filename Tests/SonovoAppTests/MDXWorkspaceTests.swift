@@ -23,6 +23,28 @@ final class MDXWorkspaceTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Waits for the preview to leave `.compiling`.
+    ///
+    /// `setPreviewEnabled(true)` schedules its own debounced compile, which
+    /// starts later, bumps the generation, and cancels the compile an
+    /// immediately awaited `compileNow` started. That method therefore
+    /// promises its own task finished, not that it was the last one; the
+    /// state settles when the newer compile finishes.
+    private func settlePreview(
+        _ workspace: MDXWorkspace,
+        _ document: MDXDocument,
+        timeout: TimeInterval = 5
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if case .compiling = workspace.previewState(for: document) {
+                try? await Task.sleep(for: .milliseconds(20))
+                continue
+            }
+            return
+        }
+    }
+
     private func makeProjectDirectory(
         _ files: [String: String]
     ) throws -> URL {
@@ -159,6 +181,7 @@ final class MDXWorkspaceTests: XCTestCase {
 
         workspace.setPreviewEnabled(true)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
         XCTAssertEqual(try Data(contentsOf: file), original)
         XCTAssertEqual(document.source, "# Edited\n")
 
@@ -183,6 +206,7 @@ final class MDXWorkspaceTests: XCTestCase {
         XCTAssertFalse(workspace.previewEnabled)
         workspace.setPreviewEnabled(true)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
 
         guard case .ready(let modules) = workspace.previewState(for: document)
         else {
@@ -208,6 +232,7 @@ final class MDXWorkspaceTests: XCTestCase {
         )
         workspace.setPreviewEnabled(true)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
 
         guard case .failed(let diagnostic) =
             workspace.previewState(for: document) else {
@@ -242,6 +267,7 @@ final class MDXWorkspaceTests: XCTestCase {
         )
         workspace.setPreviewEnabled(true)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
 
         guard case .unavailable(let message) =
             workspace.previewState(for: document) else {
@@ -267,6 +293,7 @@ final class MDXWorkspaceTests: XCTestCase {
         )
         workspace.setPreviewEnabled(true)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
 
         guard case .unavailable(let message) =
             workspace.previewState(for: document) else {
@@ -596,10 +623,12 @@ final class MDXWorkspaceTests: XCTestCase {
         )
         XCTAssertFalse(workspace.previewEnabled)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
         XCTAssertEqual(workspace.previewState(for: document), .idle)
 
         workspace.setPreviewEnabled(true)
         await workspace.compileNow(document)
+        await settlePreview(workspace, document)
         guard case .ready = workspace.previewState(for: document) else {
             return XCTFail("expected a ready preview")
         }

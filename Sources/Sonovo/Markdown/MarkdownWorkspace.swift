@@ -389,6 +389,12 @@ final class MarkdownWorkspace {
     }
 
     private func setSelectedDocument(_ document: MarkdownDocument) {
+        // Moving focus to another document — including by selecting one that
+        // is already visible in the other pane — is a collapse surface for
+        // the pane being left, exactly as `focus` and `show` treat it.
+        if focusedDocumentID != document.id {
+            collapseForPolicy(.splitFocus, focusedDocument)
+        }
         if secondaryDocumentID != nil {
             // The focused pane receives the new document. A document already
             // visible in the other pane is focused, never duplicated.
@@ -428,6 +434,9 @@ final class MarkdownWorkspace {
     /// open too.
     @discardableResult
     func close(_ document: MarkdownDocument) async -> Bool {
+        // Close is a collapse surface: the caret set names offsets in a
+        // document that is about to leave the workspace.
+        collapseForPolicy(.close, document)
         let outcome = await document.flushForClose()
         switch outcome {
         case .closed:
@@ -576,7 +585,7 @@ final class MarkdownWorkspace {
     /// bookkeeping: identity registration, watcher replacement, and cleanup
     /// ownership when the write fails.
     @discardableResult
-    private func saveAs(
+    func saveAs(
         _ document: MarkdownDocument,
         to url: URL
     ) async -> Bool {
@@ -600,6 +609,9 @@ final class MarkdownWorkspace {
                   !document.isClosed else {
                 return false
             }
+            // Save As changes the document's identity; carets anchored to
+            // the old identity do not survive it.
+            collapseForPolicy(.saveAs, document)
             startWatcher(for: document)
             registerWorkspaceFile(target)
             lastError = nil
@@ -883,6 +895,8 @@ final class MarkdownWorkspace {
             setSelectedDocument(document)
             return
         }
+        // A split focus change is a collapse surface for the pane being left.
+        collapseForPolicy(.splitFocus, focusedDocument)
         focusedDocumentID = document.id
         onDocumentActivated?(document.fileURL)
     }
@@ -892,6 +906,11 @@ final class MarkdownWorkspace {
     func show(_ document: MarkdownDocument, inPane pane: MarkdownPane) {
         guard documents.contains(where: { $0.id == document.id }) else {
             return
+        }
+        // Moving focus between panes is a collapse surface for the pane
+        // being left.
+        if focusedDocumentID != document.id {
+            collapseForPolicy(.splitFocus, focusedDocument)
         }
         switch pane {
         case .primary:
@@ -938,6 +957,9 @@ final class MarkdownWorkspace {
     func closeSplitPane() {
         guard secondaryDocumentID != nil else { return }
         let wasFocused = focusedDocumentID == secondaryDocumentID
+        if wasFocused {
+            collapseForPolicy(.splitFocus, secondaryDocument)
+        }
         secondaryDocumentID = nil
         if wasFocused || focusedDocumentID == nil {
             focusedDocumentID = selectedDocumentID
@@ -965,6 +987,9 @@ final class MarkdownWorkspace {
             setSplitView(false, for: document)
         }
         guard document.mode != mode else { return }
+        // A mode switch is a collapse surface: the source caret set does not
+        // survive leaving the source surface.
+        collapseForPolicy(.modeSwitch, document)
         captureReadingPosition(for: document)
         document.mode = mode
         restoreReadingPosition(for: document)
@@ -989,6 +1014,7 @@ final class MarkdownWorkspace {
                   !splitDocuments.contains(document.id) else {
                 return
             }
+            collapseForPolicy(.modeSwitch, document)
             captureReadingPosition(for: document)
             splitReturnModes[document.id] = document.mode
             splitDocuments.insert(document.id)
@@ -996,6 +1022,10 @@ final class MarkdownWorkspace {
             restoreReadingPosition(for: document)
         } else {
             guard splitDocuments.remove(document.id) != nil else { return }
+            // Closing the split leaves the source surface, so it is a collapse
+            // surface: a restore to Rendered must not carry the caret set
+            // into a cached source controller.
+            collapseForPolicy(.modeSwitch, document)
             captureReadingPosition(for: document)
             sourceScrollTargets.removeValue(forKey: document.id)
             splitSyncIgnore.removeValue(forKey: document.id)
@@ -1173,6 +1203,29 @@ final class MarkdownWorkspace {
             return nil
         }
         return editorCache.cachedEntry(for: document.id)?.controller
+    }
+
+    /// Collapses a document's caret set. Only an already-built controller is
+    /// touched: a surface that was never shown has nothing to clear.
+    func collapseMultiCursor(for document: MarkdownDocument?) {
+        guard let document else { return }
+        editorCache.cachedEntry(for: document.id)?.controller.resetMultiCursor()
+    }
+
+    /// The one-outcome policy table. The workspace's collapse surfaces
+    /// consult it instead of deciding for themselves; injectable so a test
+    /// can prove the wiring.
+    var multiCursorPolicy: (MultiCursorPolicy.Operation)
+        -> MultiCursorPolicy.Outcome = { $0.outcome }
+
+    /// Collapses when the table names the operation a collapse surface. An
+    /// entry that says anything else leaves the set alone.
+    private func collapseForPolicy(
+        _ operation: MultiCursorPolicy.Operation,
+        _ document: MarkdownDocument?
+    ) {
+        guard multiCursorPolicy(operation) == .collapse else { return }
+        collapseMultiCursor(for: document)
     }
 
     func controller(for document: MarkdownDocument) -> MarkdownEditorController {
@@ -1776,6 +1829,11 @@ final class MarkdownWorkspace {
 
     func reload(_ document: MarkdownDocument) {
         captureReadingPosition(for: document)
+        // Reload is a collapse surface in the policy table. Relying on the
+        // changed text to reset the caret set missed a reload whose source is
+        // canonically unchanged (a BOM or line-ending change), leaving carets
+        // that name the old bytes.
+        collapseForPolicy(.reload, document)
         document.resolveExternalChange(.reload)
         restoreAfterSourceReplacement(document)
     }

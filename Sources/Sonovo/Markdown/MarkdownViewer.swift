@@ -79,6 +79,9 @@ struct MarkdownViewer: View {
     let source: String
     /// Commits one block's replacement: (range, expected slice, new text).
     let onCommitBlockEdit: ((SourceRange, String, String) -> Bool)?
+    /// Called when a block projection or Source Peek opens. Both are
+    /// collapse surfaces for the source editor's caret set.
+    let onProjectionStart: (() -> Void)?
     let scrollTarget: Binding<String?>?
     let restoreAnchor: Binding<RenderedReadingAnchor?>?
     let onReadingAnchorChange: ((RenderedReadingAnchor) -> Void)?
@@ -126,6 +129,7 @@ struct MarkdownViewer: View {
         onSetDetailsOpen: ((SourceRange, Bool) -> Void)? = nil,
         source: String = "",
         onCommitBlockEdit: ((SourceRange, String, String) -> Bool)? = nil,
+        onProjectionStart: (() -> Void)? = nil,
         scrollTarget: Binding<String?>? = nil,
         restoreAnchor: Binding<RenderedReadingAnchor?>? = nil,
         onReadingAnchorChange: ((RenderedReadingAnchor) -> Void)? = nil,
@@ -148,6 +152,7 @@ struct MarkdownViewer: View {
         self.onSetDetailsOpen = onSetDetailsOpen
         self.source = source
         self.onCommitBlockEdit = onCommitBlockEdit
+        self.onProjectionStart = onProjectionStart
         self.scrollTarget = scrollTarget
         self.restoreAnchor = restoreAnchor
         self.onReadingAnchorChange = onReadingAnchorChange
@@ -653,8 +658,13 @@ struct MarkdownViewer: View {
     /// Opens an in-place edit session. The model is created once and stored
     /// in the session, so a reparse that moves the block re-presents the same
     /// draft instead of starting a new editor with the original slice.
-    private func startBlockEditing(_ range: SourceRange) {
+    ///
+    /// Not private: the E2E probe drives this real entry point, so removing
+    /// the `onProjectionStart` call below breaks a check instead of passing
+    /// silently.
+    func startBlockEditing(_ range: SourceRange) {
         guard let slice = blockSlice(range) else { return }
+        onProjectionStart?()
         let model = BlockProjectionEditorModel(
             text: slice,
             commit: { replacement in
@@ -676,8 +686,11 @@ struct MarkdownViewer: View {
         )
     }
 
-    private func startSourcePeek(_ range: SourceRange) {
+    /// Opens Source Peek for one block. Not private for the same reason as
+    /// `startBlockEditing`: the E2E probe drives the real entry point.
+    func startSourcePeek(_ range: SourceRange) {
         guard let slice = blockSlice(range) else { return }
+        onProjectionStart?()
         let model = BlockProjectionEditorModel(
             text: slice,
             commit: { replacement in

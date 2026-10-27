@@ -458,8 +458,24 @@ struct MarkdownCommands: Commands {    @Bindable var state: AppState
                         state.markdown.performSelected(.formatCJK)
                     }
                 }
+                Divider()
             }
             .disabled(!canFormatMarkdown)
+            // Placement is not formatting: it edits no source, and it works
+            // in an editable source-only document where Command-click
+            // placement already does. Sharing the formatting gate disabled
+            // both commands for those documents.
+            Group {
+                Button("Add Next Occurrence") {
+                    state.markdown.performSelected(.addNextOccurrence)
+                }
+                .keyboardShortcut("d", modifiers: [.command])
+                Button("Select All Occurrences") {
+                    state.markdown.performSelected(.selectAllOccurrences)
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+            }
+            .disabled(!canPlaceCarets)
             Divider()
             Button("Check Markdown") {
                 state.markdown.checkSelectedMarkdown()
@@ -504,6 +520,18 @@ struct MarkdownCommands: Commands {    @Bindable var state: AppState
             && state.markdown.selectedDocument?.mode == .source
             && state.markdown.selectedDocument?.isReadOnly == false
             && state.markdown.selectedDocument?.isSourceOnly == false
+            && isSourceEditorFocused
+    }
+
+    /// Caret placement writes no source, so it only needs the visible,
+    /// editable source editor. Source-only documents are eligible: their
+    /// editor supports editing and Command-click placement, and excluding
+    /// them here was the formatting gate leaking into placement.
+    private var canPlaceCarets: Bool {
+        state.selectedTab?.kind == .script
+            && state.terminalPresentation != .full
+            && state.markdown.selectedDocument?.mode == .source
+            && state.markdown.selectedDocument?.isReadOnly == false
             && isSourceEditorFocused
     }
 

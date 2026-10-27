@@ -115,6 +115,11 @@ public final class MarkdownDocument: Identifiable {
     public private(set) var identityGeneration: UInt64 = 0
 
     public private(set) var source: String
+    /// `source`'s length in UTF-16 units, kept beside it so the editor can
+    /// test "the text view still holds this source" in O(1). A whole-source
+    /// `String ==` costs ~90 ms per megabyte (canonical equivalence walks
+    /// graphemes), and the editor asks this on every keystroke.
+    public private(set) var sourceUTF16Count: Int
     public private(set) var revision: UInt64 = 0
     public private(set) var savedRevision: UInt64 = 0
 
@@ -176,6 +181,7 @@ public final class MarkdownDocument: Identifiable {
     ) {
         self.store = store
         self.source = ""
+        self.sourceUTF16Count = 0
         self.lineEnding = .lf
         self.hasBOM = false
         self.isReadOnly = false
@@ -192,6 +198,7 @@ public final class MarkdownDocument: Identifiable {
         self.store = store
         self.fileURL = url
         self.source = loaded.contents.canonicalText
+        self.sourceUTF16Count = loaded.contents.canonicalText.utf16.count
         self.diskSnapshot = loaded.snapshot
         self.lineEnding = loaded.contents.lineEnding
         self.hasBOM = loaded.contents.hasBOM
@@ -207,14 +214,22 @@ public final class MarkdownDocument: Identifiable {
     /// Replaces the whole source. Commands and the editor both use this path.
     public func replaceSource(_ newSource: String, actionName: String = "Edit") throws {
         guard !isReadOnly else { throw DocumentError.readOnly }
-        guard newSource.utf8.count <= DocumentHistoryLimits.maxReplacementBytes
-        else {
+        let newBytes = newSource.utf8.count
+        guard newBytes <= DocumentHistoryLimits.maxReplacementBytes else {
             throw DocumentError.editTooLarge
         }
-        guard newSource != source else { return }
+        // Length settles inequality for every insert, delete, and paste, so
+        // the comparison runs only for a same-length replacement. It must be
+        // exact code-unit equality: Swift's `String ==` uses canonical
+        // equivalence, so writing a precomposed "é" over a decomposed one
+        // would compare equal and be discarded, leaving the file unchanged.
+        let newLength = newSource.utf16.count
+        guard newLength != sourceUTF16Count
+                || !(newSource as NSString).isEqual(to: source) else {
+            return
+        }
 
         let oldSource = source
-        let newBytes = newSource.utf8.count
         // The reader refuses a file with more than `maxSourceLines` newlines
         // no matter how few bytes it has. A document that could be saved but
         // never reopened is a trap, so the same counting applies here. The
@@ -228,6 +243,12 @@ public final class MarkdownDocument: Identifiable {
                 throw DocumentError.editTooLarge
             }
         }
+        // A value freshly bridged from Cocoa (the editor's text storage)
+        // materialises inside the @Observable setter at O(n) with a bad
+        // constant — 50 ms per megabyte on the E2E Mac, ~100 ms on the
+        // workstation in release — while a natively decoded copy stores for
+        // free. Take the copy here, where the path already pays O(n).
+        let ownedSource = Self.nativeCopy(newSource)
         // `groupsByEvent` is off so tests and commands are deterministic;
         // each edit therefore opens its own explicit undo group.
         undoManager.beginUndoGrouping()
@@ -237,7 +258,8 @@ public final class MarkdownDocument: Identifiable {
         undoManager.setActionName(actionName)
         undoManager.endUndoGrouping()
 
-        source = newSource
+        source = ownedSource
+        sourceUTF16Count = newLength
         updateLiveBufferState(byteCount: newBytes)
         revision += 1
         lastEdit = Date()
@@ -266,6 +288,7 @@ public final class MarkdownDocument: Identifiable {
             guard let conflict else { return }
             isMissingOnDisk = false
             source = conflict.diskText
+            sourceUTF16Count = conflict.diskText.utf16.count
             diskSnapshot = conflict.diskSnapshot
             if let contents = try? MarkdownEncoding.decode(conflict.diskSnapshot.bytes) {
                 lineEnding = contents.lineEnding
@@ -530,6 +553,7 @@ public final class MarkdownDocument: Identifiable {
         undoManager.endUndoGrouping()
 
         source = text
+        sourceUTF16Count = text.utf16.count
         self.hasBOM = hasBOM
         self.lineEnding = lineEnding
         self.selection = selection
@@ -678,6 +702,7 @@ public final class MarkdownDocument: Identifiable {
 
         if !isDirty {
             source = contents.canonicalText
+            sourceUTF16Count = contents.canonicalText.utf16.count
             revision += 1
             savedRevision = revision
             diskSnapshot = current
@@ -744,10 +769,49 @@ public final class MarkdownDocument: Identifiable {
 
     /// Newlines, not lines: the same convention `MarkdownFileStore.read`
     /// uses when it enforces `maxSourceLines`.
+    /// A native copy of `text`, decoded from its UTF-16 code units. Reading
+    /// them in one `getCharacters` call copies out of either representation
+    /// (a Cocoa bridge or a native UTF-8 buffer), and `String(decoding:)`
+    /// builds native storage. Storing that copy in the observed `source`
+    /// property is free; storing the fresh bridge is not.
+    private static func nativeCopy(_ text: String) -> String {
+        let ns = text as NSString
+        let length = ns.length
+        guard length > 0 else { return "" }
+        var units = [unichar](repeating: 0, count: length)
+        ns.getCharacters(&units, range: NSRange(location: 0, length: length))
+        return String(decoding: units, as: UTF16.self)
+    }
+
     private func newlineCount(_ text: String) -> Int {
-        text.utf8.reduce(into: 0) { count, byte in
-            if byte == 0x0A { count += 1 }
+        // A per-keystroke scan over a megabyte document. The text the editor
+        // hands us is bridged from Cocoa, whose UTF-16 code units are the
+        // storage's own: reading them in chunks is a copy from the native
+        // buffer. Asking a `String` view for contiguous storage instead
+        // either materialises a transcode or fails into a scalar walk —
+        // 30 ms per megabyte, measured on the E2E Mac.
+        let ns = text as NSString
+        let length = ns.length
+        guard length > 0 else { return 0 }
+        let chunkSize = 1 << 16
+        var count = 0
+        var location = 0
+        var buffer = [unichar](repeating: 0, count: chunkSize)
+        buffer.withUnsafeMutableBufferPointer { units in
+            guard let base = units.baseAddress else { return }
+            while location < length {
+                let chunk = min(chunkSize, length - location)
+                ns.getCharacters(
+                    base,
+                    range: NSRange(location: location, length: chunk)
+                )
+                for index in 0..<chunk where base[index] == 0x000A {
+                    count += 1
+                }
+                location += chunk
+            }
         }
+        return count
     }
 
     private func readConflict(at url: URL? = nil) throws -> ExternalConflict {

@@ -4,6 +4,37 @@ import SonovoCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+private extension MultiCursorEdit.Operation {
+    /// The policy-table entry this batch operation answers to. `.replace` is
+    /// the cut path's "replace every selection with nothing".
+    var policyOperation: MultiCursorPolicy.Operation {
+        switch self {
+        case .insert: .typing
+        case .deleteBackward: .backspace
+        case .deleteForward: .delete
+        case .replace: .cut
+        case .paste: .plainPaste
+        }
+    }
+}
+
+private extension MarkdownCommandKind {
+    /// The policy-table entry a command answers to. Table edits and table
+    /// insertion have their own row; a command that merely edits source is a
+    /// formatting command.
+    var policyOperation: MultiCursorPolicy.Operation {
+        switch self {
+        case .insertTable, .insertTableRowAbove, .insertTableRowBelow,
+             .deleteTableRow, .insertTableColumnLeft, .insertTableColumnRight,
+             .deleteTableColumn, .deleteTable, .setTableAlignment,
+             .formatTable:
+            .tableCommand
+        default:
+            .formattingCommand
+        }
+    }
+}
+
 /// The TextKit 2 Markdown source editor.
 ///
 /// The view presents the document; it does not own the source, the revision,
@@ -16,6 +47,54 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     let textView: MarkdownTextView
     let scrollView: NSScrollView
     let reviewRulerView = ReviewMarkerRulerView()
+    /// Secondary carets for the multi-cursor layer. The controller owns the
+    /// caret set; the overlay only draws what it is given.
+    private(set) var caretOverlay: CaretOverlayView?
+    /// The caret set. nil means the editor behaves exactly as before:
+    /// one native caret, and no edit is routed through the batch engine.
+    private(set) var multiCursorSelection: MultiCursorSelection?
+    /// True only for the synchronous window of a batch application. A text
+    /// change or selection echo arriving inside it belongs to the batch.
+    private var isApplyingBatch = false
+    /// Suppresses the echo comparison for the synchronous batch window. The
+    /// asynchronous restore never runs inside it.
+    private var suppressSelectionEcho = false
+    /// Display lines for vertical motion, valid for one buffer and width.
+    ///
+    /// The key is the synchronised revision and the storage length, not the
+    /// text: `String ==` is canonical, so a decomposed source and its
+    /// precomposed spelling compare equal while their UTF-16 offsets differ,
+    /// and a cached line table would name positions in the wrong buffer.
+    private var displayLineCache: (
+        revision: UInt64,
+        highlighted: UInt64?,
+        length: Int,
+        font: NSFont?,
+        width: CGFloat,
+        lines: [CaretDisplayLine]
+    )?
+    /// The editor's focus as its responder callbacks reported it. While a
+    /// responder transfer is in progress the window still names the old
+    /// responder, so the callbacks' value is authoritative once it exists.
+    private var focusOverride: Bool?
+    /// The document revision whose source is loaded into the text view.
+    ///
+    /// A revision captured just before a batch proves only what the document
+    /// holds at that moment, not that the view's buffer belongs to it: an
+    /// external update of the same length slips past a length test and the
+    /// batch would write over it. Every path that copies the document into
+    /// the view, or writes the view back into the document, records the
+    /// revision here; the batch refuses when it no longer matches.
+    private var synchronizedRevision: UInt64 = 0
+    /// Whether a native selection change is a user action in this text view.
+    /// The notification carries no cause: a click or drag means the user
+    /// took over and must collapse the set, while find-bar navigation is
+    /// primary-only and must preserve it. The default reads the window's
+    /// first responder; a test can supply the answer without a window.
+    var isSelectionChangeUserDriven: () -> Bool = { false }
+    /// The pasteboard the clipboard commands read and write. Injectable so a
+    /// test never touches the user's real clipboard.
+    var clipboard: NSPasteboard = .general
 
     private final class WeakController: @unchecked Sendable {
         weak var value: MarkdownEditorController?
@@ -24,6 +103,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     private let weakSelf = WeakController()
     private var scrollObserver: NSObjectProtocol?
     private var preferenceObserver: NSObjectProtocol?
+    /// Window resign is a collapse surface: the caret set must not survive the
+    /// editor leaving the key window.
+    private var windowResignObserver: NSObjectProtocol?
     private var visibleHighlightTask: Task<Void, Never>?
 
     private let parseCoordinator: MarkdownParseCoordinator
@@ -90,6 +172,21 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         let revision: UInt64
         let source: String
     }
+
+    /// An input-method composition in flight. The preimage is the text the
+    /// composition started from; `span` is the primary span it replaces, in
+    /// preimage offsets. The first marked-text update names the span through
+    /// its pre-update selection; a later explicit replacement range overrides
+    /// it. Later updates do not move the span: their pre-update selection
+    /// tracks the marked text itself, not the span it replaces.
+    private struct CompositionTracker {
+        let preimage: String
+        var span: Range<Int>?
+    }
+    private var compositionTracker: CompositionTracker?
+    private var composingForMultiCursor: Bool {
+        compositionTracker != nil
+    }
     private var suppressSync = false
     private var pendingCommands: [QueuedCommand] = []
     /// A find-bar seed waiting for the view to gain a window.
@@ -102,6 +199,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     private var pendingSourceReplacementAnchor: SourceReadingAnchor?
     private(set) var lastOutput: MarkdownParseOutput?
     private(set) var lastHighlightedRevision: UInt64?
+    /// Test hooks fired at the exact milestones a latency probe measures: a
+    /// parse publication, and the end of the highlight pass that applies it.
+    /// Polling the published properties cannot tell a fast chain from one
+    /// whose two steps fell inside the same polling interval.
+    var onParsePublished: ((UInt64) -> Void)?
+    var onHighlightApplied: ((UInt64) -> Void)?
 
     private struct QueuedCommand {
         let documentID: UUID
@@ -122,9 +225,25 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         self.scrollView = NSScrollView()
         super.init()
         weakSelf.value = self
+        isSelectionChangeUserDriven = { [weak self] in
+            guard let self else { return false }
+            return self.textView.window?.firstResponder === self.textView
+        }
 
         configure(textView)
         configureScrollView()
+        textView.onPlainClick = { [weak self] in
+            self?.adoptSingleCursor()
+        }
+        textView.onFocusChange = { [weak self] focused in
+            guard let self else { return }
+            self.focusOverride = focused
+            self.caretOverlay?.setFocused(focused)
+            // MC-03 also hides the secondary selection backgrounds when the
+            // editor is not first responder; they are text attributes, so
+            // hiding them is another decoration pass.
+            self.refreshMultiCursorDecorations()
+        }
         textView.onPasteImage = { [weak self] data, fileExtension in
             self?.insertImageAsset(data, fileExtension: fileExtension) ?? false
         }
@@ -134,11 +253,42 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         textView.onEscapeSelection = { [weak self] in
             self?.collapseSmartSelection() ?? false
         }
+        textView.onMultiCursorEscape = { [weak self] in
+            guard let self, self.multiCursorSelection != nil else {
+                return false
+            }
+            self.adoptSingleCursor()
+            return true
+        }
         textView.onSmartPaste = { [weak self] in
             self?.smartPaste() ?? false
         }
         textView.onInsertText = { [weak self] text, range in
             self?.handleTyping(text, replacementRange: range) ?? false
+        }
+        textView.onMarkedText = { [weak self] selectionBefore, replacement in
+            self?.noteCompositionUpdate(
+                selectionBefore: selectionBefore,
+                replacementRange: replacement
+            )
+        }
+        textView.onCompositionEnd = { [weak self] range in
+            self?.finishCompositionIfNeeded(explicitRange: range)
+        }
+        textView.onMultiCursorPaste = { [weak self] in
+            self?.pasteMultiCursor() ?? false
+        }
+        textView.onMultiCursorPlainPaste = { [weak self] in
+            self?.pasteMultiCursor(plainTextOnly: true) ?? false
+        }
+        textView.onMultiCursorCopy = { [weak self] in
+            self?.copyMultiCursor() ?? false
+        }
+        textView.onMultiCursorCut = { [weak self] in
+            self?.cutMultiCursor() ?? false
+        }
+        textView.onCommandClick = { [weak self] point in
+            self?.toggleCaret(at: point) ?? false
         }
         textView.delegate = self
         reviewRulerView.clientView = textView
@@ -157,6 +307,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
         reviewRulerView.showsLineNumbers = Preferences.markdownLineNumbers
         textView.string = document.source
+        synchronizedRevision = document.revision
         applyBaseAttributesOnly()
         parseObserverToken = parseCoordinator.addObserver(
             for: document.id
@@ -179,6 +330,21 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 self?.applyEditorPreferences()
             }
         }
+        windowResignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            // Notification is not Sendable; carry the window's number and
+            // compare it on the main actor instead.
+            let number = (notification.object as? NSWindow)?.windowNumber
+            MainActor.assumeIsolated {
+                guard let self, let number,
+                      self.textView.window?.windowNumber == number,
+                      self.multiCursorSelection != nil else { return }
+                self.resetMultiCursor()
+            }
+        }
     }
 
     /// Called when the view is attached to a window hierarchy.
@@ -194,6 +360,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
         if let preferenceObserver {
             NotificationCenter.default.removeObserver(preferenceObserver)
+        }
+        if let windowResignObserver {
+            NotificationCenter.default.removeObserver(windowResignObserver)
         }
         detach()
     }
@@ -342,7 +511,44 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     /// The decoration layers that are independent of the parse output.
+    ///
+    /// MC-03: the selection background hides while the editor is not first
+    /// responder or a composition is in flight. `selectionsVisible` carries
+    /// the composition case, where the background has to be cleared before
+    /// the marked text exists; focus is read from the responder record.
     private var currentDecorations: MarkdownDecorationSet {
+        decorations(selectionsVisible: true, recomputingSemantics: true)
+    }
+
+    /// The last computed caret-independent layers. Cached because the cell
+    /// lookup is a whole-document table scan: recomputing them per character
+    /// made the batch path scale with document size instead of with the
+    /// caret count.
+    private var cachedSemanticDecorations: MarkdownDecorationSet?
+
+    private func decorations(
+        selectionsVisible: Bool,
+        recomputingSemantics: Bool = false
+    ) -> MarkdownDecorationSet {
+        var decorations = recomputingSemantics
+            ? computeSemanticDecorations()
+            : cachedSemanticDecorations ?? computeSemanticDecorations()
+        if let model = multiCursorSelection,
+           selectionsVisible,
+           editorIsFocused {
+            decorations.selection = MultiCursorDecoration.selections(
+                for: model,
+                color: AppTheme.MultiCursor.selectionColor
+            )
+        }
+        return decorations
+    }
+
+    /// Recomputes and caches focus dimming, the caret's table cell, and lint
+    /// underlines. A pass that reuses the cache lets the cell layer lag by
+    /// the batch's length delta until the next full pass; the deferred
+    /// viewport pass follows a batch within a frame and refreshes it.
+    private func computeSemanticDecorations() -> MarkdownDecorationSet {
         var decorations = MarkdownDecorationSet()
         if isFocusModeEnabled, let output = lastOutput {
             decorations.focus = MarkdownFocus.decorations(
@@ -386,7 +592,17 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 ]
             )
         }
+        cachedSemanticDecorations = decorations
         return decorations
+    }
+
+    /// The editor's focus. The responder callbacks record a transfer the
+    /// window has not completed yet; a windowless editor (tests, the probe)
+    /// has no responder to ask and paints as focused.
+    private var editorIsFocused: Bool {
+        if let focusOverride { return focusOverride }
+        guard let window = textView.window else { return true }
+        return window.firstResponder === textView
     }
 
     /// Shows the diagnostics from an explicit "Check Markdown" run. An edit
@@ -468,8 +684,18 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     /// Cmd+A expands to the next enclosing container. Selection-only: no
-    /// undo entry is created.
+    /// undo entry is created. With more than one caret the policy collapses
+    /// to the primary first, then runs.
     func smartSelectAll() -> Bool {
+        if multiCursorSelection != nil {
+            guard multiCursorPolicy(.smartSelectAll) == .collapse else {
+                // The table's one other sensible value is refuse; either way
+                // a single-caret walk must not run over a live caret set.
+                NSSound.beep()
+                return true
+            }
+            adoptSingleCursor()
+        }
         guard let output = lastOutput, output.revision == document.revision
         else { return false }
         let selection = Range(textView.selectedRange()) ?? 0..<0
@@ -596,6 +822,10 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         view.typingAttributes = baseAttributes
         view.setAccessibilityLabel("Markdown source")
         view.setAccessibilityRole(.textArea)
+
+        let overlay = CaretOverlayView(textView: view)
+        view.addSubview(overlay)
+        caretOverlay = overlay
     }
 
     private var baseAttributes: [NSAttributedString.Key: Any] {
@@ -638,7 +868,15 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
 
         let selected = textView.selectedRange()
-        guard textView.string != document.source else {
+        // The length test is O(1) and settles every edit that changed the
+        // length; only a same-length replacement reaches the exact code-unit
+        // comparison, which costs ~90 ms per megabyte when it runs.
+        let textLength = textView.textStorage?.length ?? 0
+        if textLength == document.sourceUTF16Count,
+           (textView.string as NSString).isEqual(to: document.source) {
+            // The view already holds this revision, so a batch computed on it
+            // is safe.
+            synchronizedRevision = document.revision
             restoreSelection(selected)
             // Initial attachment copies the source in `init`, so the strings
             // are already equal and this is the only place that can start the
@@ -666,8 +904,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         // next highlight paint ranges from the old source and let problem
         // navigation jump to them.
         lintDiagnostics = []
+        // The caret set names offsets in the replaced text.
+        resetMultiCursor()
+        compositionTracker = nil
         suppressSync = true
         textView.string = document.source
+        synchronizedRevision = document.revision
         applyBaseAttributesOnly()
         suppressSync = false
     }
@@ -715,6 +957,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             recordCompositionBaselineIfNeeded()
             return
         }
+        finishCompositionIfNeeded(explicitRange: nil)
         if let baseline = compositionBaseline {
             compositionBaseline = nil
             if document.revision != baseline.revision
@@ -729,7 +972,22 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             }
         }
 
-        if textView.string != document.source {
+        // A native edit on a stale buffer is the single-caret form of the
+        // overwrite the batch refuses. Without this record a keystroke typed
+        // before the editor synced an external update would write the old
+        // text back over it. Rebuild from the document; the keystroke is the
+        // one that loses.
+        guard synchronizedRevision == document.revision else {
+            resetTextToDocument()
+            lastCommandError = DocumentError.staleCompletion
+            return
+        }
+
+        // A length mismatch proves the text differs; exact code-unit
+        // comparison is reserved for a same-length replacement.
+        let textLength = textView.textStorage?.length ?? 0
+        if textLength != document.sourceUTF16Count
+            || !(textView.string as NSString).isEqual(to: document.source) {
             do {
                 try document.replaceSource(
                     textView.string,
@@ -741,6 +999,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                 return
             }
         }
+        // The view and the document agree on this revision, whether the
+        // write-back ran or the text was already identical.
+        synchronizedRevision = document.revision
         if let range = Range(textView.selectedRange()) {
             document.selection = range
         }
@@ -752,11 +1013,17 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         keepCaretNearTypewriterLine()
     }
 
-    /// Records the document state the current composition started from, once.
+    /// Records the state the current composition started from, once.
+    ///
+    /// The revision is the one the editor buffer represents, not the
+    /// document's current revision. When an external update has landed since
+    /// the last sync, the buffer still holds the older text; recording the
+    /// newer revision would make the commit look current and let it overwrite
+    /// that update. The commit then sees the mismatch and resets instead.
     private func recordCompositionBaselineIfNeeded() {
         guard compositionBaseline == nil else { return }
         compositionBaseline = CompositionBaseline(
-            revision: document.revision,
+            revision: synchronizedRevision,
             source: document.source
         )
     }
@@ -766,11 +1033,872 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        // With a caret set live, a native selection change is one of three
+        // things: an echo of our own write (suppressed above), a pointer
+        // gesture by the user, or a navigation another surface performed —
+        // Find, review markers, a reading anchor, Edit in Source. A pointer
+        // gesture collapses the set. Navigation is primary-only: the set
+        // survives and its primary follows the selection, because otherwise
+        // the next edit would land at the old primary while the user looks at
+        // a different caret. The notification carries no cause, so Find
+        // brackets its call (see `MarkdownTextView.navigationDepth`).
+        if !suppressSelectionEcho,
+           !composingForMultiCursor,
+           multiCursorSelection != nil,
+           let native = Range(textView.selectedRange()) {
+            let isPointer = isSelectionChangeUserDriven()
+                && textView.navigationDepth == 0
+            if isPointer, native != multiCursorSelection?.primaryRange {
+                adoptSingleCursor()
+            } else if !isPointer {
+                // The table names navigation primary-only; any other outcome
+                // for it leaves the set alone rather than guessing.
+                switch multiCursorPolicy(.find) {
+                case .primaryOnly:
+                    movePrimary(to: native)
+                case .collapse:
+                    adoptSingleCursor()
+                case .refuse, .batch:
+                    break
+                }
+            }
+        }
         if let range = Range(textView.selectedRange()) {
             document.selection = range
         }
         scheduleVisibleHighlight()
         keepCaretNearTypewriterLine()
+    }
+
+    // The choke point: with more than one caret, any AppKit-initiated text
+    // change that is not the batch itself is refused before the first
+    // storage mutation. A route the plan forgot fails closed here instead of
+    // editing only the primary. An input-method composition is the one
+    // exception: its edits belong to the primary, and the terminal commit is
+    // translated for the secondaries in `finishCompositionIfNeeded`.
+    func textView(
+        _ textView: NSTextView,
+        shouldChangeTextIn affectedCharRange: NSRange,
+        replacementString: String?
+    ) -> Bool {
+        guard !isApplyingBatch,
+              !composingForMultiCursor,
+              !textView.hasMarkedText(),
+              let model = multiCursorSelection,
+              model.count > 1 else { return true }
+        return false
+    }
+
+    func textView(
+        _ textView: NSTextView,
+        shouldChangeTextInRanges affectedRanges: [NSValue],
+        replacementStrings: [String]?
+    ) -> Bool {
+        guard !isApplyingBatch,
+              !composingForMultiCursor,
+              !textView.hasMarkedText(),
+              let model = multiCursorSelection,
+              model.count > 1 else { return true }
+        return false
+    }
+
+    // MARK: - Multi-cursor
+
+    /// The one-outcome policy every caret-set surface consults. Injectable so
+    /// a test can prove a handler reads the table instead of hard-coding its
+    /// current values.
+    var multiCursorPolicy: (MultiCursorPolicy.Operation)
+        -> MultiCursorPolicy.Outcome = { $0.outcome }
+
+    /// The batch entry point's gate: only the table's `batch` outcome may run
+    /// here. Every other outcome stops with the standard beep — `.collapse`
+    /// would have to re-run the operation natively, which the caller owns.
+    /// Returns true when the caller must stop.
+    private func gateBatch(_ operation: MultiCursorPolicy.Operation) -> Bool {
+        guard multiCursorSelection != nil else { return false }
+        guard multiCursorPolicy(operation) != .batch else { return false }
+        NSSound.beep()
+        return true
+    }
+
+    /// The gate for operations this path cannot batch. Returns true when the
+    /// caller must stop; nil means proceed with one native caret (`.collapse`
+    /// adopted the primary) or with the set intact (`.primaryOnly`).
+    private func gateNonBatch(
+        _ operation: MultiCursorPolicy.Operation
+    ) -> Bool? {
+        guard multiCursorSelection != nil else { return nil }
+        switch multiCursorPolicy(operation) {
+        case .collapse:
+            adoptSingleCursor()
+            return nil
+        case .primaryOnly:
+            return nil
+        case .refuse:
+            NSSound.beep()
+            return true
+        case .batch:
+            // This path has no batch implementation. A table entry promising
+            // one is a wiring bug; refuse rather than silently editing the
+            // primary and leaving the other carets behind.
+            assertionFailure("\(operation) has no batch implementation here")
+            NSSound.beep()
+            return true
+        }
+    }
+
+    /// Adopts a caret set. One caret routes nothing through the batch engine;
+    /// two or more make every supported edit a batch. The native selection
+    /// always follows the primary, including the one-caret case (a placement
+    /// command that finds a single occurrence still selects it). Placement
+    /// gestures and tests use this entry point.
+    func adoptMultiCursor(_ selection: MultiCursorSelection) {
+        multiCursorSelection = selection.count > 1 ? selection : nil
+        let primary = selection.primaryRange
+        let native = NSRange(location: primary.lowerBound, length: primary.count)
+        suppressSelectionEcho = true
+        textView.setSelectedRange(native)
+        suppressSelectionEcho = false
+        // Placement can land on an occurrence several screens away (Cmd+D
+        // wrapping to the top of a long document).
+        textView.scrollRangeToVisible(native)
+        refreshMultiCursorVisuals()
+    }
+
+    /// The user took over the native selection; multi-cursor mode ends.
+    func adoptSingleCursor() {
+        guard multiCursorSelection != nil else { return }
+        multiCursorSelection = nil
+        caretOverlay?.clear()
+        refreshMultiCursorDecorations()
+    }
+
+    /// Programmatic navigation moved the native selection. The caret set
+    /// survives, and its primary follows so the next edit lands where the
+    /// user sees the caret; a secondary the new primary collides with is
+    /// dropped.
+    private func movePrimary(to range: Range<Int>) {
+        guard let model = multiCursorSelection,
+              range != model.primaryRange,
+              range.lowerBound >= 0,
+              range.lowerBound <= range.upperBound else {
+            return
+        }
+        let caret = MultiCursorSelection.Caret(
+            anchor: range.lowerBound,
+            active: range.upperBound
+        )
+        guard let updated = try? model.movingPrimary(
+            to: caret,
+            source: textView.string
+        ) else { return }
+        multiCursorSelection = updated.count > 1 ? updated : nil
+        refreshMultiCursorVisuals()
+    }
+
+    /// Collapses multi-cursor mode without touching text or selection.
+    func resetMultiCursor() {
+        guard multiCursorSelection != nil else { return }
+        multiCursorSelection = nil
+        caretOverlay?.clear()
+        refreshMultiCursorDecorations()
+    }
+
+    // MARK: - Placement
+
+    /// Cmd+click: toggles a caret at the click point and makes it primary.
+    /// The click is consumed once it has been considered, so AppKit never
+    /// moves the native selection behind the caret set. A read-only,
+    /// rendered, or composing editor lets the click through untouched.
+    func toggleCaret(at point: NSPoint) -> Bool {
+        guard document.mode == .source,
+              !document.isReadOnly,
+              !textView.hasMarkedText() else {
+            return false
+        }
+        let source = textView.string
+        let length = (source as NSString).length
+        let index = min(
+            max(0, textView.characterIndexForInsertion(at: point)),
+            length
+        )
+        do {
+            let native = Range(textView.selectedRange()) ?? 0..<0
+            let base: MultiCursorSelection
+            if let existing = multiCursorSelection {
+                base = existing
+            } else {
+                base = try MultiCursorSelection(
+                    [
+                        MultiCursorSelection.Caret(
+                            anchor: min(native.lowerBound, length),
+                            active: min(native.upperBound, length)
+                        )
+                    ],
+                    primary: 0,
+                    source: source
+                )
+            }
+            adoptMultiCursor(
+                try base.adding(anchor: index, active: index, source: source)
+            )
+        } catch {
+            // A grapheme split or the caret cap: the gesture is refused, but
+            // it still must not fall through to AppKit's selection handling.
+            NSSound.beep()
+        }
+        return true
+    }
+
+    // MARK: - Input-method composition
+
+    /// Records the primary span a composition replaces. Only a multi-caret
+    /// editor translates anything, so a single caret never pays for a
+    /// tracker. The first update's pre-event selection is the span; a later
+    /// explicit replacement range overrides it. Later updates without an
+    /// explicit range keep the original span, because their pre-event
+    /// selection tracks the marked text itself.
+    private func noteCompositionUpdate(
+        selectionBefore: NSRange,
+        replacementRange: NSRange
+    ) {
+        // The first marked-text update is the only synchronous signal that a
+        // composition started: AppKit posts no text-change notification for
+        // marked text, so `textDidChange` never sees the in-flight state and
+        // cannot record the baseline. Record it here, before the multi-caret
+        // guard, because a single-caret composition needs the same
+        // protection against committing over an external update.
+        recordCompositionBaselineIfNeeded()
+        guard multiCursorSelection != nil else { return }
+        let length = (textView.string as NSString).length
+        func valid(_ range: NSRange) -> Range<Int>? {
+            guard range.location != NSNotFound,
+                  range.location >= 0,
+                  range.length >= 0,
+                  range.location <= length - range.length else {
+                return nil
+            }
+            return range.location..<(range.location + range.length)
+        }
+        if compositionTracker == nil {
+            compositionTracker = CompositionTracker(
+                preimage: textView.string,
+                span: valid(replacementRange) ?? valid(selectionBefore)
+            )
+            // MC-03: the selection background hides while a composition is in
+            // flight. Attribute passes are refused once marked text exists,
+            // so clear it now, before AppKit installs the composition.
+            refreshMultiCursorDecorations(selectionsVisible: false)
+        } else if let explicit = valid(replacementRange) {
+            compositionTracker?.span = explicit
+        }
+    }
+
+    /// Ends a composition once AppKit has cleared its marked text. The
+    /// primary is wherever the native selection landed; every secondary
+    /// translates by the span the composition actually replaced. A span the
+    /// model cannot map (a grapheme split, a collision) collapses the set to
+    /// the primary rather than risking corruption.
+    private func finishCompositionIfNeeded(explicitRange: NSRange?) {
+        guard var tracker = compositionTracker, !textView.hasMarkedText()
+        else {
+            return
+        }
+        compositionTracker = nil
+        guard let model = multiCursorSelection, model.count > 1 else { return }
+        let after = textView.string
+        // Exact code-unit equality: composing a precomposed "é" over a
+        // decomposed "e" + U+0301 makes Swift's canonical `==` true while the
+        // UTF-16 offsets after the replacement shift, so the secondaries must
+        // still translate.
+        if (after as NSString).isEqual(to: tracker.preimage) {
+            // The text is unchanged, but the native selection moved to the
+            // end of the commit; the model primary must follow, or the next
+            // keystroke edits the old range.
+            if let range = Range(textView.selectedRange()),
+               range != model.primaryRange,
+               let updated = try? model.movingPrimary(
+                   to: MultiCursorSelection.Caret(
+                       anchor: range.lowerBound,
+                       active: range.upperBound
+                   ),
+                   source: after
+               ) {
+                multiCursorSelection = updated.count > 1 ? updated : nil
+            }
+            refreshMultiCursorVisuals()
+            return
+        }
+        // An explicit range on the commit itself outranks whatever the
+        // marked-text updates implied.
+        if let explicitRange,
+           explicitRange.location != NSNotFound,
+           explicitRange.location >= 0,
+           explicitRange.length >= 0 {
+            let preimageLength = (tracker.preimage as NSString).length
+            if explicitRange.location
+                <= preimageLength - explicitRange.length {
+                let start = explicitRange.location
+                tracker.span = start..<(start + explicitRange.length)
+            }
+        }
+        let length = (after as NSString).length
+        let selection = textView.selectedRange()
+        guard selection.location != NSNotFound,
+              selection.location >= 0,
+              selection.length >= 0,
+              selection.location <= length - selection.length else {
+            adoptSingleCursor()
+            return
+        }
+        let newPrimary = MultiCursorSelection.Caret(
+            anchor: selection.location,
+            active: selection.location + selection.length
+        )
+        let (replaced, inserted) = replacedSpan(
+            from: tracker.preimage,
+            to: after,
+            hinted: tracker.span
+        )
+        do {
+            let translated = try model.translated(
+                replacing: replaced,
+                with: inserted,
+                primary: newPrimary,
+                source: after
+            )
+            multiCursorSelection = translated.count > 1 ? translated : nil
+            refreshMultiCursorVisuals()
+        } catch {
+            adoptSingleCursor()
+        }
+    }
+
+    /// The span a composition actually replaced. The input method's own
+    /// report is authoritative when it fits the observed text; otherwise the
+    /// common prefix and suffix of preimage and postimage name the changed
+    /// middle.
+    private func replacedSpan(
+        from preimage: String,
+        to postimage: String,
+        hinted: Range<Int>?
+    ) -> (replaced: Range<Int>, inserted: Range<Int>) {
+        let old = Array(preimage.utf16)
+        let new = Array(postimage.utf16)
+        if let hinted,
+           hinted.lowerBound >= 0,
+           hinted.upperBound <= old.count {
+            let insertedLength = new.count - (old.count - hinted.count)
+            let insertedEnd = hinted.lowerBound + insertedLength
+            if insertedLength >= 0,
+               insertedEnd <= new.count,
+               Array(new[0..<hinted.lowerBound])
+                == Array(old[0..<hinted.lowerBound]),
+               Array(new[insertedEnd...])
+                == Array(old[hinted.upperBound...]) {
+                return (hinted, hinted.lowerBound..<insertedEnd)
+            }
+        }
+        var prefix = 0
+        while prefix < old.count,
+              prefix < new.count,
+              old[prefix] == new[prefix] {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < old.count - prefix,
+              suffix < new.count - prefix,
+              old[old.count - 1 - suffix] == new[new.count - 1 - suffix] {
+            suffix += 1
+        }
+        return (
+            prefix..<(old.count - suffix),
+            prefix..<(new.count - suffix)
+        )
+    }
+
+    // MARK: - Movement
+
+    /// One keyboard motion with more than one caret. Selection-only: no
+    /// text change, no undo entry.
+    private struct MultiCursorMotion {
+        let vertical: CaretMovement.Vertical?
+        let direction: CaretMovement.Direction
+        let unit: CaretMovement.Unit
+        let extending: Bool
+
+        init?(selector: Selector) {
+            switch selector {
+            case #selector(NSResponder.moveLeft(_:)):
+                self.init(direction: .backward, unit: .grapheme, extending: false)
+            case #selector(NSResponder.moveRight(_:)):
+                self.init(direction: .forward, unit: .grapheme, extending: false)
+            case #selector(NSResponder.moveLeftAndModifySelection(_:)):
+                self.init(direction: .backward, unit: .grapheme, extending: true)
+            case #selector(NSResponder.moveRightAndModifySelection(_:)):
+                self.init(direction: .forward, unit: .grapheme, extending: true)
+            case #selector(NSResponder.moveWordLeft(_:)),
+                 #selector(NSResponder.moveWordBackward(_:)):
+                self.init(direction: .backward, unit: .word, extending: false)
+            case #selector(NSResponder.moveWordRight(_:)),
+                 #selector(NSResponder.moveWordForward(_:)):
+                self.init(direction: .forward, unit: .word, extending: false)
+            case #selector(NSResponder.moveWordLeftAndModifySelection(_:)),
+                 #selector(NSResponder.moveWordBackwardAndModifySelection(_:)):
+                self.init(direction: .backward, unit: .word, extending: true)
+            case #selector(NSResponder.moveWordRightAndModifySelection(_:)),
+                 #selector(NSResponder.moveWordForwardAndModifySelection(_:)):
+                self.init(direction: .forward, unit: .word, extending: true)
+            case #selector(NSResponder.moveToBeginningOfLine(_:)):
+                self.init(direction: .backward, unit: .line, extending: false)
+            case #selector(NSResponder.moveToEndOfLine(_:)):
+                self.init(direction: .forward, unit: .line, extending: false)
+            case #selector(NSResponder.moveToBeginningOfLineAndModifySelection(_:)):
+                self.init(direction: .backward, unit: .line, extending: true)
+            case #selector(NSResponder.moveToEndOfLineAndModifySelection(_:)):
+                self.init(direction: .forward, unit: .line, extending: true)
+            case #selector(NSResponder.moveToBeginningOfDocument(_:)):
+                self.init(direction: .backward, unit: .document, extending: false)
+            case #selector(NSResponder.moveToEndOfDocument(_:)):
+                self.init(direction: .forward, unit: .document, extending: false)
+            case #selector(NSResponder.moveToBeginningOfDocumentAndModifySelection(_:)):
+                self.init(direction: .backward, unit: .document, extending: true)
+            case #selector(NSResponder.moveToEndOfDocumentAndModifySelection(_:)):
+                self.init(direction: .forward, unit: .document, extending: true)
+            case #selector(NSResponder.moveUp(_:)):
+                self.init(vertical: .up, extending: false)
+            case #selector(NSResponder.moveDown(_:)):
+                self.init(vertical: .down, extending: false)
+            case #selector(NSResponder.moveUpAndModifySelection(_:)):
+                self.init(vertical: .up, extending: true)
+            case #selector(NSResponder.moveDownAndModifySelection(_:)):
+                self.init(vertical: .down, extending: true)
+            default:
+                return nil
+            }
+        }
+
+        private init(
+            vertical: CaretMovement.Vertical? = nil,
+            direction: CaretMovement.Direction = .forward,
+            unit: CaretMovement.Unit = .grapheme,
+            extending: Bool
+        ) {
+            self.vertical = vertical
+            self.direction = direction
+            self.unit = unit
+            self.extending = extending
+        }
+    }
+
+    private func applyMotion(_ motion: MultiCursorMotion) -> Bool {
+        guard let model = multiCursorSelection else { return false }
+        let moved: MultiCursorSelection
+        do {
+            if let vertical = motion.vertical {
+                moved = try CaretMovement.vertical(
+                    model,
+                    in: textView.string,
+                    direction: vertical,
+                    extending: motion.extending,
+                    lines: lineProvider()
+                )
+            } else {
+                moved = try CaretMovement.horizontal(
+                    model,
+                    in: textView.string,
+                    direction: motion.direction,
+                    unit: motion.unit,
+                    extending: motion.extending
+                )
+            }
+        } catch {
+            return true
+        }
+        multiCursorSelection = moved.count > 1 ? moved : nil
+        suppressSelectionEcho = true
+        let primary = moved.primaryRange
+        let native = NSRange(location: primary.lowerBound, length: primary.count)
+        textView.setSelectedRange(native)
+        suppressSelectionEcho = false
+        // Consuming the key bypasses AppKit's own scroll-into-view; a caret
+        // moved several screens away must still be revealed.
+        textView.scrollRangeToVisible(native)
+        refreshMultiCursorVisuals()
+        return true
+    }
+
+    /// Display lines are cached for one buffer, font, and width; a resize, a
+    /// font change, or an edit rebuilds them from TextKit. The font belongs in
+    /// the key because it changes wrapping at a fixed container width, and
+    /// the revision because equality of text is not equality of offsets.
+    private func lineProvider() -> TextKitLineProvider {
+        let revision = synchronizedRevision
+        // Syntax highlighting changes heading and inline fonts without an
+        // edit, so the revision alone cannot say the layout is unchanged.
+        // The highlighted revision is part of the key: a table built before
+        // the pass is rebuilt once after it.
+        let highlighted = lastHighlightedRevision
+        let length = textView.textStorage?.length ?? 0
+        let font = textView.font
+        let width = textView.textContainer?.containerSize.width
+            ?? textView.bounds.width
+        if let cache = displayLineCache,
+           cache.revision == revision,
+           cache.highlighted == highlighted,
+           cache.length == length,
+           cache.font == font,
+           cache.width == width {
+            return TextKitLineProvider(lines: cache.lines)
+        }
+        let provider = TextKitLineProvider(textView: textView)
+        displayLineCache = (
+            revision,
+            highlighted,
+            length,
+            font,
+            width,
+            provider.lines
+        )
+        return provider
+    }
+
+    @discardableResult
+    func applyMultiCursor(_ operation: MultiCursorEdit.Operation) -> Bool {
+        guard let model = multiCursorSelection, model.count > 1 else {
+            return false
+        }
+        guard !gateBatch(operation.policyOperation) else { return true }
+        guard !document.isReadOnly else {
+            lastCommandError = DocumentError.readOnly
+            return true
+        }
+        guard !isApplyingBatch else { return true }
+        // The view's buffer must belong to the document revision the batch
+        // will be applied to. An external update of equal length changes the
+        // revision without changing any length, so only this recorded value
+        // catches it.
+        guard synchronizedRevision == document.revision,
+              textView.textStorage?.length == document.sourceUTF16Count else {
+            resetTextToDocument()
+            lastCommandError = DocumentError.staleCompletion
+            return true
+        }
+        let sourceRevision = document.revision
+        let sourceLength = textView.textStorage?.length ?? 0
+        // The guards above prove the view holds this document revision's
+        // text at the recorded length; the document's copy is native, while
+        // bridging the view's string once costs every offset conversion
+        // inside the engine ~3 ms per megabyte per caret.
+        switch MultiCursorEdit.apply(
+            operation,
+            to: document.source,
+            selection: model
+        ) {
+        case .failure(let failure):
+            NSSound.beep()
+            lastCommandError = failure
+            return true
+        case .success(let output):
+            guard output.changed else {
+                // The replacements are textually a no-op but still collapse
+                // selections to carets; the native selection must follow the
+                // model, or the user sees a selection that typing ignores.
+                adoptMultiCursor(output.selection)
+                return true
+            }
+            guard output.source.utf8.count
+                <= DocumentHistoryLimits.maxReplacementBytes else {
+                NSSound.beep()
+                lastCommandError = DocumentError.editTooLarge
+                return true
+            }
+            // The engine is pure and synchronous, so nothing can edit the
+            // storage or the document inside it. These O(1) invariants catch
+            // a reentrant change exactly where the old whole-source
+            // comparisons did, without their grapheme walk (~90 ms per
+            // megabyte).
+            guard document.revision == sourceRevision,
+                  synchronizedRevision == sourceRevision,
+                  document.sourceUTF16Count == sourceLength,
+                  textView.textStorage?.length == sourceLength else {
+                // The storage or the document changed behind the batch.
+                // Rebuild from the document instead of writing an edit
+                // computed on stale text.
+                resetTextToDocument()
+                lastCommandError = DocumentError.staleCompletion
+                return true
+            }
+            applyBatch(output)
+            return true
+        }
+    }
+
+    /// Applies one batch inside the synchronous window: one storage edit over
+    /// the span the replacements cover, the model primary, the native
+    /// selection, one change notification, and one document revision. The
+    /// suppression flags never outlive this call, so the asynchronous document
+    /// sync still uses the echo comparison.
+    private func applyBatch(_ output: MultiCursorEdit.Output) {
+        guard let storage = textView.textStorage else { return }
+        isApplyingBatch = true
+        suppressSelectionEcho = true
+        applyBatchReplacements(output.replacements, to: storage)
+        // One caret after the batch means multi-cursor mode is over; keeping a
+        // non-nil set would leave Return, Tab and formatting refused against a
+        // stale two-caret model.
+        multiCursorSelection = output.selection.count > 1
+            ? output.selection
+            : nil
+        let primary = output.selection.primaryRange
+        textView.setSelectedRange(
+            NSRange(location: primary.lowerBound, length: primary.count)
+        )
+        actionNameOverride = output.actionName
+        textView.didChangeText()
+        actionNameOverride = nil
+        suppressSelectionEcho = false
+        isApplyingBatch = false
+        refreshMultiCursorVisuals()
+    }
+
+    /// Applies every replacement as one storage edit over the span they
+    /// cover. Editing the storage once per caret moves the text after that
+    /// caret once per caret — with 100 carets early in a 1 MB document that
+    /// is a hundred megabyte-scale moves per keystroke. One span replacement
+    /// moves the tail once; the span's own attributes are carried from the
+    /// pre-edit text, and the highlight pass repaints the syntax anyway.
+    private func applyBatchReplacements(
+        _ replacements: [MultiCursorEdit.Replacement],
+        to storage: NSTextStorage
+    ) {
+        guard let highest = replacements.first,
+              let lowest = replacements.last,
+              lowest.range.lowerBound <= highest.range.upperBound else {
+            return
+        }
+        let span = NSRange(
+            location: lowest.range.lowerBound,
+            length: highest.range.upperBound - lowest.range.lowerBound
+        )
+        // Build the new span once from untouched slices and payloads.
+        // Replacing inside a mutable copy per caret shifted the copy's tail
+        // at every step: 100 carets spread across a large span moved the
+        // span's contents a hundred times.
+        let built = NSMutableAttributedString()
+        var cursor = span.location
+        for replacement in replacements.reversed() {
+            if replacement.range.lowerBound > cursor {
+                built.append(
+                    storage.attributedSubstring(
+                        from: NSRange(
+                            location: cursor,
+                            length: replacement.range.lowerBound - cursor
+                        )
+                    )
+                )
+            }
+            built.append(
+                NSAttributedString(
+                    string: replacement.text,
+                    attributes: attributesForInsertion(
+                        at: replacement.range.lowerBound,
+                        in: storage
+                    )
+                )
+            )
+            cursor = replacement.range.upperBound
+        }
+        if cursor < span.upperBound {
+            built.append(
+                storage.attributedSubstring(
+                    from: NSRange(
+                        location: cursor,
+                        length: span.upperBound - cursor
+                    )
+                )
+            )
+        }
+        storage.replaceCharacters(in: span, with: built)
+    }
+
+    /// The attributes text inserted at `offset` inherits: those of the
+    /// character it replaces or precedes, or the last character's at the end
+    /// of the document.
+    private func attributesForInsertion(
+        at offset: Int,
+        in storage: NSTextStorage
+    ) -> [NSAttributedString.Key: Any] {
+        guard storage.length > 0 else { return baseAttributes }
+        let index = min(max(offset, 0), storage.length - 1)
+        return storage.attributes(at: index, effectiveRange: nil)
+    }
+
+    private func refreshMultiCursorVisuals() {
+        guard let model = multiCursorSelection else {
+            caretOverlay?.clear()
+            refreshMultiCursorDecorations()
+            return
+        }
+        caretOverlay?.show(
+            model.carets,
+            primaryIndex: model.primaryIndex,
+            composing: textView.hasMarkedText()
+        )
+        refreshMultiCursorDecorations()
+    }
+
+    private func refreshMultiCursorDecorations(
+        selectionsVisible: Bool = true
+    ) {
+        let decorations = decorations(selectionsVisible: selectionsVisible)
+        guard let output = lastOutput else {
+            // An editable buffer beyond the parse limit has no output; the
+            // selection backgrounds must still paint, or placement and batch
+            // replacement would run with nothing visible.
+            applyDecorationsWithoutSyntax(decorations)
+            return
+        }
+        applyHighlight(output, decorations: decorations)
+    }
+
+    /// Paints the semantic layers with no syntax pass. Used when parsing is
+    /// disabled for an oversized buffer; the compositor still needs its
+    /// decoration layers applied over base attributes.
+    private func applyDecorationsWithoutSyntax(
+        _ decorations: MarkdownDecorationSet
+    ) {
+        guard !textView.hasMarkedText(), let storage = textView.textStorage else {
+            return
+        }
+        let manager = document.undoManager
+        let wasEnabled = manager.isUndoRegistrationEnabled
+        if wasEnabled {
+            manager.disableUndoRegistration()
+        }
+        defer {
+            if wasEnabled {
+                manager.enableUndoRegistration()
+            }
+        }
+        MarkdownDecorationCompositor.apply(
+            syntax: { _ in },
+            decorations: decorations,
+            to: storage,
+            affectedRange: affectedRange(),
+            baseAttributes: baseAttributes
+        )
+        textView.typingAttributes = baseAttributes
+    }
+
+    /// Plain-text paste only. An image or rich payload is refused: the policy
+    /// table gives those surfaces exactly one outcome, and it is not a batch.
+    /// `plainTextOnly` is the Paste as Plain Text command: the payload's
+    /// string is used whatever else it carries.
+    private func pasteMultiCursor(plainTextOnly: Bool = false) -> Bool {
+        guard let model = multiCursorSelection, model.count > 1 else {
+            return false
+        }
+        // A composition owns the next edit. Marked text has already rewritten
+        // storage, so the model's ranges name the pre-composition buffer; a
+        // batch would fail its length guard and reset the editor, discarding
+        // the composition. The native paste path replaces the marked text
+        // correctly, so leave this paste to it.
+        guard !textView.hasMarkedText(), !composingForMultiCursor else {
+            return false
+        }
+        let pasteboard = clipboard
+        let types = pasteboard.types ?? []
+        let operation: MultiCursorPolicy.Operation
+        // The same classification the native handler uses: an image file URL
+        // pastes an image even when the pasteboard also carries a string
+        // fallback, so it must not be batched as plain text.
+        if plainTextOnly {
+            operation = .plainPaste
+        } else if textView.isImagePasteboard(pasteboard) {
+            operation = .imagePaste
+        } else if types.contains(.html) {
+            operation = .smartPaste
+        } else {
+            operation = .plainPaste
+        }
+        switch multiCursorPolicy(operation) {
+        case .refuse:
+            NSSound.beep()
+            return true
+        case .batch:
+            break
+        case .collapse, .primaryOnly:
+            // No paste surface has either outcome in the table.
+            return true
+        }
+        guard let text = pasteboard.string(forType: .string) else {
+            NSSound.beep()
+            return true
+        }
+        return applyMultiCursor(.paste(text))
+    }
+
+    /// The concatenation of every non-empty selection, in caret order. A
+    /// zero-length caret contributes nothing.
+    func multiCursorCopyText() -> String? {
+        // Marked text has already rewritten the storage, so the model's
+        // ranges still name the pre-composition buffer and extracting them
+        // would raise an NSRangeException. During composition the native
+        // primary selection is the only coherent selection: let the native
+        // copy path handle it.
+        guard !textView.hasMarkedText(), !composingForMultiCursor else {
+            return nil
+        }
+        guard let model = multiCursorSelection, model.count > 1 else {
+            return nil
+        }
+        let ns = textView.string as NSString
+        var pieces: [String] = []
+        for caret in model.carets where !caret.range.isEmpty {
+            // A range outside the current storage means the model describes a
+            // different source; a partial concatenation would be wrong.
+            guard caret.range.lowerBound >= 0,
+                  caret.range.upperBound <= ns.length else {
+                return nil
+            }
+            pieces.append(
+                ns.substring(
+                    with: NSRange(
+                        location: caret.range.lowerBound,
+                        length: caret.range.count
+                    )
+                )
+            )
+        }
+        guard !pieces.isEmpty else { return nil }
+        return pieces.joined()
+    }
+
+    private func copyMultiCursor() -> Bool {
+        // The table names copy a batch: one concatenated clipboard write.
+        // Consulting it here keeps the clipboard path honest even if the
+        // table's verdict changes.
+        guard multiCursorPolicy(.copy) == .batch else {
+            NSSound.beep()
+            return true
+        }
+        guard let text = multiCursorCopyText() else { return false }
+        let pasteboard = clipboard
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        return true
+    }
+
+    private func cutMultiCursor() -> Bool {
+        guard let model = multiCursorSelection, model.count > 1,
+              model.carets.contains(where: { !$0.range.isEmpty }) else {
+            return false
+        }
+        guard copyMultiCursor() else { return false }
+        // Replacing each selection with nothing leaves zero-length carets
+        // untouched; that is the cut every caret expects.
+        return applyMultiCursor(.replace(""))
     }
 
     /// Keeps the caret's visual line near 40% of the viewport. A line already
@@ -853,6 +1981,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     func textView(_ view: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard !view.hasMarkedText() else { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            // Return is a refuse surface with more than one caret: list
+            // continuation and table row insertion both edit one paragraph
+            // around the primary, and the policy allows neither outcome.
+            if let stop = gateNonBatch(.listReturn) {
+                return stop
+            }
             let selection = Range(view.selectedRange()) ?? 0..<0
             if let event = NSApp.currentEvent,
                event.modifierFlags.contains(.command) {
@@ -872,6 +2006,34 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
 
         let selection = Range(view.selectedRange()) ?? 0..<0
+        if let model = multiCursorSelection, model.count > 1 {
+            switch commandSelector {
+            case #selector(NSResponder.deleteBackward(_:)):
+                return applyMultiCursor(.deleteBackward)
+            case #selector(NSResponder.deleteForward(_:)):
+                return applyMultiCursor(.deleteForward)
+            case #selector(NSResponder.insertTab(_:)),
+                 #selector(NSResponder.insertBacktab(_:)):
+                // A caret inside a table navigates cells; anywhere else Tab
+                // indents. They are separate policy rows, so the table's own
+                // entry is consulted when the caret is in a table.
+                let operation: MultiCursorPolicy.Operation =
+                    MarkdownTableScanner.table(
+                        at: selection.lowerBound,
+                        in: view.string
+                    ) != nil
+                    ? .tableCellTab
+                    : .tabIndent
+                if let stop = gateNonBatch(operation) {
+                    return stop
+                }
+            default:
+                break
+            }
+            if let motion = MultiCursorMotion(selector: commandSelector) {
+                return applyMotion(motion)
+            }
+        }
         let plan: MarkdownEditPlan
         switch commandSelector {
         case #selector(NSResponder.insertTab(_:)):
@@ -954,7 +2116,25 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         _ inserted: String,
         replacementRange: NSRange
     ) -> Bool {
-        guard !textView.hasMarkedText() else { return false }
+        // A commit can arrive with the marked text already cleared; the
+        // tracker still owns it, and the batch must not insert at every
+        // caret.
+        guard !textView.hasMarkedText(), !composingForMultiCursor else {
+            return false
+        }
+        if let model = multiCursorSelection, model.count > 1 {
+            if replacementRange.location != NSNotFound {
+                let primary = NSRange(
+                    location: model.primaryRange.lowerBound,
+                    length: model.primaryRange.count
+                )
+                guard replacementRange == primary else {
+                    NSSound.beep()
+                    return true
+                }
+            }
+            return applyMultiCursor(.insert(inserted))
+        }
         let selection: Range<Int>
         if replacementRange.location == NSNotFound {
             selection = Range(textView.selectedRange()) ?? 0..<0
@@ -986,6 +2166,13 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     /// Opens the inline table grid when the caret is inside a table.
     func presentTablePopover() {
+        // The grid edits one cell at a time, and its Tab navigation is a
+        // refuse surface under the policy; the popover never opens with more
+        // than one caret.
+        guard multiCursorSelection == nil else {
+            NSSound.beep()
+            return
+        }
         guard !document.isReadOnly else {
             lastCommandError = DocumentError.readOnly
             return
@@ -1220,6 +2407,19 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// Opens the link popover over the link at the caret. With no link there,
     /// it falls back to inserting one.
     func presentLinkPopover() {
+        // A link popover anchors to one range; the policy names the link
+        // popover a collapse surface, so consult it rather than deciding here.
+        if multiCursorSelection != nil {
+            switch multiCursorPolicy(.linkPopover) {
+            case .collapse:
+                adoptSingleCursor()
+            case .refuse:
+                NSSound.beep()
+                return
+            case .primaryOnly, .batch:
+                break
+            }
+        }
         guard !textView.hasMarkedText(),
               let output = lastOutput else {
             _ = perform(.insertLink(destination: ""))
@@ -1664,9 +2864,15 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             ns.length - pending.offset
         )
         guard length > 0 else { return }
+        // Seeding the find bar is primary-only navigation: it moves the
+        // native selection to the match, keeps every caret, and moves the
+        // model primary with it.
+        suppressSelectionEcho = true
         textView.setSelectedRange(
             NSRange(location: pending.offset, length: length)
         )
+        suppressSelectionEcho = false
+        movePrimary(to: pending.offset..<(pending.offset + length))
         textView.window?.makeFirstResponder(textView)
         // The standard text-finder actions, not a second finder: the bar owns
         // its own state and the Find menu keeps working on it.
@@ -1693,7 +2899,13 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             location: range.lowerBound,
             length: range.upperBound - range.lowerBound
         )
+        // Navigation is primary-only: it keeps the caret set, and its primary
+        // follows the selection so the next edit lands where the user sees
+        // the caret.
+        suppressSelectionEcho = true
         textView.setSelectedRange(nsRange)
+        suppressSelectionEcho = false
+        movePrimary(to: range)
         textView.scrollRangeToVisible(nsRange)
         textView.window?.makeFirstResponder(textView)
     }
@@ -1702,6 +2914,15 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// participates in the document's undo stack.
     @discardableResult
     func perform(_ command: MarkdownCommandKind) -> Bool {
+        // Every command that edits source is a refuse surface with more than
+        // one caret; only the two placement commands are allowed, and they
+        // edit no source at all. The choke point covers AppKit's edit routes;
+        // this covers the explicit ones (menus, palette, key equivalents).
+        if command != .addNextOccurrence,
+           command != .selectAllOccurrences,
+           gateNonBatch(command.policyOperation) == true {
+            return false
+        }
         var succeeded = false
         performCommand { [weak self] in
             guard let self else { return }
@@ -1711,7 +2932,8 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                     selection: Range(self.textView.selectedRange()) ?? 0..<0,
                     isReadOnly: self.document.isReadOnly,
                     hasMarkedText: self.textView.hasMarkedText(),
-                    mode: self.document.mode
+                    mode: self.document.mode,
+                    carets: self.multiCursorSelection
                 )
                 let result = try self.registry.apply(command, to: context)
                 succeeded = self.apply(result)
@@ -1811,8 +3033,13 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     private func apply(_ result: MarkdownCommandResult) -> Bool {
         // A command that changes nothing must not register an undo step; an
         // idempotent formatter run would otherwise fill the history with
-        // no-ops. The caret still moves to the command's selection.
+        // no-ops. The caret still moves to the command's selection; a
+        // placement command replaces the whole caret set instead.
         if result.source == textView.string {
+            if let carets = result.carets {
+                adoptMultiCursor(carets)
+                return true
+            }
             let nsSource = textView.string as NSString
             let location = min(result.selection.lowerBound, nsSource.length)
             let length = min(
@@ -1956,6 +3183,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         case .ready(let output):
             guard output.documentID == document.id else { return }
             lastOutput = output
+            onParsePublished?(output.revision)
             document.setNestingLimit(false)
             applyHighlight(output, decorations: currentDecorations)
         case .refused(let reason, _):
@@ -2014,6 +3242,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
         textView.typingAttributes = baseAttributes
         lastHighlightedRevision = output.revision
+        onHighlightApplied?(output.revision)
     }
 
     // MARK: - List continuation
@@ -2165,24 +3394,123 @@ final class MarkdownTextView: NSTextView {
     /// Returns true when the controller handled the insertion as an auto-pair
     /// or a skip-over; AppKit then inserts nothing.
     var onInsertText: ((String, NSRange) -> Bool)?
+    /// Returns true when the controller consumed a multi-caret paste, copy,
+    /// or cut. Each returns false when the editor is in single-caret mode.
+    var onMultiCursorPaste: (() -> Bool)?
+    /// Paste as Plain Text: the same batch path, ignoring rich payloads.
+    var onMultiCursorPlainPaste: (() -> Bool)?
+    var onMultiCursorCopy: (() -> Bool)?
+    var onMultiCursorCut: (() -> Bool)?
+    /// Handles a Command-click at a view-space point. Returns true when the
+    /// controller placed or refused a caret, so AppKit's own selection
+    /// handling never runs behind the caret set.
+    var onCommandClick: ((NSPoint) -> Bool)?
+    /// Called for a click AppKit is about to handle as an ordinary selection
+    /// gesture, before the native selection moves. A plain click always
+    /// returns to one caret — including a click on the primary's existing
+    /// position, where AppKit sends no selection-change notification and the
+    /// change-driven collapse would never run.
+    var onPlainClick: (() -> Void)?
+    /// Reports the view gaining or losing first responder. The caret overlay
+    /// hides when the view is not focused, and a focus change within one key
+    /// window changes no selection, frame, or scroll position, so its own
+    /// observers cannot see it.
+    var onFocusChange: ((Bool) -> Void)?
+    /// Reports an input-method marked-text update before AppKit mutates the
+    /// storage: the selection before the update and the replacement range
+    /// the input method named.
+    var onMarkedText: ((NSRange, NSRange) -> Void)?
+    /// Reports an insertion completed. A composition ends here when AppKit
+    /// cleared its marked text without a text change; the replacement range
+    /// is the one the input method named for the commit.
+    var onCompositionEnd: ((NSRange) -> Void)?
     /// Returns true when the controller collapsed a smart selection.
     var onEscapeSelection: (() -> Bool)?
+    /// Returns true when Escape collapsed the multi-caret set.
+    var onMultiCursorEscape: (() -> Bool)?
+    /// Depth of Find navigation this view is performing. A selection change
+    /// inside it is primary-only: it preserves the caret set, where a pointer
+    /// gesture collapses it. The change notification carries no cause, so the
+    /// initiator has to bracket the call.
+    private(set) var navigationDepth = 0
     private var dragHasImage = false
+
+    /// Runs `body` as a navigation: a selection change inside it is
+    /// primary-only even while this view is first responder. The Find
+    /// overrides below bracket their calls; a test can drive the same path.
+    func performNavigation<T>(_ body: () -> T) -> T {
+        navigationDepth += 1
+        defer { navigationDepth -= 1 }
+        return body()
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocusChange?(true) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocusChange?(false) }
+        return resigned
+    }
+
+    override func performFindPanelAction(_ sender: Any?) {
+        performNavigation { super.performFindPanelAction(sender) }
+    }
+
+    override func performTextFinderAction(_ sender: Any?) {
+        performNavigation { super.performTextFinderAction(sender) }
+    }
 
     override func selectAll(_ sender: Any?) {
         if onSmartSelectAll?() == true { return }
         super.selectAll(sender)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        // Command-click places or toggles a caret before AppKit moves the
+        // native selection; the controller decides whether the gesture
+        // applies at all.
+        if event.modifierFlags.contains(.command),
+           let onCommandClick,
+           onCommandClick(convert(event.locationInWindow, from: nil)) {
+            return
+        }
+        // Any other click is the user taking over the selection: one caret
+        // from here on, even when the click lands on the primary's own
+        // position and AppKit reports no change.
+        onPlainClick?()
+        super.mouseDown(with: event)
+    }
+
     override func cancelOperation(_ sender: Any?) {
+        if onMultiCursorEscape?() == true { return }
         if onEscapeSelection?() == true { return }
         super.cancelOperation(sender)
     }
 
     override func paste(_ sender: Any?) {
+        if onMultiCursorPaste?() == true { return }
         if handleImage(from: NSPasteboard.general) { return }
         if onSmartPaste?() == true { return }
         super.paste(sender)
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        if onMultiCursorPlainPaste?() == true { return }
+        super.pasteAsPlainText(sender)
+    }
+
+    override func copy(_ sender: Any?) {
+        if onMultiCursorCopy?() == true { return }
+        super.copy(sender)
+    }
+
+    override func cut(_ sender: Any?) {
+        if onMultiCursorCut?() == true { return }
+        super.cut(sender)
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
@@ -2191,6 +3519,20 @@ final class MarkdownTextView: NSTextView {
             return
         }
         super.insertText(string, replacementRange: replacementRange)
+        onCompositionEnd?(replacementRange)
+    }
+
+    override func setMarkedText(
+        _ string: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        onMarkedText?(self.selectedRange(), replacementRange)
+        super.setMarkedText(
+            string,
+            selectedRange: selectedRange,
+            replacementRange: replacementRange
+        )
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
@@ -2219,7 +3561,7 @@ final class MarkdownTextView: NSTextView {
         super.draggingExited(sender)
     }
 
-    private func isImagePasteboard(_ pasteboard: NSPasteboard) -> Bool {
+    func isImagePasteboard(_ pasteboard: NSPasteboard) -> Bool {
         // Type metadata only: `data(forType:)` copies the whole payload, and
         // drag tracking runs on every movement update.
         let types = pasteboard.types ?? []

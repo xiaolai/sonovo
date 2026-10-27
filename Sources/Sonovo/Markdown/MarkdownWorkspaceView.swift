@@ -1022,6 +1022,9 @@ private struct MarkdownRenderedDocumentView: View {
                             in: document
                         )
                     },
+                    onProjectionStart: {
+                        workspace.collapseMultiCursor(for: document)
+                    },
                     scrollTarget: Binding(
                         get: { workspace.scrollTargets[document.id] },
                         set: { workspace.scrollTargets[document.id] = $0 }

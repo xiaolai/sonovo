@@ -35,6 +35,21 @@ final class MarkdownDecorationTests: XCTestCase {
         )
     }
 
+    /// Polls an observable effect up to a deadline. The highlight task is
+    /// asynchronous: a fixed sleep states no completion ordering and fails
+    /// under scheduler contention.
+    private func waitUntil(
+        timeout: TimeInterval = 2,
+        _ condition: @MainActor () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return condition()
+    }
+
     func testLayersCoexistAndTogglingOneRestoresTheOthers() throws {
         let source = "# Title\n\nBody text here.\n"
         let (document, controller) = makeController(source: source)
@@ -192,15 +207,14 @@ final class MarkdownDecorationTests: XCTestCase {
                 message: "reference"
             )
         ])
-        try await Task.sleep(for: .milliseconds(60))
-        XCTAssertEqual(
-            storage.attribute(
+        let lintUnderlined = await waitUntil {
+            (storage.attribute(
                 .underlineStyle,
                 at: 0,
                 effectiveRange: nil
-            ) as? Int,
-            NSUnderlineStyle.single.rawValue
-        )
+            ) as? Int) == NSUnderlineStyle.single.rawValue
+        }
+        XCTAssertTrue(lintUnderlined)
 
         controller.textView.setSelectedRange(NSRange(location: 0, length: 0))
         controller.goToDiagnostic(backwards: false)
@@ -236,5 +250,77 @@ final class MarkdownDecorationTests: XCTestCase {
             ) as? NSFont,
             font
         )
+    }
+
+    func testSelectionBackgroundWinsOverCellAndClears() throws {
+        let source = "# Title\n\nBody text here.\n"
+        let (document, controller) = makeController(source: source)
+        let parsed = output(for: document)
+        controller.applyHighlight(parsed)
+        let storage = try XCTUnwrap(controller.textView.textStorage)
+        let bodyRange = (source as NSString).range(of: "Body text here.")
+        let cellColor = NSColor.systemYellow
+        let selectionColor = NSColor.systemBlue
+        let inside = NSRange(location: bodyRange.location + 2, length: 4)
+
+        func background(at location: Int) -> NSColor? {
+            storage.attribute(
+                .backgroundColor,
+                at: location,
+                effectiveRange: nil
+            ) as? NSColor
+        }
+
+        let cell = MarkdownDecoration(
+            layer: .cell,
+            range: bodyRange,
+            attributes: [.backgroundColor: cellColor]
+        )
+        controller.applyHighlight(
+            parsed,
+            decorations: MarkdownDecorationSet(
+                cell: [cell],
+                selection: [
+                    MarkdownDecoration(
+                        layer: .selection,
+                        range: inside,
+                        attributes: [.backgroundColor: selectionColor]
+                    )
+                ]
+            )
+        )
+        // Selection wins inside its range; the cell returns on both sides.
+        XCTAssertEqual(background(at: bodyRange.location), cellColor)
+        XCTAssertEqual(background(at: inside.location), selectionColor)
+        XCTAssertEqual(
+            background(at: inside.location + inside.length),
+            cellColor
+        )
+
+        // Moving the selection restores the cell colour it covered.
+        let moved = NSRange(location: bodyRange.location + 7, length: 3)
+        controller.applyHighlight(
+            parsed,
+            decorations: MarkdownDecorationSet(
+                cell: [cell],
+                selection: [
+                    MarkdownDecoration(
+                        layer: .selection,
+                        range: moved,
+                        attributes: [.backgroundColor: selectionColor]
+                    )
+                ]
+            )
+        )
+        XCTAssertEqual(background(at: inside.location), cellColor)
+        XCTAssertEqual(background(at: moved.location), selectionColor)
+
+        // Turning multi-cursor off removes only the selection backgrounds.
+        controller.applyHighlight(
+            parsed,
+            decorations: MarkdownDecorationSet(cell: [cell])
+        )
+        XCTAssertEqual(background(at: moved.location), cellColor)
+        XCTAssertEqual(controller.textView.string, source)
     }
 }

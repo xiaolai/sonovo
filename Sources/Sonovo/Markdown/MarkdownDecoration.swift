@@ -9,16 +9,23 @@ struct MarkdownDecoration {
     enum Layer: Int, CaseIterable {
         /// Foreground dimming outside the focused block. Lowest precedence.
         case focus = 0
-        /// Cell background. Loses to lint on foreground, owns only background.
+        /// Cell background. Loses to selection and lint on its own keys.
         case cell = 1
-        /// Lint severity. Wins over syntax color and focus dimming.
-        case lint = 2
+        /// Secondary multi-cursor selection. Owns the background key and
+        /// wins it over the cell layer (`cell < selection`), so a selection
+        /// inside a highlighted cell shows the selection; moving it away
+        /// restores the cell colour on the next pass.
+        case selection = 2
+        /// Lint severity. Wins over syntax colour and focus dimming.
+        case lint = 3
 
         var ownedKeys: [NSAttributedString.Key] {
             switch self {
             case .focus:
                 return [.foregroundColor]
             case .cell:
+                return [.backgroundColor]
+            case .selection:
                 return [.backgroundColor]
             case .lint:
                 return [.foregroundColor, .underlineStyle, .underlineColor]
@@ -37,10 +44,11 @@ struct MarkdownDecorationSet {
     var focus: [MarkdownDecoration] = []
     var cell: [MarkdownDecoration] = []
     var lint: [MarkdownDecoration] = []
+    var selection: [MarkdownDecoration] = []
 
     static var empty: MarkdownDecorationSet { MarkdownDecorationSet() }
 
-    var all: [MarkdownDecoration] { focus + cell + lint }
+    var all: [MarkdownDecoration] { focus + cell + lint + selection }
 }
 
 /// Applies syntax highlighting and the semantic decoration layers in one

@@ -68,7 +68,9 @@ public enum MarkdownCommandCatalog {
         entry(.collapseBlankLines, "Lines"),
         entry(.formatCJK, "Text"),
         entry(.setDetailsOpen(true), "Details"),
-        entry(.setDetailsOpen(false), "Details")
+        entry(.setDetailsOpen(false), "Details"),
+        entry(.addNextOccurrence, "Selection"),
+        entry(.selectAllOccurrences, "Selection")
     ]
 
     /// Commands that take an argument from UI the palette cannot supply

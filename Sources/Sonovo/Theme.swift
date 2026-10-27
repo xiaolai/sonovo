@@ -126,6 +126,18 @@ enum AppTheme {
         static let minimumTextSize: CGFloat = 0
     }
 
+    /// Multi-cursor chrome. The native primary caret is untouched; these
+    /// values govern the secondary carets and the selection tint only.
+    enum MultiCursor {
+        static let caretWidth: CGFloat = 2
+        static let selectionAlpha: CGFloat = 0.28
+        static var caretColor: NSColor { .controlAccentColor }
+        static var selectionColor: NSColor {
+            NSColor.controlAccentColor
+                .withAlphaComponent(selectionAlpha)
+        }
+    }
+
     /// Code viewer and editor geometry. The code surface is read at a glance,
     /// so the gutter is narrow, the status strip is one line, and the diff
     /// gutter reserves room for a sign plus two line-number columns.

@@ -557,6 +557,32 @@ struct MarkdownDocumentTests {
         #expect(document.source == "ab")
     }
 
+    /// The editor's O(1) "is the text view still this source" test compares
+    /// the text storage length with `sourceUTF16Count`. A source assignment
+    /// that skipped the pair would make that test lie in both directions:
+    /// it would miss a real edit or refuse a valid one.
+    @Test("The cached UTF-16 length tracks every source change")
+    func sourceLengthTracksEveryAssignment() throws {
+        let document = MarkdownDocument(untitledWith: MarkdownFileStore())
+        #expect(document.sourceUTF16Count == 0)
+
+        let first = "alpha 😀\nbeta\n"
+        try document.replaceSource(first)
+        #expect(document.source == first)
+        #expect(document.sourceUTF16Count == first.utf16.count)
+
+        try document.replaceSource("α\n")
+        #expect(document.sourceUTF16Count == 2)
+
+        document.undoManager.undo()
+        #expect(document.source == first)
+        #expect(document.sourceUTF16Count == first.utf16.count)
+
+        document.undoManager.redo()
+        #expect(document.source == "α\n")
+        #expect(document.sourceUTF16Count == 2)
+    }
+
     @Test("A save completion cannot clear a newer revision")
     func staleRevision() async throws {
         let directory = try temporaryDirectory()

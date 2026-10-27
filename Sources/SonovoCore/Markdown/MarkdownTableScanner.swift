@@ -138,6 +138,13 @@ public enum MarkdownTableScanner {
 
     /// All tables in the source, in document order.
     public static func tables(in source: String) -> [MarkdownTable] {
+        // Every table row carries an unescaped pipe, so a source with no pipe
+        // at all has no tables. This runs on each edit for the caret's cell
+        // highlight, where splitting a megabyte-long document into lines to
+        // find nothing is the dominant cost; one string search answers it.
+        guard (source as NSString).range(of: "|").location != NSNotFound else {
+            return []
+        }
         let lines = splitLines(source)
         // A pipe-shaped line inside code is not a table the editor may
         // rewrite; the scanner works on raw source and must exclude it.

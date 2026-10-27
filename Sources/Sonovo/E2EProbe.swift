@@ -1,6 +1,7 @@
 #if SONOVO_E2E_PROBE
 import AppKit
 import ApplicationServices
+import Carbon
 import Darwin
 import PDFKit
 import SwiftUI
@@ -106,6 +107,18 @@ enum E2EProbe {
                   .state(for: document.id) else {
             return
         }
+
+        // MC-00: the multi-cursor plan's evidence gate. Probe-only checks for
+        // caret geometry parity, IME span capture, and the echo rule.
+        await runMultiCursorFeasibilityChecks(window: window)
+        runMultiCursorCaretChecks()
+        await runMultiCursorEditingChecks()
+        await runMultiCursorIMEProbe()
+        runMultiCursorMovementProbe()
+        runMultiCursorPlacementProbe()
+        await runMultiCursorGuardProbe()
+        runMultiCursorAXProbe()
+        await runMultiCursorBudgetProbe()
 
         let renderedRecorded = await waitUntil(10) {
             workspace.storedReadingAnchors(for: document).rendered != nil
@@ -1558,6 +1571,3302 @@ enum E2EProbe {
             }
             Thread.sleep(forTimeInterval: 0.08)
         }
+    }
+
+    // MARK: - MC-00 multi-cursor feasibility probes
+    //
+    // Evidence for the multi-cursor plan's gate: caret geometry parity, IME
+    // span capture, and the echo rule. Probe-only code; it ships nowhere.
+
+    // token-exempt: E2E probe geometry tolerance, not product design
+    nonisolated private static let geometryTolerance: CGFloat = 1.0
+
+    private static func runMultiCursorFeasibilityChecks(
+        window: NSWindow
+    ) async {
+        runGeometryParity()
+        await runCompositionProbe()
+        await runEchoProbe()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: Geometry parity
+
+    private struct MCGeometryMeasurement {
+        let name: String
+        let offset: Int
+        let upstream: Bool
+        let gated: Bool
+        let native: NSRect?
+        let nativeActual: NSRange?
+        let reference: NSRect?
+        let charRect: NSRect?
+        let candidate: NSRect?
+        let note: String
+        let debug: String
+
+        var passed: Bool {
+            guard gated else { return true }
+            guard let reference, let candidate else { return false }
+            return abs(candidate.minX - reference.minX) <= geometryTolerance
+                && abs(candidate.minY - reference.minY) <= geometryTolerance
+                && abs(candidate.height - reference.height)
+                    <= geometryTolerance
+        }
+    }
+
+    private static func makeProbeTextView(
+        _ text: String,
+        font: NSFont
+    ) -> (window: NSWindow, view: MultiCursorProbeTextView) {
+        // token-exempt: E2E probe measurement surface, not product design
+        let width: CGFloat = 520
+        // token-exempt: E2E probe measurement surface, not product design
+        let height: CGFloat = 360
+        let scroll = NSScrollView(
+            // token-exempt: E2E probe measurement surface, not product design
+            frame: NSRect(x: 0, y: 0, width: width, height: height)
+        )
+        scroll.hasVerticalScroller = true
+        let view = MultiCursorProbeTextView(usingTextLayoutManager: true)
+        view.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        view.minSize = NSSize.zero
+        view.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.autoresizingMask = [.width]
+        view.textContainer?.widthTracksTextView = false
+        view.textContainer?.lineFragmentPadding =
+            AppTheme.Editor.lineFragmentPadding
+        let probeInsetWidth = AppTheme.Reading.sourceInsetHorizontal
+        let probeInsetHeight = AppTheme.Reading.sourceInsetVertical
+        view.textContainerInset = NSSize(
+            width: probeInsetWidth,
+            height: probeInsetHeight
+        )
+        // A fixed container width makes wrapping deterministic: the probe
+        // measures the same geometry the editor would draw at this width.
+        let containerTextWidth = width - probeInsetWidth * 2
+        view.textContainer?.containerSize = NSSize(
+            width: containerTextWidth,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        view.allowsUndo = false
+        view.drawsBackground = false
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineHeightMultiple = AppTheme.Reading.sourceLineHeightMultiple
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph
+        ]
+        view.textStorage?.setAttributedString(
+            NSAttributedString(string: text, attributes: attributes)
+        )
+        view.typingAttributes = attributes
+        scroll.documentView = view
+
+        let window = NSWindow(
+            // token-exempt: E2E probe measurement surface, not product design
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = scroll
+        window.orderFront(nil)
+        window.makeFirstResponder(view)
+        view.layoutSubtreeIfNeeded()
+        if let layout = view.textLayoutManager,
+           let content = layout.textContentManager {
+            layout.ensureLayout(for: content.documentRange)
+        }
+        return (window, view)
+    }
+
+    private static func nativeCaretRect(
+        _ view: NSTextView,
+        at offset: Int
+    ) -> (rect: NSRect?, actual: NSRange?, charRect: NSRect?) {
+        guard let window = view.window else { return (nil, nil, nil) }
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let screen = view.firstRect(
+            forCharacterRange: NSRange(location: offset, length: 0),
+            actualRange: &actual
+        )
+        var charRect: NSRect?
+        let length = (view.string as NSString).length
+        if offset < length {
+            let charScreen = view.firstRect(
+                forCharacterRange: NSRange(location: offset, length: 1),
+                actualRange: nil
+            )
+            if !charScreen.isNull, charScreen.height > 0 {
+                charRect = view.convert(
+                    window.convertFromScreen(charScreen),
+                    from: nil
+                )
+            }
+        }
+        guard !screen.isNull, screen.height > 0 else {
+            return (nil, actual, charRect)
+        }
+        let rect = view.convert(window.convertFromScreen(screen), from: nil)
+        return (rect, actual, charRect)
+    }
+
+    private static func characterRect(
+        _ view: NSTextView,
+        at index: Int
+    ) -> NSRect? {
+        guard let window = view.window else { return nil }
+        let length = (view.string as NSString).length
+        guard index >= 0, index < length else { return nil }
+        let screen = view.firstRect(
+            forCharacterRange: NSRange(location: index, length: 1),
+            actualRange: nil
+        )
+        guard !screen.isNull, screen.height > 0 else { return nil }
+        return view.convert(window.convertFromScreen(screen), from: nil)
+    }
+
+    private static func isRightToLeft(
+        _ text: NSString,
+        at index: Int
+    ) -> Bool {
+        var cursor = min(index, text.length - 1)
+        while cursor >= 0 {
+            let unit = Int(text.character(at: cursor))
+            if (0x0590...0x08FF).contains(unit)
+                || (0xFB1D...0xFDFF).contains(unit)
+                || (0xFE70...0xFEFF).contains(unit) {
+                return true
+            }
+            if (0x0041...0x005A).contains(unit)
+                || (0x0061...0x007A).contains(unit)
+                || (0x00C0...0x024F).contains(unit) {
+                return false
+            }
+            cursor -= 1
+        }
+        return false
+    }
+
+    /// The caret position the glyph layout implies, derived from a character
+    /// bounding rect rather than `firstRect`'s insertion point. On macOS 27
+    /// `firstRect` displaces insertion points for right-aligned RTL
+    /// fragments by the fragment origin, so the character rect is the
+    /// trustworthy native reference.
+    private static func nativeReferenceRect(
+        _ view: NSTextView,
+        at offset: Int,
+        firstRect: NSRect?
+    ) -> NSRect? {
+        let text = view.string as NSString
+        guard text.length > 0 else { return firstRect }
+        if offset == text.length,
+           text.character(at: text.length - 1) == 0x0A {
+            return firstRect
+        }
+        var charIndex = offset
+        var trailing = false
+        if offset >= text.length || text.character(at: offset) == 0x0A {
+            charIndex = offset - 1
+            trailing = true
+        }
+        while charIndex > 0, text.character(at: charIndex) == 0x0A {
+            charIndex -= 1
+            trailing = true
+        }
+        guard charIndex >= 0, charIndex < text.length,
+              text.character(at: charIndex) != 0x0A,
+              let rect = characterRect(view, at: charIndex) else {
+            return firstRect
+        }
+        let rtl = isRightToLeft(text, at: charIndex)
+        let x: CGFloat
+        if trailing {
+            x = rtl ? rect.minX : rect.maxX
+        } else {
+            x = rtl ? rect.maxX : rect.minX
+        }
+        // token-exempt: E2E probe measurement surface, not product design
+        return NSRect(x: x, y: rect.minY, width: 2, height: rect.height)
+    }
+
+    private static func segmentCaretRect(
+        _ view: NSTextView,
+        at offset: Int,
+        upstream: Bool
+    ) -> (rect: NSRect, debug: String)? {
+        guard let layout = view.textLayoutManager,
+              let content = layout.textContentManager,
+              let start = content.location(
+                  content.documentRange.location,
+                  offsetBy: offset
+              ) else { return nil }
+        layout.ensureLayout(for: content.documentRange)
+        let range = NSTextRange(location: start)
+        var options: NSTextLayoutManager.SegmentOptions = [.rangeNotRequired]
+        if upstream { options.insert(.upstreamAffinity) }
+        var found: CGRect?
+        layout.enumerateTextSegments(
+            in: range,
+            type: .selection,
+            options: options
+        ) { _, rect, _, _ in
+            found = rect
+            return false
+        }
+        guard let found else { return nil }
+        let inset = view.textContainerInset
+        // token-exempt: E2E probe measurement surface, not product design
+        let rect = NSRect(
+            x: inset.width + found.minX,
+            y: inset.height + found.minY,
+            width: max(found.width, 2),
+            height: found.height
+        )
+        let debug = String(
+            format: "segment=(%.2f,%.2f,%.2f,%.2f)",
+            found.minX,
+            found.minY,
+            found.width,
+            found.height
+        )
+        return (rect, debug)
+    }
+
+    private static func candidateCaretRect(
+        _ view: NSTextView,
+        at offset: Int,
+        upstream: Bool
+    ) -> (rect: NSRect, path: String, debug: String)? {
+        let line = lineFragmentCaretRect(
+            view,
+            at: offset,
+            upstream: upstream
+        )
+        if let segment = segmentCaretRect(
+            view,
+            at: offset,
+            upstream: upstream
+        ) {
+            var debug = segment.debug
+            if let line {
+                debug += String(
+                    format: " lineX=%.2f lineY=%.2f",
+                    line.rect.minX,
+                    line.rect.minY
+                )
+            }
+            return (segment.rect, "segment", debug)
+        }
+        return line
+    }
+
+    private static func lineFragmentCaretRect(
+        _ view: NSTextView,
+        at offset: Int,
+        upstream: Bool
+    ) -> (rect: NSRect, path: String, debug: String)? {
+        guard let layout = view.textLayoutManager,
+              let content = layout.textContentManager else { return nil }
+        layout.ensureLayout(for: content.documentRange)
+        guard let location = content.location(
+            content.documentRange.location,
+            offsetBy: offset
+        ) else { return nil }
+        var path = "exact"
+        var fragment = layout.textLayoutFragment(for: location)
+        if fragment == nil, offset > 0,
+           let previous = content.location(
+               content.documentRange.location,
+               offsetBy: offset - 1
+           ) {
+            fragment = layout.textLayoutFragment(for: previous)
+            path = "previous"
+        }
+        guard let fragment else { return nil }
+        var line = fragment.textLineFragment(
+            for: location,
+            isUpstreamAffinity: upstream
+        )
+        if line == nil {
+            line = upstream
+                ? fragment.textLineFragments.last
+                : fragment.textLineFragments.first
+            path += "+edge"
+        }
+        guard let line else { return nil }
+        let fragmentStart = content.offset(
+            from: content.documentRange.location,
+            to: fragment.rangeInElement.location
+        )
+        let lineStart = fragmentStart + line.characterRange.location
+        let index = offset - lineStart
+        let bounds = line.typographicBounds
+        let frame = fragment.layoutFragmentFrame
+        let inset = view.textContainerInset
+        let point: CGPoint
+        if index >= 0, index <= line.characterRange.length {
+            point = line.locationForCharacter(at: index)
+        } else if upstream {
+            point = CGPoint(x: bounds.minX, y: 0)
+            path += "+left"
+        } else {
+            point = CGPoint(x: bounds.maxX, y: 0)
+            path += "+right"
+        }
+        var docIndexPoint: CGPoint?
+        if offset <= line.characterRange.length {
+            docIndexPoint = line.locationForCharacter(at: offset)
+        }
+        func format(_ point: CGPoint) -> String {
+            String(format: "(%.2f,%.2f)", point.x, point.y)
+        }
+        var debug = "lineStart=\(lineStart)"
+            + " lineLength=\(line.characterRange.length)"
+            + " index=\(index) point=\(format(point))"
+        if let docIndexPoint {
+            debug += " docIndexPoint=\(format(docIndexPoint))"
+        }
+        // token-exempt: E2E probe measurement surface, not product design
+        let rect = NSRect(
+            x: frame.minX + inset.width + bounds.minX + point.x,
+            y: frame.minY + inset.height + bounds.minY,
+            width: 2,
+            height: bounds.height
+        )
+        return (rect, path, debug)
+    }
+
+    private static func measureGeometry(
+        _ name: String,
+        view: MultiCursorProbeTextView,
+        offset: Int,
+        upstream: Bool,
+        gated: Bool,
+        note: String = ""
+    ) -> MCGeometryMeasurement {
+        let native = nativeCaretRect(view, at: offset)
+        let reference = nativeReferenceRect(
+            view,
+            at: offset,
+            firstRect: native.rect
+        )
+        let candidate = candidateCaretRect(
+            view,
+            at: offset,
+            upstream: upstream
+        )
+        return MCGeometryMeasurement(
+            name: name,
+            offset: offset,
+            upstream: upstream,
+            gated: gated,
+            native: native.rect,
+            nativeActual: native.actual,
+            reference: reference,
+            charRect: native.charRect,
+            candidate: candidate?.rect,
+            note: (note + " path=" + (candidate?.path ?? "nil"))
+                .trimmingCharacters(in: .whitespaces),
+            debug: candidate?.debug ?? "no candidate"
+        )
+    }
+
+    private static func logGeometry(_ measurement: MCGeometryMeasurement) {
+        func describe(_ rect: NSRect?) -> String {
+            guard let rect else { return "nil" }
+            return String(
+                format: "x=%.2f y=%.2f h=%.2f",
+                rect.minX,
+                rect.minY,
+                rect.height
+            )
+        }
+        func describeRange(_ range: NSRange?) -> String {
+            guard let range else { return "nil" }
+            if range.location == NSNotFound { return "not-found" }
+            return "\(range.location)+\(range.length)"
+        }
+        let verdict = measurement.passed ? "ok" : "MISMATCH"
+        let native = describe(measurement.native)
+        let reference = describe(measurement.reference)
+        let actual = describeRange(measurement.nativeActual)
+        let char = describe(measurement.charRect)
+        let candidate = describe(measurement.candidate)
+        let line = "INFO SPIKE2 geometry case=\(measurement.name)"
+            + " offset=\(measurement.offset)"
+            + " upstream=\(measurement.upstream)"
+            + " first=[\(native)] ref=[\(reference)] actual=\(actual)"
+            + " char=[\(char)] candidate=[\(candidate)] \(verdict)"
+            + " \(measurement.note) \(measurement.debug)"
+        log(line)
+    }
+
+    private static func probeLines(
+        _ view: NSTextView
+    ) -> [(start: Int, end: Int, text: String)] {
+        guard let layout = view.textLayoutManager,
+              let content = layout.textContentManager else { return [] }
+        layout.ensureLayout(for: content.documentRange)
+        var lines: [(Int, Int, String)] = []
+        layout.enumerateTextLayoutFragments(
+            from: nil,
+            options: [.ensuresLayout]
+        ) { fragment in
+            let fragmentStart = content.offset(
+                from: content.documentRange.location,
+                to: fragment.rangeInElement.location
+            )
+            for line in fragment.textLineFragments {
+                let start = fragmentStart + line.characterRange.location
+                lines.append(
+                    (
+                        start,
+                        start + line.characterRange.length,
+                        line.attributedString.string
+                    )
+                )
+            }
+            return true
+        }
+        return lines
+    }
+
+    private static func runGeometryParity() {
+        let mono = "a\tb\n"
+            + String(repeating: "wrap-word ", count: 24) + "\n"
+            + "alpha\n"
+            + "שלום עולם\n"
+        let monoFont = NSFont.monospacedSystemFont(
+            ofSize: Preferences.editorFontSize,
+            weight: .regular
+        )
+        var probes: [(window: NSWindow, view: MultiCursorProbeTextView)] = []
+        var measurements: [MCGeometryMeasurement] = []
+
+        let monoProbe = makeProbeTextView(mono, font: monoFont)
+        probes.append(monoProbe)
+        monoProbe.window.makeKeyAndOrderFront(nil)
+        monoProbe.view.layoutSubtreeIfNeeded()
+        let ns = mono as NSString
+        let containerWidth = monoProbe.view.textContainer?.size.width ?? -1
+        let inset = monoProbe.view.textContainerInset
+        log(
+            "INFO SPIKE2 geometry container frame="
+                + "\(monoProbe.view.frame.width)x\(monoProbe.view.frame.height)"
+                + " container=\(containerWidth)"
+                + " inset=\(inset.width)/\(inset.height)"
+        )
+        for line in probeLines(monoProbe.view).prefix(10) {
+            let text = line.text
+                .replacingOccurrences(of: "\n", with: "\\n")
+                .replacingOccurrences(of: "\t", with: "\\t")
+            log(
+                "INFO SPIKE2 geometry line start=\(line.start)"
+                    + " end=\(line.end) text=\"\(text.prefix(40))\""
+            )
+        }
+
+        let tabOffset = ns.range(of: "\tb").location + 1
+        measurements.append(
+            measureGeometry(
+                "tab",
+                view: monoProbe.view,
+                offset: tabOffset,
+                upstream: false,
+                gated: true
+            )
+        )
+
+        let lines = probeLines(monoProbe.view)
+        // A wrapped line continues at the next line's start and does not end
+        // with a newline in the document. The fragment's attributed string
+        // may carry the paragraph terminator even for a wrapped line, so the
+        // document text is the authority.
+        func hardBreak(_ index: Int) -> Bool {
+            let end = lines[index].end
+            return end > 0 && ns.character(at: end - 1) == 0x0A
+        }
+        let adjacent = lines.indices.dropLast().filter {
+            lines[$0].end == lines[$0 + 1].start
+        }
+        log(
+            "INFO SPIKE2 geometry wrap lines=\(lines.count) adjacent="
+                + adjacent.map {
+                    "\(lines[$0].end):\(hardBreak($0) ? 1 : 0)"
+                }.joined(separator: ",")
+        )
+        if let index = lines.indices.dropLast().first(where: { index in
+            lines[index].end == lines[index + 1].start
+                && !hardBreak(index)
+        }) {
+            let wrapEnd = lines[index].end
+            let nextStart = lines[index + 1].start
+            measurements.append(
+                measureGeometry(
+                    "wrapped-end",
+                    view: monoProbe.view,
+                    offset: wrapEnd - 1,
+                    upstream: true,
+                    gated: true
+                )
+            )
+            measurements.append(
+                measureGeometry(
+                    "wrapped-next",
+                    view: monoProbe.view,
+                    offset: nextStart + 1,
+                    upstream: false,
+                    gated: true
+                )
+            )
+            measurements.append(
+                measureGeometry(
+                    "wrap-boundary-upstream",
+                    view: monoProbe.view,
+                    offset: wrapEnd,
+                    upstream: true,
+                    gated: false
+                )
+            )
+            measurements.append(
+                measureGeometry(
+                    "wrap-boundary-downstream",
+                    view: monoProbe.view,
+                    offset: wrapEnd,
+                    upstream: false,
+                    gated: false
+                )
+            )
+        } else {
+            measurements.append(
+                MCGeometryMeasurement(
+                    name: "wrapped-line",
+                    offset: -1,
+                    upstream: false,
+                    gated: true,
+                    native: nil,
+                    nativeActual: nil,
+                    reference: nil,
+                    charRect: nil,
+                    candidate: nil,
+                    note: "no soft wrap found",
+                    debug: ""
+                )
+            )
+        }
+
+        let alphaEnd = ns.range(of: "alpha").location + "alpha".utf16.count
+        measurements.append(
+            measureGeometry(
+                "trailing-newline",
+                view: monoProbe.view,
+                offset: alphaEnd,
+                upstream: true,
+                gated: true
+            )
+        )
+        measurements.append(
+            measureGeometry(
+                "empty-last-line",
+                view: monoProbe.view,
+                offset: ns.length,
+                upstream: true,
+                gated: true
+            )
+        )
+
+        let rtl = ns.range(of: "שלום עולם")
+        if rtl.location != NSNotFound {
+            measurements.append(
+                measureGeometry(
+                    "rtl",
+                    view: monoProbe.view,
+                    offset: rtl.location + 4,
+                    upstream: true,
+                    gated: true
+                )
+            )
+        } else {
+            measurements.append(
+                MCGeometryMeasurement(
+                    name: "rtl",
+                    offset: -1,
+                    upstream: false,
+                    gated: true,
+                    native: nil,
+                    nativeActual: nil,
+                    reference: nil,
+                    charRect: nil,
+                    candidate: nil,
+                    note: "rtl run missing",
+                    debug: ""
+                )
+            )
+        }
+
+        // token-exempt: E2E probe ligature font, not product design
+        let ligatureFont = NSFont(name: "Times New Roman", size: 14)
+            ?? monoFont
+        let ligatureProbe = makeProbeTextView(
+            "office fit",
+            font: ligatureFont
+        )
+        probes.append(ligatureProbe)
+        ligatureProbe.window.makeKeyAndOrderFront(nil)
+        ligatureProbe.view.layoutSubtreeIfNeeded()
+        measurements.append(
+            measureGeometry(
+                "ligature",
+                view: ligatureProbe.view,
+                offset: 3,
+                upstream: false,
+                gated: true,
+                note: "font=\(ligatureFont.fontName)"
+            )
+        )
+
+        for measurement in measurements {
+            logGeometry(measurement)
+        }
+        let gated = measurements.filter(\.gated)
+        let failed = gated.filter { !$0.passed }
+        if gated.count >= 6, failed.isEmpty {
+            log(
+                "PASS SPIKE2 geometry cases=\(gated.count)"
+                    + " tolerance=\(geometryTolerance)"
+            )
+        } else {
+            log(
+                "FAIL SPIKE2 geometry cases=\(gated.count)"
+                    + " failed=[\(failed.map(\.name).joined(separator: ","))]"
+            )
+        }
+        for probe in probes {
+            probe.window.orderOut(nil)
+            probe.window.close()
+        }
+    }
+
+    // MARK: Composition span capture
+
+    private static func runCompositionProbe() async {
+        let monoFont = NSFont.monospacedSystemFont(
+            ofSize: Preferences.editorFontSize,
+            weight: .regular
+        )
+        let probe = makeProbeTextView("alpha beta gamma", font: monoFont)
+        probe.window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        probe.window.makeFirstResponder(probe.view)
+        probe.view.setSelectedRange(NSRange(location: 0, length: 0))
+        try? await Task.sleep(for: .milliseconds(150))
+
+        guard let input = await preparePinyinSource(
+            prefix: "SPIKE2 composition"
+        ) else {
+            probe.window.close()
+            return
+        }
+        let activeID = input.activeID
+        let activeIsPinyin = input.activeIsPinyin
+
+        let before = probe.view.string
+        probe.view.compositionEvents.removeAll()
+        let trusted = AXIsProcessTrusted()
+        var driver = "none"
+        if activeIsPinyin {
+            let codes: [CGKeyCode] = [45, 34, 4, 0, 31, 49, 36]
+            if trusted {
+                driver = "cgevent"
+                await typeKeys(codes)
+            } else {
+                driver = "nsevent"
+                typeKeysThroughWindow(codes, window: probe.window)
+                try? await Task.sleep(for: .milliseconds(1_200))
+            }
+        }
+        let after = probe.view.string
+        let events = probe.view.compositionEvents
+        let marked = events.contains {
+            $0.kind == "setMarkedText" && !$0.marked.isEmpty
+        }
+        let committed = containsCJK(after) && after != before
+        let span = compositionSpan(events)
+        let delta = deltaSpan(before: before, after: after)
+        var spanMatches = false
+        if let span, let delta {
+            spanMatches = span.location == delta.location
+                && span.length == delta.length
+        }
+        log(
+            "INFO SPIKE2 composition utf16=\(utf16Count(before))->\(utf16Count(after))"
+                + " events=\(events.count) marked=\(marked)"
+                + " committed=\(committed) span=\(describe(span))"
+                + " delta=\(describe(delta)) trusted=\(trusted)"
+        )
+        for event in events.prefix(10) {
+            log(
+                "INFO SPIKE2 composition event \(event.kind)"
+                    + " marked=\(event.marked.utf16.count)"
+                    + " selected=\(describe(event.selectedRange))"
+                    + " replacement=\(describe(event.replacementRange))"
+                    + " selectionBefore=\(describe(event.selectionBefore))"
+            )
+        }
+
+        // A composition whose explicit replacement range differs from the
+        // selection: the exact case the plan's IME translation depends on.
+        let explicit = makeProbeTextView("alpha beta gamma", font: monoFont)
+        explicit.window.orderFront(nil)
+        explicit.window.makeFirstResponder(explicit.view)
+        explicit.view.setSelectedRange(NSRange(location: 0, length: 0))
+        explicit.view.compositionEvents.removeAll()
+        let target = NSRange(location: 6, length: 4)
+        explicit.view.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 0, length: 1),
+            replacementRange: target
+        )
+        explicit.view.insertText(
+            "日本",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let explicitEvent = explicit.view.compositionEvents.first {
+            $0.kind == "setMarkedText" && $0.replacementRange == target
+        }
+        let explicitOK = explicit.view.string == "alpha 日本 gamma"
+            && explicitEvent != nil
+            && explicitEvent?.selectionBefore
+                == NSRange(location: 0, length: 0)
+        log(
+            "INFO SPIKE2 composition explicit source=\(explicit.view.string)"
+                + " event=\(explicitEvent != nil)"
+        )
+
+        // Cancellation must produce an observable completion path even though
+        // the document text does not change.
+        let cancel = makeProbeTextView("alpha beta gamma", font: monoFont)
+        cancel.window.orderFront(nil)
+        cancel.view.compositionEvents.removeAll()
+        cancel.view.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 0, length: 1),
+            replacementRange: target
+        )
+        // An empty commit is the cancellation path the controller translates:
+        // it ends marked mode AND removes the text the composition replaced.
+        // That is AppKit's own model for an explicit replacement range —
+        // measured here as "alpha に gamma" -> "alpha  gamma" — and a marked
+        // check alone passed even when the commit removed nothing, so assert
+        // the postimage as well.
+        cancel.view.insertText(
+            "",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let cancelMarked = cancel.view.hasMarkedText()
+        let cancelApplied = !cancelMarked
+            && cancel.view.string == "alpha  gamma"
+        let cancelObserved = cancel.view.compositionEvents.contains {
+            $0.kind == "insertText" && $0.marked.isEmpty
+        }
+        log(
+            "INFO SPIKE2 composition cancel source=\(cancel.view.string)"
+                + " marked=\(cancelMarked)"
+        )
+
+        restoreInputSource(input, prefix: "SPIKE2 composition")
+
+        let passed = activeIsPinyin && marked && committed && spanMatches
+            && explicitOK && cancelApplied && cancelObserved
+        log(
+            (passed ? "PASS" : "FAIL")
+                + " SPIKE2 composition source=\(activeID)"
+                + " driver=\(driver) marked=\(marked)"
+                + " committed=\(committed) spanMatches=\(spanMatches)"
+                + " explicit=\(explicitOK)"
+                + " cancel=\(cancelApplied)/\(cancelObserved)"
+        )
+        for view in [probe, explicit, cancel] {
+            view.window.orderOut(nil)
+            view.window.close()
+        }
+    }
+
+    private struct ProbeInputSource {
+        let source: TISInputSource
+        let previous: TISInputSource?
+        let enabledForProbe: Bool
+        let activeID: String
+        let activeIsPinyin: Bool
+    }
+
+    /// Selects a Pinyin input method for the probe, enabling one if every
+    /// candidate is disabled. The caller restores the previous source.
+    private static func preparePinyinSource(
+        prefix: String
+    ) async -> ProbeInputSource? {
+        let previous = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()
+        let previousID = previous.flatMap(inputSourceID) ?? "unknown"
+        let candidates = pinyinInputSources()
+        log(
+            "INFO \(prefix) previous=\(previousID) candidates="
+                + candidates.map { source in
+                    (inputSourceID(source) ?? "?")
+                        + "(enabled=\(isEnabledInputSource(source))"
+                        + ",selectable=\(isSelectCapable(source)))"
+                }.joined(separator: ",")
+        )
+        var enabledForProbe = false
+        let pinyin: TISInputSource
+        if let ready = candidates.first(where: {
+            isEnabledInputSource($0) && isSelectCapable($0)
+        }) {
+            pinyin = ready
+        } else if let candidate = candidates.first(where: isSelectCapable) {
+            let enableStatus = TISEnableInputSource(candidate)
+            enabledForProbe = enableStatus == noErr
+            log("INFO \(prefix) enable status=\(enableStatus)")
+            guard enabledForProbe else {
+                log("FAIL \(prefix) reason=pinyin source not enabled")
+                return nil
+            }
+            pinyin = candidate
+        } else {
+            log("FAIL \(prefix) reason=no selectable pinyin source")
+            return nil
+        }
+        let pinyinID = inputSourceID(pinyin) ?? "unknown"
+        let selectStatus = TISSelectInputSource(pinyin)
+        try? await Task.sleep(for: .milliseconds(400))
+        let activeID = currentInputSourceID()
+        log(
+            "INFO \(prefix) selected=\(pinyinID)"
+                + " status=\(selectStatus) active=\(activeID)"
+        )
+        return ProbeInputSource(
+            source: pinyin,
+            previous: previous,
+            enabledForProbe: enabledForProbe,
+            activeID: activeID,
+            activeIsPinyin: isPinyinID(activeID)
+        )
+    }
+
+    private static func restoreInputSource(
+        _ state: ProbeInputSource,
+        prefix: String
+    ) {
+        if state.enabledForProbe {
+            let disableStatus = TISDisableInputSource(state.source)
+            log("INFO \(prefix) disabled=\(disableStatus)")
+        }
+        if let previous = state.previous {
+            TISSelectInputSource(previous)
+        }
+        let restoredID = currentInputSourceID()
+        log("INFO \(prefix) restored=\(restoredID)")
+    }
+
+    private static func typeKeys(_ codes: [CGKeyCode]) async {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for code in codes {
+            for down in [true, false] {
+                if let event = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: code,
+                    keyDown: down
+                ) {
+                    event.post(tap: .cghidEventTap)
+                }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            try? await Task.sleep(for: .milliseconds(80))
+        }
+        try? await Task.sleep(for: .milliseconds(900))
+    }
+
+    private static func typeKeysThroughWindow(
+        _ codes: [UInt16],
+        window: NSWindow
+    ) {
+        for code in codes {
+            for down in [true, false] {
+                guard let event = NSEvent.keyEvent(
+                    with: down ? .keyDown : .keyUp,
+                    location: .zero,
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    characters: "",
+                    charactersIgnoringModifiers: "",
+                    isARepeat: false,
+                    keyCode: code
+                ) else { continue }
+                window.sendEvent(event)
+            }
+            usleep(80_000)
+        }
+    }
+
+    private static func inputSourceID(_ source: TISInputSource) -> String? {
+        guard let pointer = TISGetInputSourceProperty(
+            source,
+            kTISPropertyInputSourceID
+        ) else { return nil }
+        return Unmanaged<CFString>
+            .fromOpaque(pointer)
+            .takeUnretainedValue() as String
+    }
+
+    private static func currentInputSourceID() -> String {
+        guard let source = TISCopyCurrentKeyboardInputSource()?
+            .takeRetainedValue() else { return "unknown" }
+        return inputSourceID(source) ?? "unknown"
+    }
+
+    private static func pinyinInputSources() -> [TISInputSource] {
+        guard let list = TISCreateInputSourceList(nil, true)?
+            .takeRetainedValue() else { return [] }
+        let sources = (list as? [TISInputSource]) ?? []
+        return sources.filter { source in
+            guard let id = inputSourceID(source) else { return false }
+            return isPinyinID(id) && isInputMethodSource(source)
+        }
+    }
+
+    private static func stringProperty(
+        _ source: TISInputSource,
+        _ key: CFString
+    ) -> String? {
+        guard let pointer = TISGetInputSourceProperty(source, key) else {
+            return nil
+        }
+        return Unmanaged<CFString>
+            .fromOpaque(pointer)
+            .takeUnretainedValue() as String
+    }
+
+    private static func isInputMethodSource(_ source: TISInputSource) -> Bool {
+        guard let type = stringProperty(
+            source,
+            kTISPropertyInputSourceType
+        ) else { return false }
+        return type.lowercased().contains("input")
+    }
+
+    private static func isSelectCapable(_ source: TISInputSource) -> Bool {
+        guard let pointer = TISGetInputSourceProperty(
+            source,
+            kTISPropertyInputSourceIsSelectCapable
+        ) else { return false }
+        return Unmanaged<CFBoolean>
+            .fromOpaque(pointer)
+            .takeUnretainedValue() == kCFBooleanTrue
+    }
+
+    private static func isPinyinID(_ id: String) -> Bool {
+        let lower = id.lowercased()
+        return lower.contains("pinyin") || lower.contains("scim.itabc")
+    }
+
+    private static func isEnabledInputSource(_ source: TISInputSource) -> Bool {
+        guard let pointer = TISGetInputSourceProperty(
+            source,
+            kTISPropertyInputSourceIsEnabled
+        ) else { return false }
+        return Unmanaged<CFBoolean>
+            .fromOpaque(pointer)
+            .takeUnretainedValue() == kCFBooleanTrue
+    }
+
+    private static func compositionSpan(
+        _ events: [MCCompositionEvent]
+    ) -> NSRange? {
+        for event in events where event.kind == "setMarkedText"
+            || event.kind == "insertText" {
+            if event.replacementRange.location != NSNotFound {
+                return event.replacementRange
+            }
+            if event.selectionBefore.location != NSNotFound {
+                return event.selectionBefore
+            }
+        }
+        return nil
+    }
+
+    private static func deltaSpan(before: String, after: String) -> NSRange? {
+        let old = before as NSString
+        let new = after as NSString
+        guard old.length != new.length || !old.isEqual(to: new as String) else {
+            return nil
+        }
+        let limit = min(old.length, new.length)
+        var prefix = 0
+        while prefix < limit,
+              old.character(at: prefix) == new.character(at: prefix) {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < limit - prefix,
+              old.character(at: old.length - 1 - suffix)
+                == new.character(at: new.length - 1 - suffix) {
+            suffix += 1
+        }
+        return NSRange(
+            location: prefix,
+            length: old.length - prefix - suffix
+        )
+    }
+
+    private static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+        }
+    }
+
+    private static func utf16Count(_ text: String) -> Int {
+        (text as NSString).length
+    }
+
+    private static func describe(_ range: NSRange?) -> String {
+        guard let range else { return "nil" }
+        if range.location == NSNotFound { return "not-found" }
+        return "\(range.location)+\(range.length)"
+    }
+
+    // MARK: Echo rule
+
+    private static func runEchoProbe() async {
+        let monoFont = NSFont.monospacedSystemFont(
+            ofSize: Preferences.editorFontSize,
+            weight: .regular
+        )
+        let probe = makeProbeTextView(
+            "alpha beta gamma delta epsilon",
+            font: monoFont
+        )
+        probe.window.makeKeyAndOrderFront(nil)
+        probe.window.makeFirstResponder(probe.view)
+        let model = ProbeEchoModel(offsets: [0, 6, 11], primary: 1)
+        NotificationCenter.default.addObserver(
+            model,
+            selector: #selector(ProbeEchoModel.selectionChanged(_:)),
+            name: NSTextView.didChangeSelectionNotification,
+            object: probe.view
+        )
+        defer {
+            NotificationCenter.default.removeObserver(model)
+            probe.window.orderOut(nil)
+            probe.window.close()
+        }
+
+        probe.view.setSelectedRange(model.primaryRange)
+        let echo = model.collapses == 0 && model.offsets.count == 3
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            probe.view.setSelectedRange(model.primaryRange)
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        let restored = model.collapses == 0 && model.offsets.count == 3
+
+        let firstBatch = applyProbeBatch(
+            view: probe.view,
+            model: model,
+            insertion: "X"
+        )
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            probe.view.setSelectedRange(model.primaryRange)
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        let survivedFirst = model.collapses == 0 && model.offsets.count == 3
+
+        let secondBatch = applyProbeBatch(
+            view: probe.view,
+            model: model,
+            insertion: "Y"
+        )
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            probe.view.setSelectedRange(model.primaryRange)
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        let survivedSecond = model.collapses == 0 && model.offsets.count == 3
+
+        probe.view.setSelectedRange(NSRange(location: 20, length: 0))
+        let collapsed = model.collapses >= 1 && model.offsets.count == 1
+
+        log(
+            "INFO SPIKE2 echo source=\(probe.view.string)"
+                + " offsets=\(model.offsets) collapses=\(model.collapses)"
+                + " batches=\(firstBatch)/\(secondBatch)"
+        )
+        let passed = echo && restored && survivedFirst && survivedSecond
+            && collapsed && firstBatch && secondBatch
+        if passed {
+            log("PASS SPIKE2 echo carets=3 batches=2 collapses=\(model.collapses)")
+        } else {
+            log(
+                "FAIL SPIKE2 echo echo=\(echo) restored=\(restored)"
+                    + " first=\(survivedFirst) second=\(survivedSecond)"
+                    + " userCollapse=\(collapsed)"
+                    + " collapses=\(model.collapses)"
+            )
+        }
+    }
+
+    private static func applyProbeBatch(
+        view: NSTextView,
+        model: ProbeEchoModel,
+        insertion: String
+    ) -> Bool {
+        let offsets = model.offsets.sorted()
+        guard !offsets.isEmpty,
+              let storage = view.textStorage,
+              offsets.allSatisfy({ $0 >= 0 && $0 <= storage.length })
+        else { return false }
+        var shifted: [Int] = []
+        var accumulated = 0
+        for offset in offsets {
+            accumulated += insertion.utf16.count
+            shifted.append(offset + accumulated)
+        }
+        model.offsets = shifted
+        model.suppressing = true
+        storage.beginEditing()
+        for offset in offsets.reversed() {
+            storage.replaceCharacters(
+                in: NSRange(location: offset, length: 0),
+                with: insertion
+            )
+        }
+        storage.endEditing()
+        view.setSelectedRange(model.primaryRange)
+        view.didChangeText()
+        model.suppressing = false
+        return true
+    }
+
+    // MARK: - MC-03 overlay and selection painting
+
+    private static func runMultiCursorCaretChecks() {
+        runProductCaretParity()
+        runSelectionBackgroundProbe()
+    }
+
+    /// Parity for the product geometry (`CaretGeometry`) against the same
+    /// glyph-derived reference the MC-00 probe established.
+    private static func runProductCaretParity() {
+        let mono = "a\tb\n"
+            + String(repeating: "wrap-word ", count: 24) + "\n"
+            + "alpha\n"
+            + "שלום עולם\n"
+        let monoFont = NSFont.monospacedSystemFont(
+            ofSize: Preferences.editorFontSize,
+            weight: .regular
+        )
+        let probe = makeProbeTextView(mono, font: monoFont)
+        probe.window.makeKeyAndOrderFront(nil)
+        probe.view.layoutSubtreeIfNeeded()
+        let ns = mono as NSString
+        let lines = probeLines(probe.view)
+        func hardBreak(_ index: Int) -> Bool {
+            let end = lines[index].end
+            return end > 0 && ns.character(at: end - 1) == 0x0A
+        }
+        guard let wrap = lines.indices.dropLast().first(where: {
+            lines[$0].end == lines[$0 + 1].start && !hardBreak($0)
+        }), let rtl = Optional(ns.range(of: "שלום עולם")),
+              rtl.location != NSNotFound else {
+            log("FAIL mc caret parity reason=fixture shape")
+            probe.window.close()
+            return
+        }
+        let cases: [(name: String, offset: Int, upstream: Bool)] = [
+            ("tab", ns.range(of: "\tb").location + 1, false),
+            ("wrapped-end", lines[wrap].end - 1, true),
+            ("wrapped-next", lines[wrap + 1].start + 1, false),
+            ("trailing-newline", ns.range(of: "alpha").location + 5, true),
+            ("empty-last-line", ns.length, true),
+            ("rtl", rtl.location + 4, true)
+        ]
+        var passed = 0
+        for item in cases {
+            if checkCaretParity(
+                item.name,
+                view: probe.view,
+                offset: item.offset,
+                upstream: item.upstream
+            ) {
+                passed += 1
+            }
+        }
+        // token-exempt: E2E probe ligature font, not product design
+        let ligatureFont = NSFont(name: "Times New Roman", size: 14)
+            ?? monoFont
+        let ligature = makeProbeTextView("office fit", font: ligatureFont)
+        ligature.window.makeKeyAndOrderFront(nil)
+        ligature.view.layoutSubtreeIfNeeded()
+        if checkCaretParity(
+            "ligature",
+            view: ligature.view,
+            offset: 3,
+            upstream: false
+        ) {
+            passed += 1
+        }
+        let total = 7
+        log(
+            (passed == total ? "PASS" : "FAIL")
+                + " mc caret parity \(passed)/\(total)"
+        )
+        for view in [probe, ligature] {
+            view.window.orderOut(nil)
+            view.window.close()
+        }
+    }
+
+    private static func checkCaretParity(
+        _ name: String,
+        view: MultiCursorProbeTextView,
+        offset: Int,
+        upstream: Bool
+    ) -> Bool {
+        let native = nativeCaretRect(view, at: offset)
+        guard let reference = nativeReferenceRect(
+            view,
+            at: offset,
+            firstRect: native.rect
+        ), let rect = CaretGeometry.rect(
+            at: offset,
+            upstream: upstream,
+            in: view
+        ) else {
+            log("INFO mc caret \(name) offset=\(offset) missing")
+            return false
+        }
+        let dx = abs(rect.minX - reference.minX)
+        let dy = abs(rect.minY - reference.minY)
+        let dh = abs(rect.height - reference.height)
+        let ok = dx <= geometryTolerance
+            && dy <= geometryTolerance
+            && dh <= geometryTolerance
+        log(
+            "INFO mc caret \(name) offset=\(offset)"
+                + " dx=\(String(format: "%.2f", dx))"
+                + " dy=\(String(format: "%.2f", dy))"
+                + " dh=\(String(format: "%.2f", dh))"
+                + " \(ok ? "ok" : "MISMATCH")"
+        )
+        return ok
+    }
+
+    private static func runSelectionBackgroundProbe() {
+        let text = "alpha beta gamma"
+        let storage = NSTextStorage(string: text)
+        let base: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(
+                ofSize: Preferences.editorFontSize,
+                weight: .regular
+            ),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let full = NSRange(location: 0, length: (text as NSString).length)
+        storage.setAttributes(base, range: full)
+        let cellColor = NSColor.systemYellow
+        let selectionColor = AppTheme.MultiCursor.selectionColor
+        let cell = MarkdownDecoration(
+            layer: .cell,
+            range: NSRange(location: 0, length: 10),
+            attributes: [.backgroundColor: cellColor]
+        )
+        let selection = MarkdownDecoration(
+            layer: .selection,
+            range: NSRange(location: 4, length: 4),
+            attributes: [.backgroundColor: selectionColor]
+        )
+        MarkdownDecorationCompositor.apply(
+            syntax: { _ in },
+            decorations: MarkdownDecorationSet(
+                cell: [cell],
+                selection: [selection]
+            ),
+            to: storage,
+            affectedRange: full,
+            baseAttributes: base
+        )
+        func background(_ location: Int) -> NSColor? {
+            storage.attribute(
+                .backgroundColor,
+                at: location,
+                effectiveRange: nil
+            ) as? NSColor
+        }
+        let wins = background(4) == selectionColor
+            && background(0) == cellColor
+            && background(8) == cellColor
+        MarkdownDecorationCompositor.apply(
+            syntax: { _ in },
+            decorations: MarkdownDecorationSet(cell: [cell]),
+            to: storage,
+            affectedRange: full,
+            baseAttributes: base
+        )
+        let clears = background(4) == cellColor
+        log(
+            (wins && clears ? "PASS" : "FAIL")
+                + " mc selection background wins=\(wins) clears=\(clears)"
+        )
+    }
+
+    // MARK: - MC-04 editing entry points
+
+    private static func makeProbeEditor(
+        source: String
+    ) -> (document: MarkdownDocument, controller: MarkdownEditorController) {
+        let document = MarkdownDocument(untitledWith: MarkdownFileStore())
+        try? document.replaceSource(source)
+        let cache = MarkdownEditorCache()
+        let controller = cache.entry(
+            for: document,
+            parseCoordinator: MarkdownParseCoordinator(
+                service: MarkdownParseService()
+            ),
+            parseDebounce: 0
+        ).controller
+        return (document, controller)
+    }
+
+    private static func probeModel(
+        _ offsets: [Int],
+        primary: Int = 0,
+        source: String
+    ) -> MultiCursorSelection? {
+        try? MultiCursorSelection(
+            offsets.map {
+                MultiCursorSelection.Caret(anchor: $0, active: $0)
+            },
+            primary: primary,
+            source: source
+        )
+    }
+
+    private static func runMultiCursorEditingChecks() async {
+        runTypingProbe()
+        runDeleteProbe()
+        runPasteCopyCutProbe()
+        await runUndoProbe()
+        runChokePointProbe()
+        runNoOpProbe()
+    }
+
+    private static func runTypingProbe() {
+        let source = "alpha beta gamma"
+        let (document, controller) = makeProbeEditor(source: source)
+        guard let model = probeModel([0, 6, 11], primary: 1, source: source)
+        else {
+            log("FAIL mc typing reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        let revision = document.revision
+        controller.textView.insertText(
+            "X",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let ok = controller.textView.string == "Xalpha Xbeta Xgamma"
+            && controller.multiCursorSelection?.ranges
+                == [1..<1, 8..<8, 14..<14]
+            && document.revision == revision + 1
+            && document.undoManager.canUndo
+            && document.undoManager.undoActionName == "Typing"
+        log(
+            (ok ? "PASS" : "FAIL")
+                + " mc typing source=\(controller.textView.string)"
+                + " revisions=\(document.revision - revision)"
+                + " undo=\(document.undoManager.undoActionName)"
+        )
+    }
+
+    private static func runDeleteProbe() {
+        let source = "abc def ghi"
+        let (document, controller) = makeProbeEditor(source: source)
+        guard let model = probeModel([3, 7, 11], source: source) else {
+            log("FAIL mc delete reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        let revision = document.revision
+        let handled = controller.textView(
+            controller.textView,
+            doCommandBy: #selector(NSResponder.deleteBackward(_:))
+        )
+        let ok = handled
+            && controller.textView.string == "ab de gh"
+            && controller.multiCursorSelection?.ranges
+                == [2..<2, 5..<5, 8..<8]
+            && document.revision == revision + 1
+        log(
+            (ok ? "PASS" : "FAIL")
+                + " mc delete source=\(controller.textView.string)"
+        )
+    }
+
+    /// The clipboard rows run on a scratch pasteboard injected into each
+    /// controller. The probe used to snapshot and restore the general
+    /// pasteboard, but a snapshot cannot materialise every representation,
+    /// and an ignored restore failure destroyed the user's clipboard. The
+    /// controller's clipboard is injectable, so the real one is never
+    /// touched.
+    private static func runPasteCopyCutProbe() {
+        let source = "alpha beta gamma"
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("SonovoProbe.pasteCopyCut")
+        )
+        pasteboard.clearContents()
+
+        let (_, pasteController) = makeProbeEditor(source: source)
+        pasteController.clipboard = pasteboard
+        guard let pasteModel = probeModel([0, 6], source: source) else {
+            log("FAIL mc paste reason=model")
+            return
+        }
+        pasteController.adoptMultiCursor(pasteModel)
+        pasteboard.clearContents()
+        pasteboard.setString("12", forType: .string)
+        pasteController.textView.paste(nil)
+        let pasteOK = pasteController.textView.string == "12alpha 12beta gamma"
+        log(
+            (pasteOK ? "PASS" : "FAIL")
+                + " mc paste source=\(pasteController.textView.string)"
+        )
+
+        let (_, copyController) = makeProbeEditor(source: source)
+        copyController.clipboard = pasteboard
+        guard let copyModel = try? MultiCursorSelection(
+            [
+                MultiCursorSelection.Caret(anchor: 0, active: 5),
+                MultiCursorSelection.Caret(anchor: 6, active: 10)
+            ],
+            primary: 0,
+            source: source
+        ) else {
+            log("FAIL mc copy cut reason=model")
+            return
+        }
+        copyController.adoptMultiCursor(copyModel)
+        copyController.textView.copy(nil)
+        let copied = pasteboard.string(forType: .string)
+        // A distinct sentinel before the cut: the copy row left the expected
+        // payload behind, so a cut that only deleted text still read as the
+        // copied string.
+        pasteboard.clearContents()
+        pasteboard.setString("sentinel", forType: .string)
+        copyController.textView.cut(nil)
+        let cutCopied = pasteboard.string(forType: .string)
+        let cutOK = copied == "alphabeta"
+            && cutCopied == "alphabeta"
+            && copyController.textView.string == "  gamma"
+        log(
+            (cutOK ? "PASS" : "FAIL")
+                + " mc copy cut copied=\(copied ?? "nil")"
+                + " cutCopied=\(cutCopied ?? "nil")"
+                + " source=\(copyController.textView.string)"
+        )
+    }
+
+    private static func runUndoProbe() async {
+        let source = "alpha beta gamma"
+        let (document, controller) = makeProbeEditor(source: source)
+        guard let model = probeModel([0, 6, 11], primary: 1, source: source)
+        else {
+            log("FAIL mc undo reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        controller.textView.insertText(
+            "X",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        // Both the model and the view must settle: the editor syncs from the
+        // document in a separate MainActor task, so a fixed sleep could read
+        // the model's new source beside the view's old text and pass a redo
+        // that never reached the screen.
+        document.undoManager.undo()
+        let undone = await waitUntil(2) {
+            document.source == source
+                && controller.textView.string == source
+        }
+        document.undoManager.redo()
+        let redone = await waitUntil(2) {
+            document.source == "Xalpha Xbeta Xgamma"
+                && controller.textView.string == "Xalpha Xbeta Xgamma"
+        }
+        log(
+            (undone && redone ? "PASS" : "FAIL")
+                + " mc undo undo=\(undone) redo=\(redone)"
+        )
+    }
+
+    private static func runChokePointProbe() {
+        let source = "alpha beta gamma"
+        let (document, controller) = makeProbeEditor(source: source)
+        guard let model = probeModel([0, 6, 11], source: source) else {
+            log("FAIL mc choke point reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        let revision = document.revision
+        let refused = !controller.textView(
+            controller.textView,
+            shouldChangeTextIn: NSRange(location: 0, length: 0),
+            replacementString: "Z"
+        )
+        let unchanged = controller.textView.string == source
+            && controller.multiCursorSelection?.count == 3
+            && document.revision == revision
+        log(
+            (refused && unchanged ? "PASS" : "FAIL")
+                + " mc choke point refused=\(refused)"
+                + " unchanged=\(unchanged)"
+        )
+    }
+
+    private static func runNoOpProbe() {
+        let source = "alpha beta"
+        let (document, controller) = makeProbeEditor(source: source)
+        guard let model = probeModel([0, 5], source: source) else {
+            log("FAIL mc no-op reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        let revision = document.revision
+        let canUndo = document.undoManager.canUndo
+        controller.textView.insertText(
+            "",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let ok = document.revision == revision
+            && document.undoManager.canUndo == canUndo
+            && controller.textView.string == source
+        log((ok ? "PASS" : "FAIL") + " mc no-op")
+    }
+
+    // MARK: - MC-05 IME translation
+
+    private static func describeCarets(
+        _ ranges: [Range<Int>]?
+    ) -> String {
+        guard let ranges else { return "nil" }
+        return ranges
+            .map { "\($0.lowerBound)+\($0.count)" }
+            .joined(separator: ",")
+    }
+
+    private static func runMultiCursorIMEProbe() async {
+        guard let prepared = await preparePinyinSource(prefix: "mc ime") else {
+            log("FAIL mc ime source=pinyin reason=no input source")
+            return
+        }
+        defer { restoreInputSource(prepared, prefix: "mc ime") }
+        log(
+            (prepared.activeIsPinyin ? "PASS" : "FAIL")
+                + " mc ime source=pinyin active=\(prepared.activeID)"
+        )
+        guard prepared.activeIsPinyin else { return }
+
+        let source = "alpha beta gamma"
+        // The measured Pinyin shapes go through the same AppKit entry points
+        // the input method uses. Hosting a controller-backed text view in a
+        // probe window destabilises this macOS build (the app exits a few
+        // seconds later), so the editor stays windowless; MC-00 verified the
+        // real key path and recorded these shapes.
+        log("INFO mc ime driver=measured-shapes")
+
+        // Confirm: three carets, the primary at 6.
+        let (confirmDocument, confirmController) = makeProbeEditor(
+            source: source
+        )
+        guard let confirmModel = probeModel(
+            [0, 6, 11],
+            primary: 1,
+            source: source
+        ) else {
+            log("FAIL mc ime confirm reason=model")
+            return
+        }
+        confirmController.adoptMultiCursor(confirmModel)
+        let revision = confirmDocument.revision
+        confirmController.textView.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 0, length: 1),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        confirmController.textView.insertText(
+            "日本",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let after = confirmController.textView.string
+        let delta = (after as NSString).length - (source as NSString).length
+        let ranges = confirmController.multiCursorSelection?.ranges
+        let expected = delta > 0
+            ? [0..<0, 6 + delta..<6 + delta, 11 + delta..<11 + delta]
+            : nil
+        let primaryOK = confirmController.textView.selectedRange()
+            == NSRange(location: 6 + delta, length: 0)
+        let confirmOK = containsCJK(after)
+            && delta > 0
+            && after.hasPrefix("alpha ")
+            && after.hasSuffix("beta gamma")
+            && ranges == expected
+            && primaryOK
+            && confirmDocument.source == after
+            && confirmDocument.revision == revision + 1
+        log(
+            (confirmOK ? "PASS" : "FAIL")
+                + " mc ime confirm delta=\(delta)"
+                + " source=\"\(after)\""
+                + " carets=\(describeCarets(ranges))"
+                + " revisions=\(confirmDocument.revision - revision)"
+                + (confirmController.multiCursorSelection == nil
+                    ? " fallback=collapse" : "")
+        )
+
+        // Cancel: the same composition, then an empty commit; nothing moves.
+        let (cancelDocument, cancelController) = makeProbeEditor(
+            source: source
+        )
+        guard let cancelModel = probeModel(
+            [0, 6, 11],
+            primary: 1,
+            source: source
+        ) else {
+            log("FAIL mc ime cancel reason=model")
+            return
+        }
+        cancelController.adoptMultiCursor(cancelModel)
+        let cancelRevision = cancelDocument.revision
+        cancelController.textView.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 0, length: 1),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        cancelController.textView.insertText(
+            "",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let cancelAfter = cancelController.textView.string
+        let cancelRanges = cancelController.multiCursorSelection?.ranges
+        let cancelOK = cancelAfter == source
+            && cancelRanges == [0..<0, 6..<6, 11..<11]
+            && cancelDocument.source == source
+            && cancelDocument.revision == cancelRevision
+        log(
+            (cancelOK ? "PASS" : "FAIL")
+                + " mc ime cancel source=\"\(cancelAfter)\""
+                + " carets=\(describeCarets(cancelRanges))"
+                + " revisions=\(cancelDocument.revision - cancelRevision)"
+        )
+
+        // Explicit replacement range: the input method names a span that
+        // covers the secondary at 5. The primary moves natively; the covered
+        // secondary is dropped.
+        let (explicitDocument, explicitController) = makeProbeEditor(
+            source: source
+        )
+        guard let explicitModel = probeModel(
+            [0, 5, 6],
+            primary: 2,
+            source: source
+        ) else {
+            log("FAIL mc ime explicit range reason=model")
+            return
+        }
+        explicitController.adoptMultiCursor(explicitModel)
+        explicitController.textView.setMarkedText(
+            "に",
+            selectedRange: NSRange(location: 0, length: 1),
+            replacementRange: NSRange(location: 4, length: 3)
+        )
+        explicitController.textView.insertText(
+            "日本",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let explicitAfter = explicitController.textView.string
+        let explicitRanges = explicitController.multiCursorSelection?.ranges
+        let explicitOK = explicitAfter == "alph日本eta gamma"
+            && explicitRanges == [0..<0, 6..<6]
+            && explicitDocument.source == explicitAfter
+        log(
+            (explicitOK ? "PASS" : "FAIL")
+                + " mc ime explicit range source=\"\(explicitAfter)\""
+                + " carets=\(describeCarets(explicitRanges))"
+        )
+    }
+
+    // MARK: - MC-06 movement
+
+    private static func configureMovementProbe(
+        _ controller: MarkdownEditorController
+    ) {
+        // token-exempt: E2E probe measurement surface, not product design
+        let width: CGFloat = 400
+        // token-exempt: E2E probe measurement surface, not product design
+        let height: CGFloat = 400
+        controller.textView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: height
+        )
+        controller.textView.textContainer?.widthTracksTextView = false
+        controller.textView.textContainer?.containerSize = NSSize(
+            width: width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+    }
+
+    private static func runMovementCommand(
+        _ controller: MarkdownEditorController,
+        _ selector: Selector
+    ) -> Bool {
+        controller.textView(controller.textView, doCommandBy: selector)
+    }
+
+    private static func runMultiCursorMovementProbe() {
+        let source = "abcdefghij\nabcdefghij\nabcdefghij\nabc"
+        let (document, controller) = makeProbeEditor(source: source)
+        configureMovementProbe(controller)
+        guard let model = probeModel(
+            [2, 5, 8, 13, 16],
+            primary: 0,
+            source: source
+        ) else {
+            log("FAIL mc move reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        let revision = document.revision
+        let canUndo = document.undoManager.canUndo
+
+        _ = runMovementCommand(
+            controller,
+            #selector(NSResponder.moveDown(_:))
+        )
+        let down1 = controller.multiCursorSelection?.ranges
+        _ = runMovementCommand(
+            controller,
+            #selector(NSResponder.moveDown(_:))
+        )
+        let down2 = controller.multiCursorSelection?.ranges
+        _ = runMovementCommand(
+            controller,
+            #selector(NSResponder.moveUp(_:))
+        )
+        let up = controller.multiCursorSelection?.ranges
+
+        let moveOK = down1 == [13..<13, 16..<16, 19..<19, 24..<24, 27..<27]
+            && down2 == [24..<24, 27..<27, 30..<30, 35..<35, 36..<36]
+            && up == down1
+            && document.revision == revision
+            && document.undoManager.canUndo == canUndo
+        log(
+            (moveOK ? "PASS" : "FAIL")
+                + " mc move down1=\(describeCarets(down1))"
+                + " down2=\(describeCarets(down2))"
+                + " up=\(describeCarets(up))"
+        )
+
+        // The goal column survives the short last line and returns with Up:
+        // column 5 on line 2 -> clamped to the end of "abc" -> back to 5.
+        let (_, columnController) = makeProbeEditor(source: source)
+        configureMovementProbe(columnController)
+        guard let columnModel = probeModel(
+            [8, 27],
+            primary: 0,
+            source: source
+        ) else {
+            log("FAIL mc move column reason=model")
+            return
+        }
+        columnController.adoptMultiCursor(columnModel)
+        _ = runMovementCommand(
+            columnController,
+            #selector(NSResponder.moveDown(_:))
+        )
+        let columnA = columnController.multiCursorSelection?.ranges
+        _ = runMovementCommand(
+            columnController,
+            #selector(NSResponder.moveDown(_:))
+        )
+        let columnB = columnController.multiCursorSelection?.ranges
+        _ = runMovementCommand(
+            columnController,
+            #selector(NSResponder.moveUp(_:))
+        )
+        let columnC = columnController.multiCursorSelection?.ranges
+        let columnOK = columnA == [19..<19, 36..<36]
+            && columnB == [30..<30, 36..<36]
+            && columnC == [19..<19, 27..<27]
+        log(
+            (columnOK ? "PASS" : "FAIL")
+                + " mc move column a=\(describeCarets(columnA))"
+                + " b=\(describeCarets(columnB))"
+                + " c=\(describeCarets(columnC))"
+        )
+
+        // Shift extends every caret from its own anchor; Escape collapses.
+        let (anchorDocument, anchorController) = makeProbeEditor(source: source)
+        configureMovementProbe(anchorController)
+        guard let anchorModel = probeModel(
+            [2, 13, 24],
+            primary: 1,
+            source: source
+        ) else {
+            log("FAIL mc move anchor reason=model")
+            return
+        }
+        anchorController.adoptMultiCursor(anchorModel)
+        let anchorRevision = anchorDocument.revision
+        let anchorUndo = anchorDocument.undoManager.canUndo
+        _ = runMovementCommand(
+            anchorController,
+            #selector(NSResponder.moveRightAndModifySelection(_:))
+        )
+        let extended = anchorController.multiCursorSelection
+        _ = runMovementCommand(
+            anchorController,
+            #selector(NSResponder.moveLeftAndModifySelection(_:))
+        )
+        let contracted = anchorController.multiCursorSelection
+        let anchors = extended?.carets.map(\.anchor)
+        let anchorOK = extended?.ranges == [2..<3, 13..<14, 24..<25]
+            && anchors == [2, 13, 24]
+            && contracted?.ranges == [2..<2, 13..<13, 24..<24]
+            && anchorDocument.revision == anchorRevision
+            && anchorDocument.undoManager.canUndo == anchorUndo
+        anchorController.textView.cancelOperation(nil)
+        let collapsed = anchorController.multiCursorSelection == nil
+            && anchorController.textView.selectedRange()
+                == NSRange(location: 13, length: 0)
+        log(
+            (anchorOK && collapsed ? "PASS" : "FAIL")
+                + " mc move anchor extended=\(describeCarets(extended?.ranges))"
+                + " anchors=\(anchors.map { $0.map(String.init).joined(separator: ",") } ?? "nil")"
+                + " collapsed=\(collapsed)"
+        )
+    }
+    // MARK: - MC-07 placement gestures
+
+    /// The view point of the caret before `offset`, from the same layout
+    /// fragments the line provider reads.
+    private static func placementPoint(
+        forOffset offset: Int,
+        in textView: NSTextView
+    ) -> NSPoint? {
+        guard let layout = textView.textLayoutManager,
+              let content = layout.textContentManager else {
+            return nil
+        }
+        layout.ensureLayout(for: content.documentRange)
+        let inset = textView.textContainerInset
+        var result: NSPoint?
+        layout.enumerateTextLayoutFragments(
+            from: nil,
+            options: [.ensuresLayout]
+        ) { fragment in
+            let base = content.offset(
+                from: content.documentRange.location,
+                to: fragment.rangeInElement.location
+            ) ?? 0
+            for line in fragment.textLineFragments {
+                let lower = base + line.characterRange.location
+                let upper = lower + line.characterRange.length
+                guard offset >= lower, offset <= upper else { continue }
+                result = NSPoint(
+                    x: fragment.layoutFragmentFrame.minX + inset.width
+                        + line.locationForCharacter(at: offset - lower).x,
+                    y: fragment.layoutFragmentFrame.minY + inset.height
+                        + line.typographicBounds.midY
+                )
+                return false
+            }
+            return true
+        }
+        return result
+    }
+
+    /// A real Command-click event through the text view's override, so the
+    /// modifier check and the controller callback are the paths under test.
+    private static func placementClick(
+        _ textView: NSTextView,
+        at point: NSPoint
+    ) -> Bool {
+        guard let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: textView.convert(point, to: nil),
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ) else {
+            return false
+        }
+        textView.mouseDown(with: event)
+        return true
+    }
+
+    private static func runMultiCursorPlacementProbe() {
+        let source = "alpha beta gamma"
+        let (document, controller) = makeProbeEditor(source: source)
+        configureMovementProbe(controller)
+        controller.textView.setSelectedRange(NSRange(location: 0, length: 0))
+        let revision = document.revision
+        var clicked = true
+        for offset in [2, 7, 13] {
+            guard let point = placementPoint(
+                forOffset: offset,
+                in: controller.textView
+            ) else {
+                log("FAIL mc placement reason=layout")
+                return
+            }
+            clicked = clicked && placementClick(controller.textView, at: point)
+        }
+        let placed = controller.multiCursorSelection
+        let rects = placed?.carets.map { caret -> String in
+            guard let rect = CaretGeometry.rect(
+                at: caret.active,
+                upstream: true,
+                in: controller.textView
+            ) else { return "nil" }
+            return "\(Int(rect.minX.rounded()))+\(Int(rect.height.rounded()))"
+        }.joined(separator: ",") ?? "nil"
+        // A second Command-click on an existing caret toggles it off.
+        if let point = placementPoint(forOffset: 7, in: controller.textView) {
+            clicked = clicked && placementClick(controller.textView, at: point)
+        }
+        let toggled = controller.multiCursorSelection
+        let placementOK = clicked
+            && placed?.ranges == [0..<0, 2..<2, 7..<7, 13..<13]
+            && placed?.primaryRange == 13..<13
+            && toggled?.ranges == [0..<0, 2..<2, 13..<13]
+            && toggled?.primaryRange == 13..<13
+            && controller.textView.selectedRange()
+                == NSRange(location: 13, length: 0)
+            && document.revision == revision
+        log(
+            (placementOK ? "PASS" : "FAIL")
+                + " mc placement carets=\(describeCarets(placed?.ranges))"
+                + " primary=\(placed.map { "\($0.primaryRange.lowerBound)+\($0.primaryRange.count)" } ?? "nil")"
+                + " rects=\(rects)"
+                + " toggled=\(describeCarets(toggled?.ranges))"
+        )
+
+        let occurrencesSource = "alpha beta alpha gamma alpha"
+        let (occurrenceDocument, occurrenceController) = makeProbeEditor(
+            source: occurrencesSource
+        )
+        occurrenceController.textView.setSelectedRange(
+            NSRange(location: 2, length: 0)
+        )
+        let occurrenceRevision = occurrenceDocument.revision
+        let added1 = occurrenceController.perform(.addNextOccurrence)
+        let after1 = occurrenceController.multiCursorSelection?.ranges
+        let added2 = occurrenceController.perform(.addNextOccurrence)
+        let after2 = occurrenceController.multiCursorSelection?.ranges
+        let refused = occurrenceController.perform(.addNextOccurrence)
+        let after3 = occurrenceController.multiCursorSelection?.ranges
+
+        let (allDocument, allController) = makeProbeEditor(
+            source: occurrencesSource
+        )
+        allController.textView.setSelectedRange(
+            NSRange(location: 13, length: 0)
+        )
+        let allRevision = allDocument.revision
+        let selectedAll = allController.perform(.selectAllOccurrences)
+        let allRanges = allController.multiCursorSelection?.ranges
+        let allPrimary = allController.multiCursorSelection?.primaryRange
+        let occurrencesOK = added1
+            && after1 == [0..<5, 11..<16]
+            && added2
+            && after2 == [0..<5, 11..<16, 23..<28]
+            && !refused
+            && after3 == after2
+            && selectedAll
+            && allRanges == [0..<5, 11..<16, 23..<28]
+            && allPrimary == 11..<16
+            && occurrenceDocument.revision == occurrenceRevision
+            && allDocument.revision == allRevision
+        log(
+            (occurrencesOK ? "PASS" : "FAIL")
+                + " mc occurrences first=\(describeCarets(after1))"
+                + " second=\(describeCarets(after2))"
+                + " refused=\(!refused)"
+                + " all=\(describeCarets(allRanges))"
+                + " primary=\(allPrimary.map { "\($0.lowerBound)+\($0.count)" } ?? "nil")"
+                + " revisions=\(occurrenceDocument.revision - occurrenceRevision)"
+        )
+
+        occurrenceController.textView.cancelOperation(nil)
+        let collapsed = occurrenceController.multiCursorSelection == nil
+            && occurrenceController.textView.selectedRange()
+                == NSRange(location: 23, length: 5)
+        log(
+            (collapsed ? "PASS" : "FAIL")
+                + " mc collapse carets=\(describeCarets(occurrenceController.multiCursorSelection?.ranges))"
+                + " native=\(occurrenceController.textView.selectedRange().location)+\(occurrenceController.textView.selectedRange().length)"
+        )
+    }
+
+    // MARK: - MC-10 latency gates
+
+    /// A deterministic Markdown fixture of roughly `targetBytes`.
+    private static func multiCursorFixture(targetBytes: Int) -> String {
+        var builder = ""
+        builder.reserveCapacity(targetBytes + 256)
+        var index = 0
+        while builder.utf8.count < targetBytes {
+            builder += "Paragraph \(index) carries MARK text for the latency probe.\n\n"
+            index += 1
+        }
+        return builder
+    }
+
+    private static func lineStartOffsets(in source: String) -> [Int] {
+        let ns = source as NSString
+        var starts: [Int] = []
+        var cursor = 0
+        while cursor < ns.length {
+            starts.append(cursor)
+            let line = ns.lineRange(for: NSRange(location: cursor, length: 0))
+            let next = NSMaxRange(line)
+            guard next > cursor else { break }
+            cursor = next
+        }
+        return starts
+    }
+
+    private static func percentile(
+        _ values: [Double],
+        _ fraction: Double
+    ) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let raw = Int((fraction * Double(sorted.count)).rounded(.up)) - 1
+        return sorted[min(sorted.count - 1, max(0, raw))]
+    }
+
+    private static func milliseconds(since start: CFAbsoluteTime) -> Double {
+        (CFAbsoluteTimeGetCurrent() - start) * 1000
+    }
+
+    /// Ensures layout for the caret's own line: the windowless proxy for the
+    /// first visible draw. The probe cannot host a controller-backed text
+    /// view in a window — the app exits a few seconds later on this macOS
+    /// build (the MC-05 platform constraint) — so rasterisation is not
+    /// measured; layout is the per-keystroke term that grows with the
+    /// document, and the viewport is a fixed 400×400.
+    private static func ensureLineLayout(
+        at offset: Int,
+        in textView: NSTextView
+    ) {
+        guard let layout = textView.textLayoutManager,
+              let content = layout.textContentManager,
+              let start = content.location(
+                  content.documentRange.location,
+                  offsetBy: min(
+                      offset,
+                      (textView.string as NSString).length
+                  )
+              ) else { return }
+        layout.ensureLayout(for: NSTextRange(location: start))
+    }
+
+    private static func runMultiCursorBudgetProbe() async {
+        let sizes: [(name: String, bytes: Int)] = [
+            ("220KB", 220 * 1024),
+            ("1MB", 1024 * 1024)
+        ]
+        let caretCounts = [1, 10, 100]
+        var p50: [String: Double] = [:]
+        var worstTurn = 0.0
+
+        for size in sizes {
+            let fixture = multiCursorFixture(targetBytes: size.bytes)
+            let starts = lineStartOffsets(in: fixture)
+            for offscreen in [false, true] {
+                let placement = offscreen ? "offscreen" : "visible"
+                for count in caretCounts {
+                    guard starts.count >= count else {
+                        log("FAIL mc budget \(size.name) \(placement) carets=\(count) reason=lines")
+                        continue
+                    }
+                    let offsets = offscreen
+                        ? Array(starts.suffix(count))
+                        : Array(starts.prefix(count))
+                    let (document, controller) = makeProbeEditor(source: fixture)
+                    configureMovementProbe(controller)
+                    if count > 1 {
+                        guard let model = probeModel(
+                            offsets,
+                            source: fixture
+                        ) else {
+                            log("FAIL mc budget \(size.name) \(placement) carets=\(count) reason=model")
+                            continue
+                        }
+                        controller.adoptMultiCursor(model)
+                    } else {
+                        controller.textView.setSelectedRange(
+                            NSRange(location: offsets[0], length: 0)
+                        )
+                    }
+                    var batches: [Double] = []
+                    // The synchronous slice of each keystroke: insertion plus
+                    // the layout its first visible draw needs. The probe
+                    // cannot host the editor in a window (the MC-05
+                    // constraint), so rasterisation is not measured; layout
+                    // is the term that scales with the document.
+                    var syncTurns: [Double] = []
+                    // The 50 ms gate is per main-thread turn, and deferred
+                    // work belongs to a turn too. The timer measures every
+                    // runloop iteration's busy span (beforeSources to
+                    // beforeWaiting), so a slow highlight pass on the last
+                    // revision counts even though it runs after the batch.
+                    let turnTimer = MainTurnTimer()
+                    var refused = false
+                    for _ in 0..<10 {
+                        let lengthBefore = (controller.textView.string as NSString).length
+                        let revisionBefore = document.revision
+                        let start = CFAbsoluteTimeGetCurrent()
+                        controller.textView.insertText(
+                            "x",
+                            replacementRange: NSRange(
+                                location: NSNotFound,
+                                length: 0
+                            )
+                        )
+                        batches.append(milliseconds(since: start))
+                        let caret = count > 1
+                            ? (controller.multiCursorSelection?.primaryRange.lowerBound
+                                ?? controller.textView.selectedRange().location)
+                            : controller.textView.selectedRange().location
+                        ensureLineLayout(at: caret, in: controller.textView)
+                        syncTurns.append(milliseconds(since: start))
+                        let grew = (controller.textView.string as NSString).length
+                            == lengthBefore + count
+                        if !grew || document.revision != revisionBefore + 1 {
+                            refused = true
+                            break
+                        }
+                        // One runloop turn between samples. Ten insertions
+                        // back to back formed one long turn; the timer needs
+                        // the deferred work to land in a measured iteration.
+                        await Task.yield()
+                        try? await Task.sleep(for: .milliseconds(1))
+                    }
+                    let target = document.revision
+                    let settled = await waitUntil(5) {
+                        controller.lastHighlightedRevision == target
+                    }
+                    let maxTurn = turnTimer.maxBusyMS
+                    guard !refused, batches.count == 10 else {
+                        log("FAIL mc budget \(size.name) \(placement) carets=\(count) reason=batch")
+                        continue
+                    }
+                    // Without the deferred pass the turn bound is unproven,
+                    // not passed: an unfinished highlight contributes no
+                    // measured turn.
+                    guard settled else {
+                        log("FAIL mc budget \(size.name) \(placement) carets=\(count) reason=settle")
+                        continue
+                    }
+                    let cold = batches[0]
+                    let warmed = Array(batches.dropFirst())
+                    let p50Value = percentile(warmed, 0.5)
+                    p50["\(size.name)-\(placement)-\(count)"] = p50Value
+                    let maxValue = batches.max() ?? 0
+                    // The turn bound includes the cold sample and every
+                    // measured turn: a 100 ms cold insertion, or a slow
+                    // deferred highlight, used to pass because only warmed
+                    // insertions were counted. The synchronous slices are a
+                    // lower bound even if the observer misses a span.
+                    worstTurn = max(
+                        worstTurn,
+                        turnTimer.peakBusyMS,
+                        syncTurns.max() ?? 0
+                    )
+                    log(
+                        "PASS mc budget \(size.name) \(placement) carets=\(count)"
+                            + " coldMS=\(String(format: "%.2f", cold))"
+                            + " p50=\(String(format: "%.2f", p50Value))"
+                            + " p95=\(String(format: "%.2f", percentile(warmed, 0.95)))"
+                            + " max=\(String(format: "%.2f", maxValue))"
+                            + " syncMax=\(String(format: "%.2f", syncTurns.max() ?? 0))"
+                            + " turnMax=\(String(format: "%.2f", maxTurn))"
+                            + " turns=\(turnTimer.turns)"
+                    )
+                }
+            }
+        }
+
+        let singleVisible = p50["220KB-visible-1"] ?? 0
+        let tenVisible = p50["220KB-visible-10"] ?? 0
+        let hundredVisible = p50["220KB-visible-100"] ?? 0
+        let singleOff = p50["220KB-offscreen-1"] ?? 0
+        let tenOff = p50["220KB-offscreen-10"] ?? 0
+        let hundredOff = p50["220KB-offscreen-100"] ?? 0
+        let ratio10 = singleVisible > 0 ? tenVisible / singleVisible : .infinity
+        let ratio100 = singleVisible > 0
+            ? hundredVisible / singleVisible
+            : .infinity
+        let ratio10Off = singleOff > 0 ? tenOff / singleOff : .infinity
+        let ratio100Off = singleOff > 0 ? hundredOff / singleOff : .infinity
+        let latencyOK = ratio10 <= 1.5
+            && ratio100 <= 3
+            && ratio10Off <= 1.5
+            && ratio100Off <= 3
+        log(
+            (latencyOK ? "PASS" : "FAIL")
+                + " mc latency ratio10=\(String(format: "%.2f", ratio10))"
+                + " ratio100=\(String(format: "%.2f", ratio100))"
+                + " ratio10off=\(String(format: "%.2f", ratio10Off))"
+                + " ratio100off=\(String(format: "%.2f", ratio100Off))"
+        )
+        let turnOK = worstTurn <= 50
+        log(
+            (turnOK ? "PASS" : "FAIL")
+                + " mc turn 1mb maxMS=\(String(format: "%.2f", worstTurn))"
+        )
+
+        // Phase split for the slowest synchronous path: the engine, the whole
+        // document update, and the storage bridge.
+        for (name, bytes) in [("220KB", 220 * 1024), ("1MB", 1024 * 1024)] {
+            let fixture = multiCursorFixture(targetBytes: bytes)
+            let offsets = Array(lineStartOffsets(in: fixture).prefix(100))
+            guard let model = probeModel(offsets, source: fixture) else {
+                continue
+            }
+            var applyMS = 0.0
+            for _ in 0..<10 {
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = MultiCursorEdit.apply(
+                    .insert("x"),
+                    to: fixture,
+                    selection: model
+                )
+                applyMS += milliseconds(since: start)
+            }
+            let (_, phaseController) = makeProbeEditor(source: fixture)
+            configureMovementProbe(phaseController)
+            phaseController.adoptMultiCursor(model)
+            var totalMS = 0.0
+            for _ in 0..<10 {
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = phaseController.applyMultiCursor(.insert("x"))
+                totalMS += milliseconds(since: start)
+            }
+            let bare = MarkdownDocument(untitledWith: MarkdownFileStore())
+            try? bare.replaceSource(fixture)
+            var toggle = false
+            var replaceMS = 0.0
+            for _ in 0..<10 {
+                toggle.toggle()
+                let start = CFAbsoluteTimeGetCurrent()
+                try? bare.replaceSource(fixture + (toggle ? "x" : "y"))
+                replaceMS += milliseconds(since: start)
+            }
+            var bridgeMS = 0.0
+            for _ in 0..<10 {
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = phaseController.textView.string.utf8.count
+                bridgeMS += milliseconds(since: start)
+            }
+            log(
+                "INFO mc phase \(name) apply=\(String(format: "%.2f", applyMS / 10))"
+                    + " total=\(String(format: "%.2f", totalMS / 10))"
+                    + " replace=\(String(format: "%.2f", replaceMS / 10))"
+                    + " bridge=\(String(format: "%.2f", bridgeMS / 10))"
+            )
+        }
+
+        // Highlight completion on the largest document: measured in runloop
+        // turns (1 ms yields) from the batch until the highlighted revision
+        // catches up. The post-output count must be at most two turns.
+        let fixture = multiCursorFixture(targetBytes: 1024 * 1024)
+        let starts = lineStartOffsets(in: fixture)
+        let (document, controller) = makeProbeEditor(source: fixture)
+        configureMovementProbe(controller)
+        let offsets = Array(starts.prefix(100))
+        guard let model = probeModel(offsets, source: fixture) else {
+            log("FAIL mc highlight 1mb reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        // The gate is defined in runloop turns, so count real ones: a
+        // CFRunLoop observer at beforeSources fires once per iteration,
+        // including iterations that process ready sources without sleeping.
+        // The milestones are recorded by the controller's own callbacks at
+        // the exact assignments; polling the published properties could see
+        // publication and highlight after both had happened, making a
+        // three-turn delay read as zero.
+        let turnCounter = RunloopTurnCounter()
+        var watchedRevision: UInt64 = 0
+        var publishedTurn: Int?
+        var highlightedTurn: Int?
+        controller.onParsePublished = { revision in
+            guard revision == watchedRevision, publishedTurn == nil else {
+                return
+            }
+            publishedTurn = turnCounter.turns
+        }
+        controller.onHighlightApplied = { revision in
+            guard revision == watchedRevision, highlightedTurn == nil else {
+                return
+            }
+            highlightedTurn = turnCounter.turns
+        }
+        controller.textView.insertText(
+            "x",
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        let revision = document.revision
+        watchedRevision = revision
+        var iterations = 0
+        while iterations < 3000, highlightedTurn == nil {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
+            iterations += 1
+        }
+        controller.onParsePublished = nil
+        controller.onHighlightApplied = nil
+        let highlighted = controller.lastHighlightedRevision == revision
+        let outputObserved = publishedTurn != nil
+        let highlightObserved = highlightedTurn != nil
+        let turns = turnCounter.turns
+        // Measured between the two real milestones. An unobserved milestone
+        // is unknown, not zero: treating it as zero let a highlight that
+        // arrived without a visible parse pass.
+        let postOutput: Int
+        if let publishedTurn, let highlightedTurn {
+            postOutput = max(0, highlightedTurn - publishedTurn)
+        } else {
+            postOutput = .max
+        }
+        // If the loop waited at all, at least one turn must have been seen;
+        // otherwise the instrumentation itself is broken and a zero would
+        // read as a pass.
+        let instrumented = iterations == 0 || turns > 0
+        let highlightOK = highlighted && outputObserved && highlightObserved
+            && instrumented && postOutput <= 2
+        log(
+            (highlightOK ? "PASS" : "FAIL")
+                + " mc highlight 1mb turns=\(turns)"
+                + " publishTurn=\(publishedTurn.map(String.init) ?? "nil")"
+                + " postOutput=\(highlightObserved ? String(postOutput) : "nil")"
+                + " observed=\(outputObserved)"
+                + " highlighted=\(highlightObserved)"
+                + " instrumented=\(instrumented)"
+                + " revision=\(revision)"
+        )
+    }
+
+    /// Measures the main thread's busy span in each runloop iteration: from
+    /// the end of the previous wait (or the start of an iteration that never
+    /// slept) to the next beforeWaiting, where the loop sleeps. The sleep
+    /// itself is excluded: a task resumed after `afterWaiting` runs in that
+    /// phase, before `beforeSources`, so a span measured from beforeSources
+    /// alone read zero while the real main-actor work happened just before
+    /// it (measured: turnMax=0.00 with the work clearly done).
+    private final class MainTurnTimer {
+        private(set) var maxBusyMS = 0.0
+        private(set) var turns = 0
+        private var busyStart: CFAbsoluteTime?
+        private var observer: CFRunLoopObserver?
+
+        /// The maximum including a span still open at the reading moment.
+        var peakBusyMS: Double {
+            guard let busyStart else { return maxBusyMS }
+            return max(
+                maxBusyMS,
+                (CFAbsoluteTimeGetCurrent() - busyStart) * 1000
+            )
+        }
+
+        init() {
+            // The timer is installed mid-turn. Opening the span here charges
+            // the current turn's remaining work — including the first
+            // insertion — to it; waiting for the next phase would leave that
+            // sample unmeasured.
+            busyStart = CFAbsoluteTimeGetCurrent()
+            var context = CFRunLoopObserverContext(
+                version: 0,
+                info: Unmanaged.passUnretained(self).toOpaque(),
+                retain: nil,
+                release: nil,
+                copyDescription: nil
+            )
+            observer = CFRunLoopObserverCreate(
+                kCFAllocatorDefault,
+                CFRunLoopActivity.afterWaiting.rawValue
+                    | CFRunLoopActivity.beforeSources.rawValue
+                    | CFRunLoopActivity.beforeWaiting.rawValue,
+                true,
+                0,
+                { _, activity, info in
+                    guard let info else { return }
+                    let timer = Unmanaged<MainTurnTimer>
+                        .fromOpaque(info)
+                        .takeUnretainedValue()
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if activity.contains(.afterWaiting) {
+                        // Work resumed from the wait starts here. A span
+                        // still open is recorded before it is replaced.
+                        if let start = timer.busyStart {
+                            timer.maxBusyMS = max(
+                                timer.maxBusyMS,
+                                (now - start) * 1000
+                            )
+                        }
+                        timer.turns += 1
+                        timer.busyStart = now
+                    } else if activity.contains(.beforeSources) {
+                        // An iteration that processed ready sources without
+                        // sleeping never reached afterWaiting.
+                        if timer.busyStart == nil {
+                            timer.turns += 1
+                            timer.busyStart = now
+                        }
+                    } else if let start = timer.busyStart {
+                        timer.maxBusyMS = max(
+                            timer.maxBusyMS,
+                            (now - start) * 1000
+                        )
+                        timer.busyStart = nil
+                    }
+                },
+                &context
+            )
+            if let observer {
+                CFRunLoopAddObserver(
+                    CFRunLoopGetMain(),
+                    observer,
+                    .commonModes
+                )
+            }
+        }
+
+        deinit {
+            if let observer {
+                CFRunLoopRemoveObserver(
+                    CFRunLoopGetMain(),
+                    observer,
+                    .commonModes
+                )
+            }
+        }
+    }
+
+    /// Counts main-runloop turns: one per iteration, taken at beforeSources.
+    /// An iteration that processes ready sources without sleeping never
+    /// reaches afterWaiting, so counting wake-ups undercounted the very
+    /// iterations a busy main thread runs.
+    private final class RunloopTurnCounter {
+        private(set) var turns = 0
+
+        private var observer: CFRunLoopObserver?
+
+        init() {
+            var context = CFRunLoopObserverContext(
+                version: 0,
+                info: Unmanaged.passUnretained(self).toOpaque(),
+                retain: nil,
+                release: nil,
+                copyDescription: nil
+            )
+            observer = CFRunLoopObserverCreate(
+                kCFAllocatorDefault,
+                CFRunLoopActivity.beforeSources.rawValue,
+                true,
+                0,
+                { _, _, info in
+                    guard let info else { return }
+                    Unmanaged<RunloopTurnCounter>
+                        .fromOpaque(info)
+                        .takeUnretainedValue()
+                        .turns += 1
+                },
+                &context
+            )
+            if let observer {
+                CFRunLoopAddObserver(
+                    CFRunLoopGetMain(),
+                    observer,
+                    .commonModes
+                )
+            }
+        }
+
+        deinit {
+            if let observer {
+                CFRunLoopRemoveObserver(
+                    CFRunLoopGetMain(),
+                    observer,
+                    .commonModes
+                )
+            }
+        }
+    }
+
+    // MARK: - MC-09 AX contract
+
+    /// With more than one caret AX must still report exactly the primary
+    /// selection: the text view is the native text surface, the other carets
+    /// are paint. This line pins that contract so a regression is visible.
+    private static func runMultiCursorAXProbe() {
+        let source = "alpha beta gamma"
+        let (_, controller) = makeProbeEditor(source: source)
+        guard let model = try? MultiCursorSelection(
+            [
+                MultiCursorSelection.Caret(anchor: 0, active: 5),
+                MultiCursorSelection.Caret(anchor: 6, active: 10),
+                MultiCursorSelection.Caret(anchor: 11, active: 16)
+            ],
+            primary: 1,
+            source: source
+        ) else {
+            log("FAIL mc ax reason=model")
+            return
+        }
+        controller.adoptMultiCursor(model)
+        let axRange = controller.textView.accessibilitySelectedTextRange()
+        let axText = controller.textView.accessibilitySelectedText() ?? ""
+        let overlayIgnored =
+            controller.caretOverlay?.isAccessibilityElement() == false
+        let axOK = axRange == NSRange(location: 6, length: 4)
+            && axText == "beta"
+            && overlayIgnored
+        log(
+            (axOK ? "PASS" : "FAIL")
+                + " mc ax primary-only carets=\(model.count)"
+                + " range=\(axRange.location)+\(axRange.length)"
+                + " text=\"\(axText)\""
+                + " overlayIgnored=\(overlayIgnored)"
+        )
+    }
+
+    // MARK: - MC-08 interaction guards
+
+    private static func guardLog(
+        _ operation: MultiCursorPolicy.Operation,
+        _ passed: Bool,
+        _ detail: String = ""
+    ) {
+        log(
+            (passed ? "PASS" : "FAIL")
+                + " mc guard \(operation.rawValue)"
+                + (detail.isEmpty ? "" : " " + detail)
+        )
+    }
+
+    private static func adoptProbeCarets(
+        _ controller: MarkdownEditorController,
+        offsets: [Int],
+        source: String,
+        primary: Int = 0
+    ) -> Bool {
+        guard let model = probeModel(
+            offsets,
+            primary: primary,
+            source: source
+        ) else { return false }
+        controller.adoptMultiCursor(model)
+        return true
+    }
+
+    private static func guardSelection(
+        _ ranges: [Range<Int>],
+        source: String
+    ) -> MultiCursorSelection? {
+        try? MultiCursorSelection(
+            ranges.map {
+                MultiCursorSelection.Caret(
+                    anchor: $0.lowerBound,
+                    active: $0.upperBound
+                )
+            },
+            primary: 0,
+            source: source
+        )
+    }
+
+    private static func runMultiCursorGuardProbe() async {
+        let source = "alpha beta gamma"
+
+        // Batch rows.
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            let revision = document.revision
+            guard adoptProbeCarets(controller, offsets: [0, 6, 11], source: source)
+            else {
+                guardLog(.typing, false, "reason=model")
+                return
+            }
+            controller.textView.insertText(
+                "X",
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+            guardLog(
+                .typing,
+                controller.textView.string == "Xalpha Xbeta Xgamma"
+                    && document.revision == revision + 1,
+                "source=\(controller.textView.string)"
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6, 11], source: source)
+            else {
+                guardLog(.backspace, false, "reason=model")
+                return
+            }
+            _ = controller.textView(
+                controller.textView,
+                doCommandBy: #selector(NSResponder.deleteBackward(_:))
+            )
+            guardLog(
+                .backspace,
+                controller.textView.string == "alphabetagamma"
+                    && controller.multiCursorSelection?.ranges
+                        == [0..<0, 5..<5, 9..<9]
+                    && document.revision == 2,
+                "source=\(controller.textView.string)"
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6, 11], source: source)
+            else {
+                guardLog(.delete, false, "reason=model")
+                return
+            }
+            _ = controller.textView(
+                controller.textView,
+                doCommandBy: #selector(NSResponder.deleteForward(_:))
+            )
+            guardLog(
+                .delete,
+                controller.textView.string == "lpha eta amma"
+                    && document.revision == 2,
+                "source=\(controller.textView.string)"
+            )
+        }
+
+        // Clipboard rows use a scratch pasteboard: the probe must never
+        // write the user's clipboard, and the old flattening save/restore
+        // lost every representation it could not express as (type, data).
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("SonovoProbe.guards")
+        )
+        pasteboard.clearContents()
+        defer { pasteboard.clearContents() }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard let model = guardSelection([0..<5, 6..<10], source: source)
+            else {
+                guardLog(.copy, false, "reason=model")
+                return
+            }
+            controller.adoptMultiCursor(model)
+            controller.clipboard = pasteboard
+            pasteboard.clearContents()
+            // Consume the action even if the handler regresses: a false
+            // return falls through to AppKit's own copy, which writes the
+            // general pasteboard the probe promises never to touch.
+            let copyHandler = controller.textView.onMultiCursorCopy
+            var copyHandled = false
+            controller.textView.onMultiCursorCopy = {
+                copyHandled = copyHandler?() ?? false
+                return true
+            }
+            controller.textView.copy(nil)
+            guardLog(
+                .copy,
+                copyHandled
+                    && copyHandler != nil
+                    && pasteboard.string(forType: .string) == "alphabeta"
+                    && controller.textView.string == source
+                    && document.revision == 1
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard let model = guardSelection([0..<5, 6..<10], source: source)
+            else {
+                guardLog(.cut, false, "reason=model")
+                return
+            }
+            controller.adoptMultiCursor(model)
+            controller.clipboard = pasteboard
+            // The copy row left "alphabeta" on this pasteboard, so a cut
+            // that only deleted text would still read back the expected
+            // string. A distinct sentinel makes the write observable.
+            pasteboard.clearContents()
+            pasteboard.setString("sentinel", forType: .string)
+            // Same consumption rule as copy: a regression must not reach
+            // AppKit and overwrite the general pasteboard.
+            let cutHandler = controller.textView.onMultiCursorCut
+            var cutHandled = false
+            controller.textView.onMultiCursorCut = {
+                cutHandled = cutHandler?() ?? false
+                return true
+            }
+            controller.textView.cut(nil)
+            guardLog(
+                .cut,
+                cutHandled
+                    && cutHandler != nil
+                    && pasteboard.string(forType: .string) == "alphabeta"
+                    && controller.textView.string == "  gamma"
+                    && document.revision == 2,
+                "source=\(controller.textView.string)"
+                    + " cutCopied=\(pasteboard.string(forType: .string) ?? "nil")"
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.plainPaste, false, "reason=model")
+                return
+            }
+            controller.clipboard = pasteboard
+            pasteboard.clearContents()
+            pasteboard.setString("12", forType: .string)
+            controller.textView.paste(nil)
+            guardLog(
+                .plainPaste,
+                controller.textView.string == "12alpha 12beta gamma"
+                    && document.revision == 2,
+                "source=\(controller.textView.string)"
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.imagePaste, false, "reason=model")
+                return
+            }
+            controller.clipboard = pasteboard
+            pasteboard.clearContents()
+            pasteboard.setData(Data([0x89]), forType: .png)
+            pasteboard.setString("ignored", forType: .string)
+            controller.textView.paste(nil)
+            guardLog(
+                .imagePaste,
+                controller.textView.string == source
+                    && controller.multiCursorSelection?.ranges
+                        == [0..<0, 6..<6]
+                    && document.revision == 1
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.smartPaste, false, "reason=model")
+                return
+            }
+            controller.clipboard = pasteboard
+            pasteboard.clearContents()
+            pasteboard.setString("<b>x</b>", forType: .html)
+            pasteboard.setString("x", forType: .string)
+            controller.textView.paste(nil)
+            guardLog(
+                .smartPaste,
+                controller.textView.string == source
+                    && controller.multiCursorSelection?.ranges
+                        == [0..<0, 6..<6]
+                    && document.revision == 1
+            )
+        }
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.autoPair, false, "reason=model")
+                return
+            }
+            controller.textView.insertText(
+                "(",
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+            guardLog(
+                .autoPair,
+                controller.textView.string == "(alpha (beta gamma"
+                    && !controller.textView.string.contains("()")
+                    && document.revision == 2,
+                "source=\(controller.textView.string)"
+            )
+        }
+
+        // Refuse rows.
+        do {
+            let (document, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.formattingCommand, false, "reason=model")
+                return
+            }
+            let applied = controller.perform(.toggleStrong)
+            guardLog(
+                .formattingCommand,
+                !applied
+                    && controller.textView.string == source
+                    && controller.multiCursorSelection?.ranges
+                        == [0..<0, 6..<6]
+                    && document.revision == 1
+            )
+        }
+        do {
+            let table = "| a | b |\n|---|---|\n| 1 | 2 |"
+            let (_, controller) = makeProbeEditor(source: table)
+            guard adoptProbeCarets(controller, offsets: [2, 5], source: table)
+            else {
+                guardLog(.tableCommand, false, "reason=model")
+                return
+            }
+            let applied = controller.perform(.insertTableRowBelow)
+            guardLog(
+                .tableCommand,
+                !applied
+                    && controller.textView.string == table
+                    && controller.multiCursorSelection?.ranges
+                        == [2..<2, 5..<5]
+            )
+        }
+        do {
+            let (_, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.tabIndent, false, "reason=model")
+                return
+            }
+            let handled = controller.textView(
+                controller.textView,
+                doCommandBy: #selector(NSResponder.insertTab(_:))
+            )
+            guardLog(
+                .tabIndent,
+                handled
+                    && controller.textView.string == source
+                    && controller.multiCursorSelection?.ranges
+                        == [0..<0, 6..<6]
+            )
+        }
+        do {
+            let list = "- alpha\n- beta"
+            let (_, controller) = makeProbeEditor(source: list)
+            guard adoptProbeCarets(controller, offsets: [2, 11], source: list)
+            else {
+                guardLog(.listReturn, false, "reason=model")
+                return
+            }
+            let handled = controller.textView(
+                controller.textView,
+                doCommandBy: #selector(NSResponder.insertNewline(_:))
+            )
+            guardLog(
+                .listReturn,
+                handled
+                    && controller.textView.string == list
+                    && controller.multiCursorSelection?.ranges
+                        == [2..<2, 11..<11]
+            )
+        }
+        do {
+            // Real table cells, and the real Tab command: the table-cell
+            // navigation is the operation the policy refuses. Opening the
+            // grid popover on plain text tested neither.
+            let table = "| a | b |\n|---|---|\n| 1 | 2 |"
+            let (_, controller) = makeProbeEditor(source: table)
+            guard adoptProbeCarets(
+                controller,
+                offsets: [2, 22],
+                source: table
+            ) else {
+                guardLog(.tableCellTab, false, "reason=model")
+                return
+            }
+            let handled = controller.textView(
+                controller.textView,
+                doCommandBy: #selector(NSResponder.insertTab(_:))
+            )
+            guardLog(
+                .tableCellTab,
+                handled
+                    && controller.textView.string == table
+                    && controller.multiCursorSelection?.ranges
+                        == [2..<2, 22..<22]
+            )
+        }
+
+        // Collapse rows that need only the editor.
+        do {
+            let (_, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.linkPopover, false, "reason=model")
+                return
+            }
+            controller.presentLinkPopover()
+            guardLog(
+                .linkPopover,
+                controller.multiCursorSelection == nil
+                    && controller.caretOverlay?.isEmpty != false
+            )
+        }
+        do {
+            let bold = "**alpha** beta"
+            let (_, controller) = makeProbeEditor(source: bold)
+            guard adoptProbeCarets(controller, offsets: [2, 11], source: bold)
+            else {
+                guardLog(.smartSelectAll, false, "reason=model")
+                return
+            }
+            _ = controller.smartSelectAll()
+            guardLog(
+                .smartSelectAll,
+                controller.multiCursorSelection == nil
+            )
+        }
+
+        // Primary-only rows.
+        do {
+            let (_, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.find, false, "reason=model")
+                return
+            }
+            // The find bar owns focus while it navigates, so the native
+            // selection moving is not a user takeover. Navigation is
+            // primary-only: the set survives and its primary follows.
+            controller.textView.setSelectedRange(
+                NSRange(location: 11, length: 5)
+            )
+            guardLog(
+                .find,
+                controller.multiCursorSelection?.ranges == [6..<6, 11..<16]
+                    && controller.multiCursorSelection?.primaryRange
+                        == 11..<16,
+                "native=\(controller.textView.selectedRange().location)+\(controller.textView.selectedRange().length)"
+            )
+        }
+        do {
+            let (_, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.reviewMarker, false, "reason=model")
+                return
+            }
+            controller.select(range: 11..<16)
+            guardLog(
+                .reviewMarker,
+                controller.multiCursorSelection?.ranges == [6..<6, 11..<16]
+                    && controller.multiCursorSelection?.primaryRange
+                        == 11..<16
+                    && controller.textView.selectedRange()
+                        == NSRange(location: 11, length: 5)
+            )
+        }
+        do {
+            let (_, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.focusMode, false, "reason=model")
+                return
+            }
+            controller.isFocusModeEnabled = true
+            controller.refreshReviewMarkers()
+            guardLog(
+                .focusMode,
+                controller.multiCursorSelection?.ranges == [0..<0, 6..<6]
+            )
+        }
+        do {
+            let (_, controller) = makeProbeEditor(source: source)
+            guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+            else {
+                guardLog(.typewriter, false, "reason=model")
+                return
+            }
+            controller.isTypewriterEnabled = true
+            controller.keepCaretNearTypewriterLine()
+            guardLog(
+                .typewriter,
+                controller.multiCursorSelection?.ranges == [0..<0, 6..<6]
+            )
+        }
+
+        // Workspace rows.
+        let workspace = MarkdownWorkspace(readsDemoEnvironment: false)
+        let document = workspace.newDocument()
+        try? document.replaceSource(source)
+        let controller = workspace.controller(for: document)
+        guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+        else {
+            guardLog(.paletteEdit, false, "reason=model")
+            return
+        }
+        workspace.executePaletteCommand(.uppercase)
+        guardLog(
+            .paletteEdit,
+            controller.textView.string == source
+                && controller.multiCursorSelection?.ranges == [0..<0, 6..<6]
+        )
+        // Projection rows drive the viewer's real entry points, with the
+        // exact callback the workspace view installs. Calling
+        // `collapseMultiCursor` directly here passed even when the viewer
+        // stopped firing `onProjectionStart`.
+        var projectionFires = 0
+        let projectionViewer = MarkdownViewer(
+            ast: SonovoAST(),
+            headings: HeadingIndex(ast: SonovoAST()),
+            theme: MarkdownThemeStore.shared.defaultTheme(),
+            source: source,
+            onCommitBlockEdit: { _, _, _ in true },
+            onProjectionStart: {
+                projectionFires += 1
+                workspace.collapseMultiCursor(for: document)
+            }
+        )
+        guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+        else { return }
+        let blockLength = (source as NSString).length
+        let blockRange = SourceRange(
+            start: SourcePosition(line: 1, column: 0, offset: 0),
+            end: SourcePosition(
+                line: 1,
+                column: blockLength,
+                offset: blockLength
+            )
+        )
+        var firesBefore = projectionFires
+        projectionViewer.startBlockEditing(blockRange)
+        guardLog(
+            .blockProjection,
+            projectionFires == firesBefore + 1
+                && controller.multiCursorSelection == nil
+        )
+        guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+        else { return }
+        firesBefore = projectionFires
+        projectionViewer.startSourcePeek(blockRange)
+        guardLog(
+            .sourcePeek,
+            projectionFires == firesBefore + 1
+                && controller.multiCursorSelection == nil
+        )
+        guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+        else { return }
+        workspace.setMode(.rendered, for: document)
+        guardLog(
+            .modeSwitch,
+            controller.multiCursorSelection == nil
+                && controller.caretOverlay?.isEmpty != false
+        )
+        workspace.setMode(.source, for: document)
+        guard adoptProbeCarets(controller, offsets: [0, 6], source: source)
+        else { return }
+        try? document.replaceSource("reloaded alpha beta")
+        // Synchronisation runs in a separate MainActor task; a fixed sleep
+        // both flakes under load and never checks that the new source
+        // reached the view.
+        let reloaded = await waitUntil(2) {
+            controller.multiCursorSelection == nil
+                && controller.textView.string == "reloaded alpha beta"
+        }
+        guardLog(
+            .reload,
+            reloaded,
+            "source=\(controller.textView.string)"
+        )
+
+        let saveDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sonovo-mc08-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(
+            at: saveDirectory,
+            withIntermediateDirectories: true
+        )
+        let saveURL = saveDirectory.appendingPathComponent("saved.md")
+        guard adoptProbeCarets(
+            controller,
+            offsets: [0, 6],
+            source: controller.textView.string
+        ) else { return }
+        _ = await workspace.saveAs(document, to: saveURL)
+        guardLog(
+            .saveAs,
+            controller.multiCursorSelection == nil,
+            "saved=\(FileManager.default.fileExists(atPath: saveURL.path))"
+        )
+        guard adoptProbeCarets(
+            controller,
+            offsets: [0, 6],
+            source: controller.textView.string
+        ) else { return }
+        _ = await workspace.close(document)
+        guardLog(
+            .close,
+            controller.multiCursorSelection == nil
+        )
+        try? FileManager.default.removeItem(at: saveDirectory)
+
+        // Split focus: the pane being left is collapsed.
+        let splitWorkspace = MarkdownWorkspace(readsDemoEnvironment: false)
+        let first = splitWorkspace.newDocument()
+        try? first.replaceSource("alpha beta")
+        let second = splitWorkspace.newDocument()
+        try? second.replaceSource("gamma delta")
+        splitWorkspace.show(first, inPane: .secondary)
+        splitWorkspace.focus(second)
+        let firstController = splitWorkspace.controller(for: first)
+        let secondController = splitWorkspace.controller(for: second)
+        let firstReady = adoptProbeCarets(
+            firstController,
+            offsets: [0, 6],
+            source: "alpha beta"
+        )
+        let secondReady = adoptProbeCarets(
+            secondController,
+            offsets: [0, 6],
+            source: "gamma delta"
+        )
+        splitWorkspace.focus(first)
+        guardLog(
+            .splitFocus,
+            firstReady
+                && secondReady
+                && secondController.multiCursorSelection == nil
+                && firstController.multiCursorSelection != nil
+        )
+    }
+}
+
+private struct MCCompositionEvent {
+    let kind: String
+    let marked: String
+    let selectedRange: NSRange
+    let replacementRange: NSRange
+    let selectionBefore: NSRange
+}
+
+private final class MultiCursorProbeTextView: NSTextView {
+    var compositionEvents: [MCCompositionEvent] = []
+
+    override func setMarkedText(
+        _ string: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        compositionEvents.append(
+            MCCompositionEvent(
+                kind: "setMarkedText",
+                marked: (string as? String)
+                    ?? (string as? NSAttributedString)?.string
+                    ?? "",
+                selectedRange: selectedRange,
+                replacementRange: replacementRange,
+                selectionBefore: self.selectedRange()
+            )
+        )
+        super.setMarkedText(
+            string,
+            selectedRange: selectedRange,
+            replacementRange: replacementRange
+        )
+    }
+
+    override func insertText(
+        _ string: Any,
+        replacementRange: NSRange
+    ) {
+        compositionEvents.append(
+            MCCompositionEvent(
+                kind: "insertText",
+                marked: (string as? String)
+                    ?? (string as? NSAttributedString)?.string
+                    ?? "",
+                selectedRange: NSRange(location: NSNotFound, length: 0),
+                replacementRange: replacementRange,
+                selectionBefore: self.selectedRange()
+            )
+        )
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    override func unmarkText() {
+        compositionEvents.append(
+            MCCompositionEvent(
+                kind: "unmarkText",
+                marked: "",
+                selectedRange: NSRange(location: NSNotFound, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0),
+                selectionBefore: self.selectedRange()
+            )
+        )
+        super.unmarkText()
+    }
+}
+
+@MainActor
+private final class ProbeEchoModel: NSObject {
+    var offsets: [Int]
+    var primary: Int
+    var collapses = 0
+    /// Covers only the synchronous batch window. Asynchronous selection
+    /// restores still go through the comparison rule; this flag cannot mask
+    /// them because it is cleared before the apply call returns.
+    var suppressing = false
+
+    init(offsets: [Int], primary: Int) {
+        self.offsets = offsets
+        self.primary = max(0, min(primary, offsets.count - 1))
+        super.init()
+    }
+
+    var primaryRange: NSRange {
+        NSRange(location: offsets[primary], length: 0)
+    }
+
+    @objc func selectionChanged(_ note: Notification) {
+        guard !suppressing else { return }
+        guard let view = note.object as? NSTextView else { return }
+        let native = view.selectedRange()
+        guard native != primaryRange else { return }
+        offsets = [native.location]
+        primary = 0
+        collapses += 1
     }
 }
 #endif

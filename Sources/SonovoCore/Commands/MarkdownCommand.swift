@@ -50,6 +50,13 @@ public enum MarkdownCommandKind: Sendable, Equatable, Hashable {
     case collapseBlankLines
     /// Explicit CJK spacing and punctuation normalization.
     case formatCJK
+    /// Selection-only. Adds the next exact occurrence of the primary's
+    /// selected text, or of the word under its caret. The source is
+    /// unchanged; the result carries a caret set.
+    case addNextOccurrence
+    /// Selection-only. Selects every exact occurrence of the primary's text,
+    /// refusing beyond the caret cap. The source is unchanged.
+    case selectAllOccurrences
 }
 
 /// The list shapes a toggle can produce.
@@ -134,6 +141,10 @@ public struct MarkdownCommandContext: Sendable, Equatable {
     public var rootGeneration: UInt64
     /// The captured target for an action that must prove it still applies.
     public var target: MarkdownActionTarget?
+    /// The editor's live caret set, when more than one caret is placed. A
+    /// placement command needs every caret to choose where the next
+    /// occurrence or the whole set goes; other commands ignore it.
+    public var carets: MultiCursorSelection?
 
     public init(
         source: String,
@@ -145,7 +156,8 @@ public struct MarkdownCommandContext: Sendable, Equatable {
         identityGeneration: UInt64 = 0,
         sourceRevision: UInt64 = 0,
         rootGeneration: UInt64 = 0,
-        target: MarkdownActionTarget? = nil
+        target: MarkdownActionTarget? = nil,
+        carets: MultiCursorSelection? = nil
     ) {
         self.source = source
         self.selection = selection
@@ -157,6 +169,7 @@ public struct MarkdownCommandContext: Sendable, Equatable {
         self.sourceRevision = sourceRevision
         self.rootGeneration = rootGeneration
         self.target = target
+        self.carets = carets
     }
 }
 
@@ -167,12 +180,16 @@ public struct MarkdownCommandResult: Sendable, Equatable {
     public let actionName: String
     /// The minimal UTF-16 range that differs from the input.
     public let changedRange: Range<Int>
+    /// A caret set for a selection-only command. The source is unchanged and
+    /// the editor adopts this set instead of a single selection.
+    public let carets: MultiCursorSelection?
 
     public init(
         source: String,
         selection: Range<Int>,
         actionName: String,
-        previousSource: String
+        previousSource: String,
+        carets: MultiCursorSelection? = nil
     ) {
         self.source = source
         self.selection = selection
@@ -181,6 +198,7 @@ public struct MarkdownCommandResult: Sendable, Equatable {
             from: previousSource,
             to: source
         )
+        self.carets = carets
     }
 
     private static func minimalChange(from old: String, to new: String) -> Range<Int> {
@@ -238,9 +256,10 @@ public enum MarkdownCommandError: Error, Equatable {
 
 /// The single command registry.
 ///
-/// Every command is a pure source transform with an explicit resulting
-/// selection. The rail, menus, palette, and keyboard all call `apply`; there is
-/// no second implementation path.
+/// Every command is a pure transform with an explicit resulting selection.
+/// A source edit returns the new source; a selection-only placement command
+/// returns the same source and a caret set. The rail, menus, palette, and
+/// keyboard all call `apply`; there is no second implementation path.
 public struct MarkdownCommandRegistry: Sendable {
     public init() {}
 
@@ -267,9 +286,52 @@ public struct MarkdownCommandRegistry: Sendable {
             return target.isEmpty || MarkdownSecurity.isValidWikiTarget(target)
         case .replaceAll(let query, _, _):
             return !query.isEmpty
+        case .addNextOccurrence:
+            guard let selection = currentSelection(context) else {
+                return false
+            }
+            return (try? OccurrenceSearch.addingNext(
+                to: selection,
+                in: context.source
+            )) != nil
+        case .selectAllOccurrences:
+            guard let selection = currentSelection(context) else {
+                return false
+            }
+            return (try? OccurrenceSearch.selectingAll(
+                in: selection,
+                source: context.source
+            )) != nil
         default:
             return true
         }
+    }
+
+    /// The editor's caret set, or a one-caret set built from the native
+    /// selection. nil when the selection cannot name a valid caret (it never
+    /// should: AppKit keeps native selections on grapheme boundaries).
+    private func currentSelection(
+        _ context: MarkdownCommandContext
+    ) -> MultiCursorSelection? {
+        if let carets = context.carets, !carets.carets.isEmpty {
+            return carets
+        }
+        let ns = context.source as NSString
+        guard context.selection.lowerBound >= 0,
+              context.selection.upperBound >= context.selection.lowerBound,
+              context.selection.upperBound <= ns.length else {
+            return nil
+        }
+        return try? MultiCursorSelection(
+            [
+                MultiCursorSelection.Caret(
+                    anchor: context.selection.lowerBound,
+                    active: context.selection.upperBound
+                )
+            ],
+            primary: 0,
+            source: context.source
+        )
     }
 
     public func title(for command: MarkdownCommandKind) -> String {
@@ -326,6 +388,8 @@ public struct MarkdownCommandRegistry: Sendable {
         case .trimTrailingSpaces: "Remove Trailing Spaces"
         case .collapseBlankLines: "Collapse Blank Lines"
         case .formatCJK: "Format CJK Spacing"
+        case .addNextOccurrence: "Add Next Occurrence"
+        case .selectAllOccurrences: "Select All Occurrences"
         }
     }
 
@@ -489,7 +553,48 @@ public struct MarkdownCommandRegistry: Sendable {
             )
         case .formatCJK:
             return formatCJK(context)
+        case .addNextOccurrence:
+            return try placement(.addingNext, command, context)
+        case .selectAllOccurrences:
+            return try placement(.selectingAll, command, context)
         }
+    }
+
+    private enum Placement {
+        case addingNext
+        case selectingAll
+    }
+
+    /// Selection-only placement. The source is returned unchanged and the
+    /// resulting caret set travels in the result for the editor to adopt.
+    private func placement(
+        _ mode: Placement,
+        _ command: MarkdownCommandKind,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        guard let selection = currentSelection(context) else {
+            throw MarkdownCommandError.invalidSelection
+        }
+        let placed: MultiCursorSelection
+        switch mode {
+        case .addingNext:
+            placed = try OccurrenceSearch.addingNext(
+                to: selection,
+                in: context.source
+            )
+        case .selectingAll:
+            placed = try OccurrenceSearch.selectingAll(
+                in: selection,
+                source: context.source
+            )
+        }
+        return MarkdownCommandResult(
+            source: context.source,
+            selection: placed.primaryRange,
+            actionName: title(for: command),
+            previousSource: context.source,
+            carets: placed
+        )
     }
 
     /// One whole-document replacement; the editor applies it as one undo
