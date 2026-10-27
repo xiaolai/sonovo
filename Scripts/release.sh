@@ -112,14 +112,16 @@ upstream=$(grep -a -r -o -E '/Users/[A-Za-z0-9._-]+' "$APP/Contents/MacOS/Sonovo
     | sort -u | grep -v -F -- "$HOME" || true)
 [ -z "$upstream" ] || note "release: known third-party build path in the binary: $(echo "$upstream" | tr '\n' ' ')"
 
-# Developer ID and a secure timestamp. Only the app gets the hardened runtime and the
-# microphone entitlement; a DMG is not an executable and needs neither.
+# Developer ID and a secure timestamp. The app adds the hardened runtime and the
+# microphone entitlement; a nested executable gets the hardened runtime without the
+# entitlement it does not need; a DMG is not an executable and needs neither.
 sign_with_timestamp() {
-    local artifact=$1 attempt runtime=$2
+    local artifact=$1 attempt mode=$2
     local -a opts=()
-    if [ "$runtime" = runtime ]; then
-        opts=(--options runtime --entitlements "$ENTITLEMENTS")
-    fi
+    case "$mode" in
+        app) opts=(--options runtime --entitlements "$ENTITLEMENTS") ;;
+        nested) opts=(--options runtime) ;;
+    esac
 
     for (( attempt = 1; attempt <= TRIES; attempt++ )); do
         if [ "${#opts[@]}" -gt 0 ]; then
@@ -144,7 +146,29 @@ sign_with_timestamp() {
     done
 }
 
-sign_with_timestamp "$APP" runtime
+# Nested executables are signed before the app: the notary requires every
+# Mach-O in the bundle to carry a Developer ID signature, the hardened runtime,
+# and a secure timestamp of its own. The app is signed last so its seal covers
+# the nested signatures.
+while IFS= read -r -d '' nested; do
+    case "$nested" in
+        "$APP/Contents/MacOS/"*) continue ;;
+    esac
+    if file -b "$nested" | grep -q 'Mach-O'; then
+        sign_with_timestamp "$nested" nested
+        codesign --verify --strict "$nested" \
+            || fail "the nested signature does not verify: $nested"
+        nested_described=$(codesign -dvvv "$nested" 2>&1 || true)
+        grep -q '^Authority=Developer ID Application:' <<<"$nested_described" \
+            || fail "nested code is not signed by a Developer ID Application identity: $nested"
+        grep -q 'flags=0x10000(runtime)' <<<"$nested_described" \
+            || fail "nested code is not signed with the hardened runtime: $nested"
+        grep -q '^Timestamp=' <<<"$nested_described" \
+            || fail "nested code is not signed with a secure timestamp: $nested"
+    fi
+done < <(find "$APP/Contents" -type f -perm -u+x -print0)
+
+sign_with_timestamp "$APP" app
 codesign --verify --strict --deep "$APP" || fail "the app signature does not verify"
 described=$(codesign -dvvv "$APP" 2>&1 || true)
 grep -q '^Authority=Developer ID Application:' <<<"$described" || fail "the app is not signed by a Developer ID Application identity"
