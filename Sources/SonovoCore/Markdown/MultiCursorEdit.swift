@@ -283,7 +283,6 @@ public enum MultiCursorEdit {
                 )
                 continue
             }
-            let edit = edits[order[index]]
             let position = edgeOfCluster(
                 at: baseline
                     + shiftBelow

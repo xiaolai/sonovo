@@ -29,7 +29,7 @@ struct TextKitLineProvider: CaretLineProvider {
             let base = content.offset(
                 from: content.documentRange.location,
                 to: fragment.rangeInElement.location
-            ) ?? 0
+            )
             for line in fragment.textLineFragments {
                 let range = line.characterRange
                 let lower = base + range.location

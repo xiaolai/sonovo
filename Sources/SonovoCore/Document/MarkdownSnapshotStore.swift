@@ -461,7 +461,7 @@ public actor MarkdownSnapshotStore {
         currentDiskBytes: Data
     ) -> MarkdownReviewDecision {
         let index = readIndex()
-        guard var transitions = index.transitions,
+        guard let transitions = index.transitions,
               let position = transitions.firstIndex(where: {
                   $0.id == transitionID
               }) else {
