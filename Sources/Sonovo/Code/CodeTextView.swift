@@ -69,13 +69,21 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     private(set) var lastCommandError: Error?
 
     private var settings: CodeEditorSettings
-    private var highlightTask: Task<Void, Never>?
-    private var visibleHighlightTask: Task<Void, Never>?
-    private var pendingLine: Int?
-    private var compositionBaseline: String?
-    private var suppressSync = false
-    private var scrollObserver: NSObjectProtocol?
-    private var symbolTask: Task<Void, Never>?
+    // Work state, not view state. The controller is @Observable, and SwiftUI
+    // invalidates a view that touched this object when a stored property it
+    // can see changes; scheduling a highlight from `updateNSView`'s sync on
+    // every update re-entered the transaction and the document never finished
+    // opening. These are ignored so internal work cannot drive the view.
+    /// Internal so the observation regression test can prove scheduling work
+    /// never reaches SwiftUI as state; nothing outside this type reads it.
+    @ObservationIgnored
+    private(set) var highlightTask: Task<Void, Never>?
+    @ObservationIgnored private var visibleHighlightTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingLine: Int?
+    @ObservationIgnored private var compositionBaseline: String?
+    @ObservationIgnored private var suppressSync = false
+    @ObservationIgnored private var scrollObserver: NSObjectProtocol?
+    @ObservationIgnored private var symbolTask: Task<Void, Never>?
     /// The language the current snapshot was lexed with. Save As can change
     /// the language without changing the revision or the text.
     var highlightLanguage: CodeLanguage? { highlightSnapshot?.language }
@@ -86,13 +94,13 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         let symbols: [CodeSymbol]
     }
 
-    private var symbolCache: SymbolCache?
+    @ObservationIgnored private var symbolCache: SymbolCache?
     private struct SymbolScan {
         let revision: UInt64
         let language: CodeLanguage
         let task: Task<[CodeSymbol], Never>
     }
-    private var sharedSymbolScan: SymbolScan?
+    @ObservationIgnored private var sharedSymbolScan: SymbolScan?
 
     private final class WeakController: @unchecked Sendable {
         weak var value: CodeEditorController?

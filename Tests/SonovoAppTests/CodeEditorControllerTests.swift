@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import XCTest
 @testable import Sonovo
 
@@ -217,6 +218,38 @@ final class CodeEditorControllerTests: XCTestCase {
         )
     }
 
+    /// The controller is `@Observable`, so a write to any stored property can
+    /// invalidate a view that touched the object. `syncFromDocument` runs from
+    /// `updateNSView`, and while the first lex is pending it schedules one on
+    /// every call; writing the task re-entered the update and the document
+    /// never finished opening. Scheduling work is implementation state, not
+    /// view state, and must not be observable.
+    func testSchedulingAHighlightIsNotObservableState() async throws {
+        let root = try support.makeRoot(files: [
+            "data.json": CodeTestData.utf8("{\n  \"a\": 1\n}\n")
+        ])
+        let document = CodeDocument(
+            url: root.appendingPathComponent("data.json")
+        )
+        await document.load()
+        let controller = CodeEditorController(
+            document: document,
+            settings: CodeEditorSettings()
+        )
+
+        let invalidated = ObservationFlag()
+        withObservationTracking {
+            _ = controller.highlightTask
+        } onChange: {
+            invalidated.raise()
+        }
+        controller.attach()
+        XCTAssertFalse(
+            invalidated.isRaised,
+            "scheduling published internal work state; SwiftUI would re-enter"
+        )
+    }
+
     private func waitUntil(
         _ description: String,
         timeout: TimeInterval = 8,
@@ -236,6 +269,26 @@ final class CodeEditorControllerTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(10))
         }
+    }
+}
+
+/// A one-way flag for observation callbacks, which are `@Sendable`; the
+/// write happens synchronously on the main thread, but the compiler cannot
+/// see that.
+private final class ObservationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+
+    func raise() {
+        lock.lock()
+        raised = true
+        lock.unlock()
+    }
+
+    var isRaised: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return raised
     }
 }
 
