@@ -155,8 +155,16 @@ final class CodeDocument: Identifiable {
     private let reader: CodeFileReader
     private var firstPendingEdit: Date?
     private var lastEdit: Date?
-    private var saveInFlight = false
-    private var saveWaiters: [CheckedContinuation<Void, Never>] = []
+    private let saveSlot = SaveSlot()
+    @ObservationIgnored private var externalCheckRetryTask: Task<Void, Never>?
+    /// True only while a write owns the save slot. Checks and reverts also use
+    /// the slot, but they must not block a conflict decision the user just
+    /// made; only an in-flight write can.
+    @ObservationIgnored private var isSaving = false
+    /// Bumped when the user's conflict decision is applied immediately. A
+    /// check that was reading the disk when the decision landed must discard
+    /// its result instead of overwriting the resolution.
+    @ObservationIgnored private var resolutionGeneration: UInt64 = 0
     private var pendingArtifactsToClean: [URL] = []
     private var queuedResolution: Task<Void, Never>?
     private var queuedResolutionGeneration: UInt64 = 0
@@ -504,8 +512,8 @@ final class CodeDocument: Identifiable {
         }
         if !isDirty, diskSnapshot != nil { return nil }
 
-        await acquireSaveSlot()
-        defer { releaseSaveSlot() }
+        try await acquireSaveSlotForSave()
+        defer { releaseSaveSlotForSave() }
         guard !isClosed else { throw CodeDocumentError.closed }
         guard isReady else { throw CodeDocumentError.notReady }
         if !isDirty, diskSnapshot != nil { return nil }
@@ -600,8 +608,8 @@ final class CodeDocument: Identifiable {
 
         let target = MarkdownSecurity.canonical(url.standardizedFileURL)
 
-        await acquireSaveSlot()
-        defer { releaseSaveSlot() }
+        try await acquireSaveSlotForSave()
+        defer { releaseSaveSlotForSave() }
         guard !isClosed, isReady else { throw CodeDocumentError.closed }
         // A watcher may have adopted a mixed-ending, lone-CR, or otherwise
         // unsupported representation while this call waited for the slot.
@@ -718,7 +726,7 @@ final class CodeDocument: Identifiable {
         ) }
         guard !isClosed, isReady else { throw CodeDocumentError.notReady }
 
-        await acquireSaveSlot()
+        try await acquireSaveSlot()
         defer { releaseSaveSlot() }
         guard !isClosed, isReady else { throw CodeDocumentError.closed }
         // A watcher can establish a conflict while this call waits for the
@@ -768,13 +776,40 @@ final class CodeDocument: Identifiable {
 
     // MARK: - External changes
 
+    /// A save-slot timeout means the check could not run; the caller must not
+    /// read that as "no change". The retry is coalesced and keeps trying while
+    /// the document is open, so a wedged save cannot hide a disk change.
+    private func scheduleExternalCheckRetry(projectVisible: Bool) {
+        guard externalCheckRetryTask == nil else { return }
+        externalCheckRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, !Task.isCancelled else { return }
+            self.externalCheckRetryTask = nil
+            guard !self.isClosed else { return }
+            _ = await self.checkExternalChange(projectVisible: projectVisible)
+        }
+    }
+
     /// Revalidates the disk. Exact bytes, not soft text equality: a BOM, line
     /// ending, or final-newline change is a conflict while dirty.
     func checkExternalChange(projectVisible: Bool) async -> CodeExternalChange {
-        await acquireSaveSlot()
+        do {
+            try await acquireSaveSlot()
+        } catch {
+            // A stalled save owns the slot. Returning "no change" here would
+            // be a silent miss, so a coalesced retry is guaranteed once the
+            // slot's own wait window has passed.
+            scheduleExternalCheckRetry(projectVisible: projectVisible)
+            return .none
+        }
         defer { releaseSaveSlot() }
         guard !isClosed, isReady else { return .none }
 
+        // A check holds the slot, but the banner's immediate decision does
+        // not wait for it. If the decision lands while this read is in
+        // flight, the result describes a conflict the user already resolved
+        // and must not overwrite it.
+        let resolutionAtStart = resolutionGeneration
         let url = fileURL
         let reader = self.reader
         let outcome: CodeFileReadOutcome
@@ -783,6 +818,9 @@ final class CodeDocument: Identifiable {
                 try reader.readSnapshot(url: url)
             }.value
         } catch {
+            guard resolutionAtStart == resolutionGeneration else {
+                return .none
+            }
             let nsError = error as NSError
             if nsError.domain == NSCocoaErrorDomain,
                nsError.code == NSFileReadNoSuchFileError
@@ -794,6 +832,9 @@ final class CodeDocument: Identifiable {
             return .none
         }
 
+        guard resolutionAtStart == resolutionGeneration else {
+            return .none
+        }
         switch outcome {
         case .refused(.tooLarge):
             // The file crossed the read cap. Keep the buffer editable so the
@@ -814,6 +855,9 @@ final class CodeDocument: Identifiable {
             let bounded = try? await Task.detached(priority: .userInitiated) {
                 try reader.boundedData(at: url)
             }.value
+            guard resolutionAtStart == resolutionGeneration else {
+                return .none
+            }
             let snapshot: DiskSnapshot
             let diskIsExact: Bool
             if case .data(let data)? = bounded {
@@ -885,8 +929,13 @@ final class CodeDocument: Identifiable {
         // about to invalidate — or install text the write then replaces
         // while the buffer looks clean. After the slot, the conflict is
         // read again; a save that resolved it already makes this a no-op.
-        await acquireSaveSlot()
-        defer { releaseSaveSlot() }
+        do {
+            try await acquireSaveSlotForSave()
+        } catch {
+            lastError = String(describing: error)
+            return
+        }
+        defer { releaseSaveSlotForSave() }
         applyConflictResolution(resolution)
     }
 
@@ -906,7 +955,8 @@ final class CodeDocument: Identifiable {
     /// click returns and cannot be lost to a close or termination.
     @discardableResult
     func resolveConflictImmediately(_ resolution: CodeResolution) -> Bool {
-        guard !saveInFlight else { return false }
+        guard !isSaving else { return false }
+        resolutionGeneration &+= 1
         applyConflictResolution(resolution)
         return true
     }
@@ -1216,22 +1266,24 @@ final class CodeDocument: Identifiable {
         )
     }
 
-    private func acquireSaveSlot() async {
-        while saveInFlight {
-            await withCheckedContinuation { continuation in
-                saveWaiters.append(continuation)
-            }
-        }
-        saveInFlight = true
+    private func acquireSaveSlot() async throws {
+        try await saveSlot.acquire()
+    }
+
+    /// A write acquisition also marks the document as saving, which is what
+    /// blocks the banner's immediate conflict resolution.
+    private func acquireSaveSlotForSave() async throws {
+        try await acquireSaveSlot()
+        isSaving = true
+    }
+
+    private func releaseSaveSlotForSave() {
+        isSaving = false
+        releaseSaveSlot()
     }
 
     private func releaseSaveSlot() {
-        saveInFlight = false
-        let waiters = saveWaiters
-        saveWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
+        saveSlot.release()
     }
 }
 

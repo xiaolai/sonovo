@@ -245,10 +245,17 @@ public struct MarkdownFileStore: Sendable {
 
     public func save(_ request: SaveRequest) throws -> SaveOutcome {
         let workspace = try prepare(request)
+        let outcome: SaveOutcome
         if !workspace.exists {
-            return try writeNewFile(request, workspace)
+            outcome = try writeNewFile(request, workspace)
+        } else {
+            outcome = try replaceExistingFile(request, workspace)
         }
-        return try replaceExistingFile(request, workspace)
+        // The project watcher must not rescan for Sonovo's own write. The
+        // record is made only after the swap verified, so a failed save does
+        // not suppress a real external event.
+        SonovoWriteJournal.record(path: request.destination.path)
+        return outcome
     }
 
     /// The files and identity of one save attempt.

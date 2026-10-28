@@ -390,16 +390,10 @@ enum MediaAudioExporter {
             )
         }
         receiver.finish()
-        await withCheckedContinuation { continuation in
-            writer.finishWriting {
-                continuation.resume()
-            }
-        }
-        guard writer.status == .completed else {
-            throw writer.error ?? MediaExportError.exportFailed(
-                "The audio writer did not complete."
-            )
-        }
+        try await finishAudioWriter(
+            writer,
+            failure: "The audio writer did not complete."
+        )
         await progress(1)
     }
 
@@ -507,17 +501,129 @@ private enum MediaAudioRenderer {
             )
         }
         receiver.finish()
+        try await finishAudioWriter(
+            writer,
+            failure: "The faded audio writer did not complete."
+        )
+        await progress(1)
+    }
+}
+
+/// Completes an audio writer with a deadline and cancellation.
+///
+/// `finishWriting` has no timeout of its own: a stalled writer left the
+/// checked continuation suspended for the lifetime of the process, so the
+/// export task never returned and its cancellation was ignored.
+private func finishAudioWriter(
+    _ writer: AVAssetWriter,
+    failure: String
+) async throws {
+    let gate = FinishWritingGate()
+    let box = AudioWriterBox(writer)
+    let deadline = Task { @MainActor in
+        try? await Task.sleep(for: .seconds(30))
+        guard !Task.isCancelled else { return }
+        if gate.timeout() {
+            box.writer.cancelWriting()
+        }
+    }
+    defer { deadline.cancel() }
+    await withTaskCancellationHandler {
         await withCheckedContinuation { continuation in
-            writer.finishWriting {
-                continuation.resume()
+            gate.install(continuation)
+            box.writer.finishWriting {
+                gate.finish()
             }
         }
-        guard writer.status == .completed else {
-            throw writer.error ?? MediaExportError.exportFailed(
-                "The faded audio writer did not complete."
-            )
+    } onCancel: {
+        box.writer.cancelWriting()
+        gate.cancel()
+    }
+    switch gate.outcome {
+    case .finished:
+        break
+    case .timedOut:
+        throw MediaExportError.exportFailed(
+            "Finishing the export timed out."
+        )
+    case .cancelled:
+        throw CancellationError()
+    case .pending:
+        break
+    }
+    guard writer.status == .completed else {
+        throw writer.error ?? MediaExportError.exportFailed(failure)
+    }
+}
+
+/// Carries the non-Sendable writer into the two cancellation paths. The
+/// writer is not used concurrently there: the deadline fires only while
+/// `finishWriting` is still pending, and the cancellation handler runs once.
+private final class AudioWriterBox: @unchecked Sendable {
+    let writer: AVAssetWriter
+
+    init(_ writer: AVAssetWriter) {
+        self.writer = writer
+    }
+}
+
+/// One-shot gate for the writer completion, its deadline, and cancellation.
+private final class FinishWritingGate: @unchecked Sendable {
+    enum Outcome {
+        case pending
+        case finished
+        case timedOut
+        case cancelled
+    }
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var state: Outcome = .pending
+
+    func install(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if state != .pending {
+            lock.unlock()
+            continuation.resume()
+            return
         }
-        await progress(1)
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func finish() {
+        settle(.finished)
+    }
+
+    /// Returns true when the timeout won the race and the writer still needs
+    /// cancelling.
+    func timeout() -> Bool {
+        settle(.timedOut)
+    }
+
+    func cancel() {
+        settle(.cancelled)
+    }
+
+    var outcome: Outcome {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
+    }
+
+    @discardableResult
+    private func settle(_ outcome: Outcome) -> Bool {
+        lock.lock()
+        guard state == .pending else {
+            lock.unlock()
+            return false
+        }
+        state = outcome
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+        return true
     }
 }
 

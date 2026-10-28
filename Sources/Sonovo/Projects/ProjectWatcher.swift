@@ -1,5 +1,6 @@
 import CoreServices
 import Foundation
+import SonovoCore
 
 /// The watch seam. Production uses FSEvents; tests inject a source they can
 /// trigger manually, so reconciliation is testable without waiting on the
@@ -27,6 +28,9 @@ final class FSEventSource: ProjectWatching, @unchecked Sendable {
     private let queue = DispatchQueue(label: "sonovo.project-watch")
     private var stream: FSEventStreamRef?
     private(set) var isRunning = false
+    private let recheckLock = NSLock()
+    private var recheckScheduled = false
+    private var pendingRecheckPaths: Set<String> = []
 
     init(root: URL, onChange: @escaping @Sendable () -> Void) {
         path = root.path
@@ -42,12 +46,37 @@ final class FSEventSource: ProjectWatching, @unchecked Sendable {
             release: nil,
             copyDescription: nil
         )
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
-            guard let info else { return }
+        let callback: FSEventStreamCallback = { _, info, count, eventPaths, _, _ in
+            guard let info, count > 0 else { return }
             let source = Unmanaged<FSEventSource>
                 .fromOpaque(info)
                 .takeUnretainedValue()
-            source.onChange()
+            let paths = eventPaths.assumingMemoryBound(
+                to: UnsafePointer<CChar>?.self
+            )
+            var sawExternalChange = false
+            var suppressed: [String] = []
+            for index in 0..<count {
+                guard let raw = paths[index] else {
+                    sawExternalChange = true
+                    break
+                }
+                let eventPath = String(cString: raw)
+                if FSEventSource.shouldIgnore(path: eventPath) {
+                    suppressed.append(eventPath)
+                } else {
+                    sawExternalChange = true
+                    break
+                }
+            }
+            if sawExternalChange {
+                source.onChange()
+            } else if !suppressed.isEmpty {
+                // The batch was Sonovo's own writes. Re-stat them once the
+                // suppression window has expired: an external write that
+                // landed inside it changed the file and must still rescan.
+                source.scheduleJournalRecheck(suppressed)
+            }
         }
         let paths = [path] as CFArray
         guard let stream = FSEventStreamCreate(
@@ -89,5 +118,42 @@ final class FSEventSource: ProjectWatching, @unchecked Sendable {
 
     deinit {
         stop()
+    }
+
+    /// Sonovo's own writes are not project changes. A save records its
+    /// destination; the store's hidden transactional files are internal by
+    /// name. Anything else is external and schedules a rescan.
+    static func shouldIgnore(path: String) -> Bool {
+        SonovoWriteJournal.isInternalArtifact(path: path)
+            || SonovoWriteJournal.wasRecentlyWritten(path: path)
+    }
+
+    /// Runs one stat comparison after the journal window closes. Coalesced so
+    /// a burst of own-write events schedules at most one check, while every
+    /// path in the burst is still examined.
+    private func scheduleJournalRecheck(_ paths: [String]) {
+        recheckLock.lock()
+        pendingRecheckPaths.formUnion(paths)
+        if recheckScheduled {
+            recheckLock.unlock()
+            return
+        }
+        recheckScheduled = true
+        recheckLock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + SonovoWriteJournal.recentWriteWindow + 0.2
+        ) { [weak self] in
+            guard let self else { return }
+            self.recheckLock.lock()
+            self.recheckScheduled = false
+            let checked = self.pendingRecheckPaths
+            self.pendingRecheckPaths.removeAll()
+            self.recheckLock.unlock()
+            if checked.contains(where: {
+                SonovoWriteJournal.changedSinceRecorded(path: $0)
+            }) {
+                self.onChange()
+            }
+        }
     }
 }

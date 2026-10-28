@@ -93,6 +93,36 @@ final class TmuxActionCoordinatorTests: XCTestCase {
         XCTAssertEqual(service.sessions.count, 1)
     }
 
+    /// A queued action that is cancelled must not dispatch once the slot
+    /// frees. Cancellation resumes the waiter; without the grant check it
+    /// looked like acquisition and the kill ran.
+    func testCancelledQueuedActionDoesNotRun() async {
+        let observation = TmuxTestData.observation()
+        let service = FakeHygieneService(sessions: [observation])
+        service.snapshotDelay = 0.3
+        let coordinator = makeCoordinator(service)
+
+        let holder = Task { @MainActor in
+            await coordinator.endSession(named: observation.name)
+        }
+        try? await Task.sleep(for: .milliseconds(60))
+        let queued = Task { @MainActor in
+            await coordinator.endSession(named: observation.name)
+        }
+        try? await Task.sleep(for: .milliseconds(40))
+        queued.cancel()
+        let queuedOutcome = await queued.value
+        guard case .notAttempted = queuedOutcome else {
+            return XCTFail("expected notAttempted, got \(queuedOutcome)")
+        }
+        _ = await holder.value
+        XCTAssertEqual(
+            service.killRequests.count,
+            1,
+            "the cancelled queued action dispatched a kill"
+        )
+    }
+
     // MARK: Bulk transition matrix
 
     private func currentState(

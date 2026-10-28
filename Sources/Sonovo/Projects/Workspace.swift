@@ -195,6 +195,10 @@ final class Workspace {
         let tabRevision = project.tabRevision
         project.isRestoringSelection = true
         await project.load()
+        // `load` bounds its wait so navigation cannot stall; recovery must
+        // not restore against a partial index, so it waits for the scan
+        // that is still running (cancellably, and only until settle).
+        await project.awaitScanSettled()
         project.isRestoringSelection = false
         // Match the instance, not the path: closing and reopening the same
         // folder creates a new project whose saved selection this stale

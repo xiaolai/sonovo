@@ -1365,6 +1365,13 @@ enum BoundedProcessRunner {
         maxBytes: Int,
         isCancelled: @Sendable () -> Bool = { false }
     ) -> Output? {
+        // This runner polls, sleeps, and waits for termination by design.
+        // Calling it from the main thread would freeze the UI for the whole
+        // deadline; every production caller is already off-actor.
+        precondition(
+            !Thread.isMainThread,
+            "BoundedProcessRunner.run blocks; call it off the main thread"
+        )
         let budget = deadline.timeIntervalSinceNow
         guard maxBytes > 0, budget > 0 else { return nil }
         // Convert the caller's wall-clock deadline to a monotonic instant.

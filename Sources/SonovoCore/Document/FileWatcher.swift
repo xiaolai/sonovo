@@ -20,6 +20,17 @@ public final class MarkdownFileWatcher: @unchecked Sendable {
     private var fileDescriptor: Int32 = -1
     private var active = false
 
+    /// Content-change events only. `.attrib` is deliberately absent: reading
+    /// the file updates atime, which raises `.attrib`, which the consumer
+    /// answers by reading the file again — a self-sustaining event loop with
+    /// no content change.
+    static var directoryEventMask: DispatchSource.FileSystemEvent {
+        [.write, .rename, .delete, .extend, .link]
+    }
+    static var fileEventMask: DispatchSource.FileSystemEvent {
+        [.write, .delete, .rename, .extend]
+    }
+
     public init(fileURL: URL, handler: @escaping @Sendable () -> Void) {
         self.fileURL = fileURL
         self.directory = fileURL.deletingLastPathComponent()
@@ -77,7 +88,7 @@ public final class MarkdownFileWatcher: @unchecked Sendable {
 
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete, .attrib, .extend, .link],
+            eventMask: Self.directoryEventMask,
             queue: queue
         )
         src.setEventHandler { [weak self] in
@@ -115,7 +126,7 @@ public final class MarkdownFileWatcher: @unchecked Sendable {
 
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
-            eventMask: [.write, .delete, .rename, .attrib, .extend],
+            eventMask: Self.fileEventMask,
             queue: queue
         )
         src.setEventHandler { [weak self] in

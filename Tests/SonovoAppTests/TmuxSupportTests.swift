@@ -492,28 +492,32 @@ final class TmuxTypedTransportTests: XCTestCase {
 }
 
 final class TmuxBoundedRunnerTests: XCTestCase {
-    func testCancellationStopsTheChild() {
+    func testCancellationStopsTheChild() async {
         let start = Date()
-        let output = BoundedProcessRunner.run(
-            executable: "/bin/sh",
-            arguments: ["-c", "sleep 5"],
-            deadline: Date().addingTimeInterval(5),
-            maxBytes: 1024,
-            isCancelled: { true }
-        )
+        let output = await Task.detached {
+            BoundedProcessRunner.run(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 5"],
+                deadline: Date().addingTimeInterval(5),
+                maxBytes: 1024,
+                isCancelled: { true }
+            )
+        }.value
         XCTAssertNotNil(output)
         XCTAssertTrue(output?.cancelled == true)
         XCTAssertLessThan(Date().timeIntervalSince(start), 3)
     }
 
-    func testTimeoutKeepsPartialOutputAndTerminates() {
+    func testTimeoutKeepsPartialOutputAndTerminates() async {
         let start = Date()
-        let output = BoundedProcessRunner.run(
-            executable: "/bin/sh",
-            arguments: ["-c", "printf canary; sleep 5"],
-            deadline: Date().addingTimeInterval(0.2),
-            maxBytes: 1024
-        )
+        let output = await Task.detached {
+            BoundedProcessRunner.run(
+                executable: "/bin/sh",
+                arguments: ["-c", "printf canary; sleep 5"],
+                deadline: Date().addingTimeInterval(0.2),
+                maxBytes: 1024
+            )
+        }.value
         XCTAssertNotNil(output)
         XCTAssertTrue(output?.timedOut == true)
         XCTAssertEqual(
@@ -523,14 +527,16 @@ final class TmuxBoundedRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 3)
     }
 
-    func testByteCapTruncatesAndTerminates() {
+    func testByteCapTruncatesAndTerminates() async {
         let start = Date()
-        let output = BoundedProcessRunner.run(
-            executable: "/bin/sh",
-            arguments: ["-c", "yes"],
-            deadline: Date().addingTimeInterval(5),
-            maxBytes: 4096
-        )
+        let output = await Task.detached {
+            BoundedProcessRunner.run(
+                executable: "/bin/sh",
+                arguments: ["-c", "yes"],
+                deadline: Date().addingTimeInterval(5),
+                maxBytes: 4096
+            )
+        }.value
         XCTAssertNotNil(output)
         XCTAssertTrue(output?.truncated == true)
         XCTAssertLessThanOrEqual(output?.stdout.count ?? 0, 4096)

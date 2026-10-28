@@ -73,8 +73,7 @@ public final class SubtitleDocument: Identifiable {
     private var parseRequestID: UInt64 = 0
     private var firstPendingEdit: Date?
     private var lastEdit: Date?
-    private var saveInFlight = false
-    private var saveWaiters: [CheckedContinuation<Void, Never>] = []
+    private let saveSlot = SaveSlot()
     private var pendingArtifactsToClean: [URL] = []
     private var pendingResolution: ExternalResolution?
 
@@ -372,7 +371,7 @@ public final class SubtitleDocument: Identifiable {
     // MARK: - External changes
 
     public func resolveExternalChange(_ resolution: ExternalResolution) {
-        guard !saveInFlight else {
+        guard !saveSlot.isHeld else {
             pendingResolution = resolution
             return
         }
@@ -431,7 +430,7 @@ public final class SubtitleDocument: Identifiable {
             return nil
         }
 
-        await acquireSaveSlot()
+        try await acquireSaveSlot()
         defer { releaseSaveSlot() }
 
         guard !isClosed else { throw SubtitleDocumentError.closed }
@@ -539,7 +538,7 @@ public final class SubtitleDocument: Identifiable {
 
     /// Revalidates the disk. Watcher events are hints; this is authoritative.
     public func checkExternalChange() async throws -> ExternalChange {
-        await acquireSaveSlot()
+        try await acquireSaveSlot()
         defer { releaseSaveSlot() }
 
         guard !isClosed else { throw SubtitleDocumentError.closed }
@@ -712,22 +711,12 @@ public final class SubtitleDocument: Identifiable {
         isReadOnly = isLarge
     }
 
-    private func acquireSaveSlot() async {
-        while saveInFlight {
-            await withCheckedContinuation { continuation in
-                saveWaiters.append(continuation)
-            }
-        }
-        saveInFlight = true
+    private func acquireSaveSlot() async throws {
+        try await saveSlot.acquire()
     }
 
     private func releaseSaveSlot() {
-        saveInFlight = false
-        let waiters = saveWaiters
-        saveWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
+        saveSlot.release()
 
         if let pending = pendingResolution {
             pendingResolution = nil

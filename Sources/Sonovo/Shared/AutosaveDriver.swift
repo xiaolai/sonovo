@@ -106,7 +106,7 @@ final class AutosaveDriver<Document: Autosaveable> {
                 continue
             }
             do {
-                try await document.autosave()
+                try await save(document)
                 didSave(document.id)
                 onSaved?(document.id)
             } catch {
@@ -126,5 +126,74 @@ final class AutosaveDriver<Document: Autosaveable> {
                 reportsError("Autosave failed: \(error)")
             }
         }
+    }
+
+    /// Bounds one autosave. The document's own save slot bounds the wait for
+    /// another save, but a stalled disk write would otherwise hang the whole
+    /// loop and every other document behind it. A timeout is reported like a
+    /// failure and retried with backoff; the write itself keeps its own
+    /// cancellation path.
+    private func save(_ document: Document) async throws {
+        let race = AutosaveRace()
+        let deadline = Task { @MainActor in
+            try? await Task.sleep(for: Self.saveTimeout)
+            guard !Task.isCancelled else { return }
+            race.finish(
+                .failure(AutosaveTimeoutError(seconds: 30))
+            )
+        }
+        defer { deadline.cancel() }
+        return try await withCheckedThrowingContinuation { continuation in
+            race.install(continuation)
+            Task { @MainActor in
+                do {
+                    try await document.autosave()
+                    race.finish(.success(()))
+                } catch {
+                    race.finish(.failure(error))
+                }
+            }
+        }
+    }
+
+    private static var saveTimeout: Duration { .seconds(30) }
+}
+
+/// A one-shot result gate. The save completion and the deadline race; only
+/// the first may resume the continuation.
+private final class AutosaveRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var finished = false
+
+    func install(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func finish(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard !finished, let continuation else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(with: result)
+    }
+}
+
+private struct AutosaveTimeoutError: LocalizedError {
+    let seconds: Int
+
+    var errorDescription: String? {
+        "The save did not finish within \(seconds) seconds."
     }
 }

@@ -97,7 +97,6 @@ final class Project: Identifiable {
     private var sharedReservedDestinations: [String: UUID] = [:]
     private var scanInFlight = false
     private var rescanRequested = false
-    private var scanSettlementWaiters: [CheckedContinuation<Void, Never>] = []
     /// Invalidates an in-flight scan when the project goes offline or closes.
     private var lifecycleGeneration: UInt64 = 0
     /// A removed project must never restart a queued scan or apply results.
@@ -450,21 +449,26 @@ final class Project: Identifiable {
         await waitForScanSettlement()
     }
 
-    private func waitForScanSettlement() async {
+    /// Waits for the scan slot to drain, but not forever. A stalled
+    /// reconciliation used to suspend a continuation with no completion path,
+    /// so `load()` and media replacement never resumed. Polling keeps the
+    /// wait cancellation-aware without leaving continuations behind.
+    private func waitForScanSettlement(timeout: TimeInterval? = 5) async {
+        let deadline = timeout.map { Date().addingTimeInterval($0) }
         while scanInFlight || rescanRequested {
-            await withCheckedContinuation { continuation in
-                scanSettlementWaiters.append(continuation)
-            }
+            guard !Task.isCancelled, !isInvalidated else { return }
+            if let deadline, Date() >= deadline { return }
+            try? await Task.sleep(for: .milliseconds(20))
         }
     }
 
-    private func settleScanIfIdle() {
-        guard !scanInFlight, !rescanRequested else { return }
-        let waiters = scanSettlementWaiters
-        scanSettlementWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
+    /// Waits for the scan without a deadline, but cancellably. Session
+    /// recovery uses this after `load`'s bounded wait: restoring tabs against
+    /// an index that is still being built loses assets, so it waits for the
+    /// scan already in flight instead. Closing the project or cancelling the
+    /// task ends the wait.
+    func awaitScanSettled() async {
+        await waitForScanSettlement(timeout: nil)
     }
 
     private func startWatcherIfNeeded(root: URL) {
@@ -509,11 +513,7 @@ final class Project: Identifiable {
     }
 
     private func performScan(root: URL) async {
-        guard !isInvalidated else {
-            settleScanIfIdle()
-            return
-        }
-        let generation = lifecycleGeneration
+        guard !isInvalidated else { return }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(
             atPath: root.path,
@@ -533,32 +533,28 @@ final class Project: Identifiable {
             return
         }
         scanInFlight = true
-        defer { settleScanIfIdle() }
+        // The slot is held until the whole apply-and-rescan loop finishes,
+        // including reconciliation and a queued rescan. Releasing it between
+        // passes let a filesystem event interleave a second apply.
+        defer { scanInFlight = false }
         let scanner = scanner
-        let result = await Task.detached(priority: .userInitiated) {
-            scanner.scan(root: root)
-        }.value
-        // Do not discard the scan because the debounce task that started it
-        // was cancelled by a newer filesystem event. Its result is still a
-        // valid snapshot; the queued rescan below brings it up to date.
-        guard generation == lifecycleGeneration else {
-            scanInFlight = false
-            // A recovery load may have arrived while the invalidated scan
-            // was still running. Honor it with a fresh generation.
+        while true {
+            let generation = lifecycleGeneration
+            let result = await Task.detached(priority: .userInitiated) {
+                scanner.scan(root: root)
+            }.value
+            // Do not discard the scan because the debounce task that started
+            // it was cancelled by a newer filesystem event. Its result is
+            // still a valid snapshot; the queued rescan brings it up to date.
+            if generation == lifecycleGeneration {
+                await apply(result)
+            }
             if rescanRequested {
                 rescanRequested = false
-                await performScan(root: root)
+                if isInvalidated { break }
+                continue
             }
-            return
-        }
-        // Applying a scan awaits document closes. Keep the scan slot held
-        // until reconciliation finishes, so a filesystem event during that
-        // window queues one rescan instead of interleaving a second apply.
-        await apply(result)
-        scanInFlight = false
-        if rescanRequested {
-            rescanRequested = false
-            await performScan(root: root)
+            break
         }
     }
 

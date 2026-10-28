@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import XCTest
 @testable import SonovoCore
 
 private func temporaryDirectory() throws -> URL {
@@ -969,6 +970,17 @@ struct MarkdownDocumentTests {
 
 @Suite("File watcher")
 struct FileWatcherTests {
+    /// `.attrib` covers atime and permission changes, not content. Reading a
+    /// file to check it raises atime, which raised another event, which
+    /// triggered another check. Content events remain.
+    @Test("Event masks exclude attribute-only changes")
+    func masksExcludeAttrib() {
+        #expect(!MarkdownFileWatcher.fileEventMask.contains(.attrib))
+        #expect(!MarkdownFileWatcher.directoryEventMask.contains(.attrib))
+        #expect(MarkdownFileWatcher.fileEventMask.contains(.write))
+        #expect(MarkdownFileWatcher.directoryEventMask.contains(.rename))
+    }
+
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
@@ -1080,5 +1092,99 @@ struct AssetStoreTests {
                 workspaceRoot: root
             )
         }
+    }
+}
+
+/// The save-slot deadline is measured in the serial XCTest phase. Swift
+/// Testing runs its MainActor suites in parallel, and its scheduling delay
+/// would otherwise be attributed to the slot budget.
+@MainActor
+final class SaveSlotCloseTests: XCTestCase {
+    func testCloseReturnsWithinTheSlotBudget() async throws {
+        let directory = try temporaryDirectory()
+        defer { cleanup(directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data("one\n".utf8).write(to: url)
+
+        let document = try MarkdownDocument(loading: url)
+        try document.replaceSource("two\n")
+        try await document.holdSaveSlotForTesting()
+        defer { document.releaseSaveSlotForTesting() }
+
+        let start = Date()
+        let outcome = await document.flushForClose()
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(
+            elapsed,
+            3.0,
+            "flushForClose waited \(elapsed)s past the slot budget"
+        )
+        guard case let .needsDecision(.saveFailed(message)) = outcome else {
+            return XCTFail("expected a save failure, got \(outcome)")
+        }
+        XCTAssertTrue(message.contains("timedOut"))
+    }
+
+    /// A release transfers ownership directly. A third caller must not be
+    /// able to take the slot between the grant and the grantee's resumption:
+    /// the grantee would then re-wait against its original deadline.
+    func testAReleaseGrantCannotBeStolenByAThirdCaller() async throws {
+        let slot = SaveSlot()
+        try await slot.acquire()
+
+        let granteeAcquired = expectation(description: "grantee acquired")
+        let grantee = Task { @MainActor in
+            try await slot.acquire()
+            granteeAcquired.fulfill()
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        slot.release()
+        // Ownership transfers without a free moment: the pre-fix version
+        // cleared `isHeld` here, which is exactly the window a third caller
+        // could steal. This assertion is the race guard; the rest is
+        // mutual exclusion.
+        XCTAssertTrue(
+            slot.isHeld,
+            "release left the slot free between the grant and its owner"
+        )
+
+        await fulfillment(of: [granteeAcquired], timeout: 2)
+
+        var thirdAcquired = false
+        let third = Task { @MainActor in
+            try await slot.acquire()
+            thirdAcquired = true
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(
+            thirdAcquired,
+            "a third caller stole the slot from the grantee"
+        )
+
+        slot.release()          // the grantee is done
+        try await third.value   // the third caller now owns it
+        XCTAssertTrue(slot.isHeld)
+        slot.release()
+        _ = grantee
+    }
+
+    /// A cancelled waiter must leave the queue: a later release must not
+    /// hand it a slot it will never use, and the next caller must acquire.
+    func testACancelledWaiterDoesNotConsumeTheNextGrant() async throws {
+        let slot = SaveSlot()
+        try await slot.acquire()
+
+        let waiter = Task { @MainActor in
+            try await slot.acquire()
+            XCTFail("a cancelled waiter acquired the slot")
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        waiter.cancel()
+        _ = try? await waiter.value
+
+        slot.release()
+        try await slot.acquire()
+        XCTAssertTrue(slot.isHeld)
+        slot.release()
     }
 }

@@ -22,6 +22,7 @@ final class MarkdownParseCoordinator {
     }
 
     private struct Awaiter {
+        let id: UUID
         let revision: UInt64
         let continuation: CheckedContinuation<MarkdownParseState?, Never>
     }
@@ -97,7 +98,9 @@ final class MarkdownParseCoordinator {
         guard !book.closed else { return }
 
         if identityGeneration != book.identityGeneration {
-            // A new identity invalidates every result from the old one.
+            // A new identity invalidates every result from the old one. A
+            // waiter from the old identity will never be published, so it is
+            // resumed now instead of leaking until the session ends.
             book.identityGeneration = identityGeneration
             book.lastSuccess = nil
             book.lastEnableAutolinks = nil
@@ -105,6 +108,12 @@ final class MarkdownParseCoordinator {
             book.worker?.cancel()
             book.worker = nil
             states[documentID] = .idle
+            let stale = book.awaiters
+            book.awaiters.removeAll()
+            bookkeeping[documentID] = book
+            for awaiter in stale {
+                awaiter.continuation.resume(returning: .idle)
+            }
         }
         guard revision >= book.latestRevision else {
             bookkeeping[documentID] = book
@@ -133,7 +142,10 @@ final class MarkdownParseCoordinator {
     }
 
     /// Waits until the state for `revision` (or a newer one) is settled.
-    /// Returns `nil` when the document is released first.
+    /// Returns `nil` when the document is released first, and `.idle` when
+    /// the request is abandoned or the wait is cancelled. Cancellation must
+    /// resume the continuation: a caller with its own deadline (an export,
+    /// a link probe) would otherwise hold it for the session.
     func awaitSettled(
         documentID: UUID,
         revision: UInt64
@@ -152,13 +164,43 @@ final class MarkdownParseCoordinator {
            bookkeeping[documentID]?.pending == nil {
             return .idle
         }
-        return await withCheckedContinuation { continuation in
-            var book = bookkeeping[documentID] ?? Bookkeeping()
-            book.awaiters.append(
-                Awaiter(revision: revision, continuation: continuation)
-            )
-            bookkeeping[documentID] = book
+        let awaiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: .idle)
+                    return
+                }
+                var book = bookkeeping[documentID] ?? Bookkeeping()
+                book.awaiters.append(
+                    Awaiter(
+                        id: awaiterID,
+                        revision: revision,
+                        continuation: continuation
+                    )
+                )
+                bookkeeping[documentID] = book
+                if Task.isCancelled {
+                    cancelAwaiter(awaiterID, documentID: documentID)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelAwaiter(awaiterID, documentID: documentID)
+            }
         }
+    }
+
+    private func cancelAwaiter(_ awaiterID: UUID, documentID: UUID) {
+        guard var book = bookkeeping[documentID],
+              let index = book.awaiters.firstIndex(
+                  where: { $0.id == awaiterID }
+              ) else {
+            return
+        }
+        let awaiter = book.awaiters.remove(at: index)
+        bookkeeping[documentID] = book
+        awaiter.continuation.resume(returning: .idle)
     }
 
     func release(documentID: UUID) {
@@ -264,6 +306,12 @@ final class MarkdownParseCoordinator {
                             for: documentID,
                             enableAutolinks: request.enableAutolinks
                         )
+                    } else {
+                        // The document identity moved while the parse ran
+                        // and no newer request replaced this one. The
+                        // publication is refused; leaving `.parsing` behind
+                        // would strand the spinner and every waiter.
+                        resetStale(documentID)
                     }
                     continue outer
                 }
@@ -314,6 +362,20 @@ final class MarkdownParseCoordinator {
     /// state returns to `idle` so the next edit (or view appearance) asks
     /// again instead of leaving a spinner forever.
     private func giveUp(_ documentID: UUID) {
+        guard var book = bookkeeping[documentID] else { return }
+        states[documentID] = .idle
+        let awaiters = book.awaiters
+        book.awaiters.removeAll()
+        bookkeeping[documentID] = book
+        for awaiter in awaiters {
+            awaiter.continuation.resume(returning: .idle)
+        }
+    }
+
+    /// A result that cannot be published (its identity was superseded) must
+    /// still settle the state and its waiters. Otherwise `states` stays
+    /// `.parsing` with no pending work, and `awaitSettled` suspends forever.
+    private func resetStale(_ documentID: UUID) {
         guard var book = bookkeeping[documentID] else { return }
         states[documentID] = .idle
         let awaiters = book.awaiters

@@ -201,7 +201,15 @@ final class TmuxActionCoordinator {
     private(set) var policyGeneration: UInt64 = 0
 
     private var isBusy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+    private var waiters: [Waiter] = []
+    /// Waiters that a release actually granted. A cancellation also resumes
+    /// the continuation, so the resumed caller must not mistake that for a
+    /// grant and release the slot another action still holds.
+    private var grantedWaiters: Set<UUID> = []
     private var reservations: Set<TmuxSessionIdentity> = []
 
     init(
@@ -259,21 +267,57 @@ final class TmuxActionCoordinator {
 
     // MARK: Serial queue
 
-    private func acquire() async {
-        if !isBusy {
-            isBusy = true
+    /// Acquires the serial action slot. Returns false when the caller was
+    /// cancelled while queued; the caller must not dispatch in that case.
+    /// A cancelled waiter is removed from the queue so a later release does
+    /// not hand it a slot it will never use.
+    private func acquire() async -> Bool {
+        if isBusy {
+            let waiterID = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    if Task.isCancelled {
+                        continuation.resume()
+                        return
+                    }
+                    waiters.append(
+                        Waiter(id: waiterID, continuation: continuation)
+                    )
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.cancelWaiter(waiterID)
+                }
+            }
+            guard grantedWaiters.remove(waiterID) != nil else {
+                // Cancellation resumed us without a grant. The slot still
+                // belongs to its holder.
+                return false
+            }
+        }
+        if Task.isCancelled {
+            release()
+            return false
+        }
+        isBusy = true
+        return true
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
             return
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume()
     }
 
     private func release() {
         if waiters.isEmpty {
             isBusy = false
         } else {
-            waiters.removeFirst().resume()
+            let waiter = waiters.removeFirst()
+            grantedWaiters.insert(waiter.id)
+            waiter.continuation.resume()
         }
     }
 
@@ -307,7 +351,9 @@ final class TmuxActionCoordinator {
     /// or busy session is allowed; the guarded identity checks still apply.
     func endSession(named name: String) async -> TmuxActionOutcome {
         let captured = currentGenerations
-        await acquire()
+        guard await acquire() else {
+            return .notAttempted(reason: "The action was cancelled.")
+        }
         defer { release() }
         guard stillValid(captured) else {
             return .skipped(
@@ -347,7 +393,9 @@ final class TmuxActionCoordinator {
         name: String
     ) async -> TmuxActionOutcome {
         let captured = currentGenerations
-        await acquire()
+        guard await acquire() else {
+            return .notAttempted(reason: "The action was cancelled.")
+        }
         defer { release() }
         guard stillValid(captured) else {
             return .skipped(
@@ -385,7 +433,9 @@ final class TmuxActionCoordinator {
         attribute: TmuxSessionAttributes
     ) async -> TmuxActionOutcome {
         let captured = currentGenerations
-        await acquire()
+        guard await acquire() else {
+            return .notAttempted(reason: "The action was cancelled.")
+        }
         defer { release() }
         guard stillValid(captured) else {
             return .skipped(
@@ -418,7 +468,15 @@ final class TmuxActionCoordinator {
         cancellation: TmuxBulkCancellation
     ) async -> [TmuxSessionIdentity: TmuxActionOutcome] {
         let captured = currentGenerations
-        await acquire()
+        guard await acquire() else {
+            return Dictionary(
+                uniqueKeysWithValues: selections.map {
+                    ($0.identity, .notAttempted(
+                        reason: "The run was cancelled."
+                    ))
+                }
+            )
+        }
         defer { release() }
         var results: [TmuxSessionIdentity: TmuxActionOutcome] = [:]
         defer {
@@ -565,7 +623,9 @@ final class TmuxActionCoordinator {
         acknowledgedIncomplete: Bool
     ) async -> TmuxActionOutcome {
         let captured = currentGenerations
-        await acquire()
+        guard await acquire() else {
+            return .notAttempted(reason: "The action was cancelled.")
+        }
         defer { release() }
         guard stillValid(captured) else {
             return .skipped(
@@ -670,11 +730,10 @@ final class TmuxActionCoordinator {
         attribute: TmuxSessionAttributes
     ) async -> TmuxActionOutcome {
         let captured = currentGenerations
-        await acquire()
-        defer { release() }
-        guard !Task.isCancelled else {
+        guard await acquire() else {
             return .notAttempted(reason: "The run was cancelled.")
         }
+        defer { release() }
         guard stillValid(captured) else {
             return .skipped(
                 reason: "Workspace or settings changed while queued."
@@ -781,7 +840,9 @@ final class TmuxActionCoordinator {
         newProjectPath: String
     ) async -> TmuxRenameOutcome {
         let captured = currentGenerations
-        await acquire()
+        guard await acquire() else {
+            return .skipped(reason: "The rename was cancelled.")
+        }
         defer { release() }
         guard stillValid(captured) else {
             return .skipped(

@@ -233,6 +233,82 @@ final class MarkdownParseCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(latest.revision, 2)
     }
+    /// A Save As can bump the identity while a parse is in flight. The
+    /// superseded request has no publication path, so the coordinator must
+    /// settle the state and resume its waiter rather than leaving it
+    /// suspended in `.parsing`.
+    func testIdentityChangeSettlesAWaitingRevision() async {
+        let documentID = UUID()
+        let coordinator = makeCoordinator { input in
+            try? await Task.sleep(for: .milliseconds(400))
+            return Self.makeOutput(input)
+        }
+        coordinator.request(
+            documentID: documentID,
+            identityGeneration: 0,
+            revision: 5,
+            source: "old"
+        )
+        let change = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(40))
+            // The new identity carries an older revision, so no fresh parse
+            // replaces the stale one.
+            coordinator.request(
+                documentID: documentID,
+                identityGeneration: 1,
+                revision: 4,
+                source: "old"
+            )
+        }
+        let start = Date()
+        let settled = await coordinator.awaitSettled(
+            documentID: documentID,
+            revision: 5
+        )
+        _ = await change.value
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+        guard case .idle? = settled else {
+            return XCTFail("expected idle, got \(String(describing: settled))")
+        }
+        if case .idle = coordinator.state(for: documentID) {
+            // Expected: no spinner survives the abandoned identity.
+        } else {
+            XCTFail("the abandoned identity left a non-idle state")
+        }
+    }
+
+    /// `awaitSettled` must not hold its continuation after the caller
+    /// cancels. A caller with its own deadline (an export or link probe)
+    /// would otherwise keep the checked continuation suspended until the
+    /// parse finishes on its own.
+    func testAwaitSettledReturnsWhenCancelled() async {
+        let documentID = UUID()
+        let coordinator = makeCoordinator { input in
+            try? await Task.sleep(for: .seconds(2))
+            return Self.makeOutput(input)
+        }
+        coordinator.request(
+            documentID: documentID,
+            identityGeneration: 0,
+            revision: 1,
+            source: "body"
+        )
+        let waiting = Task { @MainActor in
+            await coordinator.awaitSettled(
+                documentID: documentID,
+                revision: 1
+            )
+        }
+        try? await Task.sleep(for: .milliseconds(40))
+        let start = Date()
+        waiting.cancel()
+        _ = await waiting.value
+        XCTAssertLessThan(
+            Date().timeIntervalSince(start),
+            0.5,
+            "cancellation did not resume the waiter"
+        )
+    }
 }
 
 /// Serializes parse-call counting across the coordinator's worker.

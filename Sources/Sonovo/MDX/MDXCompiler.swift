@@ -260,12 +260,37 @@ struct MDXHelperCompiler: Sendable {
         }
         watchdog.resume()
 
-        // The helper writes one bounded JSON object, and at most a short
-        // diagnostic, so reading to EOF cannot fill the other pipe.
-        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        // Drain both pipes concurrently. Reading stdout to EOF first
+        // deadlocks once the helper writes more than a pipe buffer of
+        // diagnostics: the child blocks in write(2) and never closes stdout.
+        let stdoutBox = DataBox()
+        let stderrBox = DataBox()
+        let drainGroup = DispatchGroup()
+        let drainQueue = DispatchQueue.global(qos: .userInitiated)
+        drainGroup.enter()
+        drainQueue.async {
+            let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            stdoutBox.set(data)
+            drainGroup.leave()
+        }
+        drainGroup.enter()
+        drainQueue.async {
+            let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            stderrBox.set(data)
+            drainGroup.leave()
+        }
         process.waitUntilExit()
+        if drainGroup.wait(timeout: .now() + 2) == .timedOut {
+            // A descendant may hold the write end open after the helper
+            // exits. Closing the read ends releases the drain threads; the
+            // watchdog deadline already bounds the helper itself.
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForReading.close()
+            _ = drainGroup.wait(timeout: .now() + 1)
+        }
         watchdog.cancel()
+        let stdout = stdoutBox.value
+        let stderr = stderrBox.value
 
         if timedOut.isMarked {
             throw MDXCompilerError.timedOut
@@ -311,6 +336,24 @@ struct MDXHelperCompiler: Sendable {
         let error: String?
         let line: Int?
         let column: Int?
+    }
+}
+
+/// A byte buffer filled from a background drain.
+private final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func set(_ data: Data) {
+        lock.lock()
+        storage = data
+        lock.unlock()
+    }
+
+    var value: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 

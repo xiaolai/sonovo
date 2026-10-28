@@ -151,8 +151,7 @@ public final class MarkdownDocument: Identifiable {
     /// The first edit made while a save was in flight. It was not part of the
     /// bytes that save wrote, so the five-second ceiling restarts from here.
     private var firstEditDuringSave: Date?
-    private var saveInFlight = false
-    private var saveWaiters: [CheckedContinuation<Void, Never>] = []
+    private let saveSlot = SaveSlot()
     private var pendingArtifactsToClean: [URL] = []
     /// A conflict decision waits for the save slot. It is bound to the disk
     /// snapshot the user reviewed so it cannot authorize overwriting a newer
@@ -266,14 +265,14 @@ public final class MarkdownDocument: Identifiable {
         if firstPendingEdit == nil {
             firstPendingEdit = lastEdit
         }
-        if saveInFlight, firstEditDuringSave == nil {
+        if saveSlot.isHeld, firstEditDuringSave == nil {
             firstEditDuringSave = lastEdit
         }
     }
 
     /// Applies an external change decision.
     public func resolveExternalChange(_ resolution: ExternalResolution) {
-        guard !saveInFlight else {
+        guard !saveSlot.isHeld else {
             // Applying a reload while a save is in flight could interleave
             // the two disk states. Queue it until the save releases the slot,
             // bound to the conflict the user actually reviewed.
@@ -339,7 +338,7 @@ public final class MarkdownDocument: Identifiable {
             return nil
         }
 
-        await acquireSaveSlot()
+        try await acquireSaveSlot()
         defer { releaseSaveSlot() }
 
         guard !isClosed else { throw DocumentError.closed }
@@ -411,7 +410,7 @@ public final class MarkdownDocument: Identifiable {
         hooks: SaveHooks? = nil
     ) async throws -> SaveOutcome {
         guard !isClosed else { throw DocumentError.closed }
-        await acquireSaveSlot()
+        try await acquireSaveSlot()
         defer { releaseSaveSlot() }
         guard !isClosed else { throw DocumentError.closed }
 
@@ -591,7 +590,7 @@ public final class MarkdownDocument: Identifiable {
         // detached save is between its rename and verification would observe
         // an intermediate state. Capture identity only after the slot is
         // held, so a Save As that completed while waiting is reflected.
-        await acquireSaveSlot()
+        try await acquireSaveSlot()
         defer { releaseSaveSlot() }
 
         guard let url = fileURL, let snapshot = diskSnapshot else {
@@ -867,22 +866,23 @@ public final class MarkdownDocument: Identifiable {
         diskState = state
     }
 
-    private func acquireSaveSlot() async {
-        while saveInFlight {
-            await withCheckedContinuation { continuation in
-                saveWaiters.append(continuation)
-            }
-        }
-        saveInFlight = true
+    private func acquireSaveSlot() async throws {
+        try await saveSlot.acquire()
+    }
+
+    /// Test seam: simulates a save that owns the slot without blocking a
+    /// thread. `flushForClose` sees exactly this state, and the test can
+    /// measure its bounded wait deterministically.
+    func holdSaveSlotForTesting() async throws {
+        try await saveSlot.acquire()
+    }
+
+    func releaseSaveSlotForTesting() {
+        saveSlot.release()
     }
 
     private func releaseSaveSlot() {
-        saveInFlight = false
-        let waiters = saveWaiters
-        saveWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
+        saveSlot.release()
 
         if let pending = pendingResolution {
             pendingResolution = nil
