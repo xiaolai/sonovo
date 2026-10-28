@@ -24,6 +24,8 @@ readonly ENTITLEMENTS=$ROOT/Scripts/Sonovo.entitlements
 VERSION=$(tr -d '[:space:]' < Sources/Sonovo/Resources/version.txt)
 readonly VERSION
 readonly TRIES=5
+# Stapling waits on Apple's ticket service, which can lag the notary verdict.
+readonly STAPLE_TRIES=10
 readonly E2E_DIR=SonovoE2E/release
 
 mode=release
@@ -215,12 +217,15 @@ notarize() {  # $1: the file to submit
 }
 
 staple() {  # $1: artifact
+    # Apple's ticket service can lag behind notarytool's Accepted verdict by a
+    # minute or more; five ten-second attempts were not enough and produced a
+    # false "no valid ticket" failure. Give it two and a half minutes.
     local attempt
-    for (( attempt = 1; attempt <= TRIES; attempt++ )); do
+    for (( attempt = 1; attempt <= STAPLE_TRIES; attempt++ )); do
         xcrun stapler staple "$1" >/dev/null 2>&1 && break
-        (( attempt < TRIES )) || fail "could not staple a ticket to $1 after $TRIES attempts"
-        note "stapling $(basename "$1") failed (attempt $attempt of $TRIES); retrying"
-        sleep 10
+        (( attempt < STAPLE_TRIES )) || fail "could not staple a ticket to $1 after $STAPLE_TRIES attempts"
+        note "stapling $(basename "$1") failed (attempt $attempt of $STAPLE_TRIES); retrying"
+        sleep 15
     done
     xcrun stapler validate "$1" >/dev/null || fail "$1 has no valid ticket after stapling"
 }
