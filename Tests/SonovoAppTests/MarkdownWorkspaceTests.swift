@@ -12,6 +12,24 @@ final class MarkdownWorkspaceTests: XCTestCase {
         return url
     }
 
+    /// A project supplies the navigator. The workspace's own flat file list
+    /// belongs to the standalone workspace and must not appear as a second
+    /// pane inside a project editor.
+    func testProjectHostedViewSuppressesTheNestedFileBrowser() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertFalse(
+            MarkdownWorkspaceView(project: Project(folderURL: root))
+                .showsFileBrowser,
+            "a project-hosted markdown view must not duplicate the navigator"
+        )
+        XCTAssertTrue(
+            MarkdownWorkspaceView(workspace: MarkdownWorkspace())
+                .showsFileBrowser,
+            "the standalone workspace still needs its file list"
+        )
+    }
+
     private func sourceRange(_ offsets: Range<Int>) -> SourceRange {
         SourceRange(
             start: SourcePosition(

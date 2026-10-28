@@ -10,9 +10,15 @@ struct MarkdownWorkspaceView: View {
     /// that displays it, not whichever pane has focus.
     var mediaReferenceState: ((MediaReference, URL?) -> MediaReferenceState)?
     var onOpenMedia: ((MediaReference, URL?) -> Void)?
+    /// The workspace's own flat file list. It exists for the standalone
+    /// workspace (Open Folder…), where it is the only navigator. A project
+    /// already supplies the navigator, so the nested list is suppressed
+    /// rather than shown as a duplicate pane.
+    let showsFileBrowser: Bool
 
     init(workspace: MarkdownWorkspace) {
         _workspace = Bindable(workspace)
+        showsFileBrowser = true
     }
 
     /// A workspace hosted by a project resolves and opens `sonovo:` media
@@ -20,6 +26,7 @@ struct MarkdownWorkspaceView: View {
     /// the click route can never disagree.
     init(project: Project) {
         _workspace = Bindable(project.markdown)
+        showsFileBrowser = false
         mediaReferenceState = { reference, documentURL in
             project.mediaAsset(
                 for: reference,
@@ -33,7 +40,7 @@ struct MarkdownWorkspaceView: View {
 
     var body: some View {
         HStack(spacing: AppTheme.Spacing.zero) {
-            if workspace.workspaceRoot != nil {
+            if showsFileBrowser, workspace.workspaceRoot != nil {
                 fileBrowser
                 Divider()
             }
