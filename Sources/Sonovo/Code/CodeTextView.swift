@@ -66,6 +66,9 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     /// it; cursor movement inside one revision reuses the completed scan.
     private(set) var symbolScanCount = 0
     private(set) var highlightSnapshot: CodeLexSnapshot?
+    /// Diagnostic count of completed lex passes. A debounce regression test
+    /// uses it to prove a stream of requests cannot starve the work.
+    @ObservationIgnored private(set) var highlightPassCount = 0
     private(set) var lastCommandError: Error?
 
     private var settings: CodeEditorSettings
@@ -79,11 +82,22 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     @ObservationIgnored
     private(set) var highlightTask: Task<Void, Never>?
     @ObservationIgnored private var visibleHighlightTask: Task<Void, Never>?
+    @ObservationIgnored private var visibleHighlightGeneration: UInt64 = 0
+    @ObservationIgnored private var visibleHighlightTaskID: UInt64 = 0
     @ObservationIgnored private var pendingLine: Int?
     @ObservationIgnored private var compositionBaseline: String?
     @ObservationIgnored private var suppressSync = false
+    /// Set while `syncFromDocument` restores a selection. `setSelectedRange`
+    /// posts a selection notification synchronously, and the delegate would
+    /// publish that echo into observable document state from `updateNSView`.
+    @ObservationIgnored private var isRestoringSelection = false
+    @ObservationIgnored private var selectionRestoreClearTask: Task<Void, Never>?
+    /// Coalesces the cursor-state publication out of the update path.
+    @ObservationIgnored private var cursorStateTask: Task<Void, Never>?
     @ObservationIgnored private var scrollObserver: NSObjectProtocol?
     @ObservationIgnored private var symbolTask: Task<Void, Never>?
+    /// The revision a pending outline lookup is already scheduled for.
+    @ObservationIgnored private var symbolTaskRevision: UInt64?
     /// The language the current snapshot was lexed with. Save As can change
     /// the language without changing the revision or the text.
     var highlightLanguage: CodeLanguage? { highlightSnapshot?.language }
@@ -260,6 +274,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         // this, an existing document stays unhighlighted until it is edited.
         scheduleHighlight(editedLine: nil, immediate: true)
         textView.updateIndentGuideFont(baseFont)
+        textView.refreshVisibleLines()
         textView.needsDisplay = true
     }
 
@@ -275,6 +290,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             queue: .main
         ) { _ in
             Task { @MainActor in
+                box.value?.textView.refreshVisibleLines()
                 box.value?.rulerView.needsDisplay = true
                 box.value?.textView.needsDisplay = true
                 box.value?.scheduleVisibleHighlight()
@@ -298,6 +314,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         let selected = textView.selectedRange()
         if Self.differs(textView.string, document.source) {
             suppressSync = true
+            beginProgrammaticSelection()
             textView.string = document.source
             applyBaseAttributesOnly()
             suppressSync = false
@@ -308,7 +325,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             scheduleHighlight(editedLine: nil, immediate: true)
         }
         restoreSelection(selected)
-        updateCursorState()
+        scheduleCursorStateUpdate()
     }
 
     /// Byte equality, not `String` equality: two canonically equivalent
@@ -319,22 +336,56 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         !lhs.utf8.elementsEqual(rhs.utf8)
     }
 
-    /// Restores the selection without republishing it. This runs from
+    /// Restores the selection without publishing it. This runs from
     /// `updateNSView`; `setSelectedRange` posts a selection notification on
-    /// every call, SwiftUI observes it and re-enters the update, and the
-    /// document never finishes opening — an endless transaction at full CPU.
-    /// The document selection is observable too, so it is written only when
-    /// it actually differs.
+    /// every call, and the delegate would publish that echo into observable
+    /// document state and schedule another highlight pass. The delegate is
+    /// suppressed for the programmatic move; a real user selection still
+    /// publishes through the delegate.
     private func restoreSelection(_ selected: NSRange) {
         let length = (textView.string as NSString).length
         let location = min(max(0, selected.location), length)
         let upper = min(length, location + max(0, selected.length))
         let range = NSRange(location: location, length: upper - location)
         if textView.selectedRange() != range {
+            beginProgrammaticSelection()
             textView.setSelectedRange(range)
         }
-        if let swiftRange = Range(range), document.selection != swiftRange {
-            document.selection = swiftRange
+    }
+
+    /// Marks the next selection notification as this editor's own change.
+    /// Text replacement posts a selection notification too, and the flag
+    /// clears after the current actor turn so it cannot swallow a later user
+    /// selection.
+    private func beginProgrammaticSelection() {
+        isRestoringSelection = true
+        selectionRestoreClearTask?.cancel()
+        selectionRestoreClearTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.isRestoringSelection = false
+        }
+    }
+
+    /// Coalesces cursor-state publication out of `updateNSView`. Writing
+    /// `cursorLine` or `symbolName` there invalidates the SwiftUI view that
+    /// is currently being updated, which re-enters the update. The task runs
+    /// after the update returns; a second request while one is pending is
+    /// harmless because the task reads the state that exists when it runs.
+    private func scheduleCursorStateUpdate() {
+        guard cursorStateTask == nil else { return }
+        cursorStateTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.cursorStateTask = nil
+            self.updateCursorState()
+            // A suppressed programmatic restore does not pass through the
+            // delegate, so the document selection is published here, after
+            // the update returns.
+            if let range = Range(self.textView.selectedRange()),
+               self.document.selection != range {
+                self.document.selection = range
+            }
         }
     }
 
@@ -369,6 +420,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         guard !suppressSync else { return }
         guard document.isEditable else {
             suppressSync = true
+            beginProgrammaticSelection()
             textView.string = document.source
             applyBaseAttributesOnly()
             suppressSync = false
@@ -417,6 +469,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     }
 
     private func selectionDidMove() {
+        guard !isRestoringSelection else { return }
         if let swiftRange = Range(textView.selectedRange()),
            document.selection != swiftRange {
             document.selection = swiftRange
@@ -458,8 +511,12 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
 
     /// Schedules a lexing pass. The previous snapshot is kept as the
     /// checkpoint base; a stale result is discarded by revision.
+    ///
+    /// Calls coalesce into one runner. Replacing the task on every keystroke
+    /// meant a stream of calls faster than the debounce starved the lex
+    /// forever; the runner keeps one pending request and re-arms itself from
+    /// completion instead.
     func scheduleHighlight(editedLine: Int?, immediate: Bool = false) {
-        highlightTask?.cancel()
         // A viewport-only repaint needs no relex.
         if editedLine == nil, let snapshot = highlightSnapshot,
            snapshot.revision == document.revision,
@@ -467,56 +524,123 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             applyHighlight(snapshot)
             return
         }
-
-        let revision = document.revision
-        let text = textView.string
-        let language = document.language
-        let previous = highlightSnapshot
-        let line = editedLine
+        pendingHighlight = HighlightRequest(
+            revision: document.revision,
+            language: document.language,
+            text: textView.string,
+            previous: highlightSnapshot,
+            editedLine: editedLine,
+            immediate: immediate
+        )
+        guard highlightTask == nil else { return }
         highlightTask = Task { @MainActor [weak self] in
-            if !immediate {
+            await self?.runHighlightLoop()
+        }
+    }
+
+    private struct HighlightRequest {
+        let revision: UInt64
+        let language: CodeLanguage
+        let text: String
+        let previous: CodeLexSnapshot?
+        let editedLine: Int?
+        let immediate: Bool
+    }
+
+    @ObservationIgnored private var pendingHighlight: HighlightRequest?
+
+    private func runHighlightLoop() async {
+        let cycleStart = ContinuousClock.now
+        while !Task.isCancelled, var request = takePendingHighlight() {
+            if !request.immediate {
                 try? await Task.sleep(nanoseconds: 16_000_000)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else { break }
             }
-            let worker = Task.detached(priority: .userInitiated) {
-                if let previous, let line {
-                    return CodeSyntaxHighlighter.relex(
-                        previous: previous,
-                        text: text,
-                        language: language,
-                        revision: revision,
-                        editedLine: line
-                    )
+            // A newer request supersedes this one. The debounce is a floor,
+            // not an unbounded trailing delay: after the ceiling the loop
+            // runs the newest request even while input keeps arriving, so a
+            // sustained stream cannot starve highlighting entirely.
+            if let newer = pendingHighlight,
+               newer.revision != request.revision
+                || newer.language != request.language
+                || newer.text.utf8.elementsEqual(request.text.utf8) == false {
+                if ContinuousClock.now - cycleStart < .milliseconds(250) {
+                    continue
                 }
-                return CodeSyntaxHighlighter.lex(
-                    text: text,
-                    language: language,
-                    revision: revision
+                request = newer
+            }
+            pendingHighlight = nil
+            await performHighlight(request)
+        }
+        highlightTask = nil
+    }
+
+    private func takePendingHighlight() -> HighlightRequest? {
+        pendingHighlight
+    }
+
+    private func performHighlight(_ request: HighlightRequest) async {
+        let worker = Task.detached(priority: .userInitiated) {
+            if let previous = request.previous, let line = request.editedLine {
+                return CodeSyntaxHighlighter.relex(
+                    previous: previous,
+                    text: request.text,
+                    language: request.language,
+                    revision: request.revision,
+                    editedLine: line
                 )
             }
-            let snapshot = await withTaskCancellationHandler {
-                await worker.value
-            } onCancel: {
-                worker.cancel()
-            }
-            guard !Task.isCancelled, let self else { return }
-            guard self.document.revision == snapshot.revision,
-                  self.document.language == snapshot.language else { return }
-            self.highlightSnapshot = snapshot
-            self.applyHighlight(snapshot)
-            self.updateCursorState()
+            return CodeSyntaxHighlighter.lex(
+                text: request.text,
+                language: request.language,
+                revision: request.revision
+            )
         }
+        let snapshot = await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+        guard !Task.isCancelled else { return }
+        guard self.document.revision == snapshot.revision,
+              self.document.language == snapshot.language else { return }
+        self.highlightSnapshot = snapshot
+        self.applyHighlight(snapshot)
+        self.highlightPassCount += 1
+        self.updateCursorState()
     }
 
     private func scheduleVisibleHighlight() {
         guard let snapshot = highlightSnapshot,
               snapshot.revision == document.revision,
               snapshot.language == document.language else { return }
-        visibleHighlightTask?.cancel()
+        visibleHighlightGeneration &+= 1
+        guard visibleHighlightTask == nil else { return }
+        visibleHighlightTaskID &+= 1
+        let taskID = visibleHighlightTaskID
         visibleHighlightTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(16))
-            guard !Task.isCancelled, let self else { return }
-            self.applyHighlight(snapshot)
+            while !Task.isCancelled {
+                guard let self else { return }
+                let generation = self.visibleHighlightGeneration
+                try? await Task.sleep(for: .milliseconds(16))
+                guard !Task.isCancelled else { return }
+                if generation != self.visibleHighlightGeneration { continue }
+                guard let current = self.highlightSnapshot,
+                      current.revision == self.document.revision,
+                      current.language == self.document.language else {
+                    break
+                }
+                self.applyHighlight(current)
+                if generation == self.visibleHighlightGeneration {
+                    if self.visibleHighlightTaskID == taskID {
+                        self.visibleHighlightTask = nil
+                    }
+                    return
+                }
+            }
+            if let self, self.visibleHighlightTaskID == taskID {
+                self.visibleHighlightTask = nil
+            }
         }
     }
 
@@ -540,6 +664,13 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         }
 
         let affected = affectedRange()
+        let lineRange = currentLineRange(in: snapshot)
+        let bracketRanges = currentBracketRanges()
+        lastSelectionDecoration = SelectionDecoration(
+            revision: snapshot.revision,
+            line: lineRange,
+            brackets: bracketRanges
+        )
         let highContrast = NSWorkspace.shared
             .accessibilityDisplayShouldIncreaseContrast
         storage.beginEditing()
@@ -566,7 +697,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             }
         }
 
-        if let lineRange = currentLineRange(in: snapshot) {
+        if let lineRange {
             storage.addAttribute(
                 .backgroundColor,
                 value: NSColor.labelColor.withAlphaComponent(
@@ -576,7 +707,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             )
         }
 
-        for range in currentBracketRanges() {
+        for range in bracketRanges {
             storage.addAttribute(
                 .backgroundColor,
                 value: NSColor.controlAccentColor.withAlphaComponent(
@@ -588,6 +719,7 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
         storage.endEditing()
 
         textView.typingAttributes = baseAttributes
+        textView.refreshVisibleLines()
         rulerView.needsDisplay = true
     }
 
@@ -643,10 +775,39 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
 
     // MARK: - Brackets
 
+    private struct SelectionDecoration: Equatable {
+        let revision: UInt64
+        let line: NSRange?
+        let brackets: [NSRange]
+    }
+
+    @ObservationIgnored
+    private var lastSelectionDecoration: SelectionDecoration?
+
+    /// The selection-dependent part of a highlight, without touching storage.
+    private func selectionDecoration(
+        _ snapshot: CodeLexSnapshot
+    ) -> SelectionDecoration {
+        SelectionDecoration(
+            revision: snapshot.revision,
+            line: currentLineRange(in: snapshot),
+            brackets: currentBracketRanges()
+        )
+    }
+
+    /// Repaints only when the current-line tint or the matched bracket pair
+    /// changed. Every caret move used to rewrite the whole viewport, which
+    /// forced a layout pass per arrow key; the ruler still repaints so the
+    /// gutter and typewriter state stay current.
     private func refreshBracketHighlight() {
-        if let snapshot = highlightSnapshot {
-            applyHighlight(snapshot)
+        guard let snapshot = highlightSnapshot else { return }
+        let decoration = selectionDecoration(snapshot)
+        guard decoration != lastSelectionDecoration else {
+            rulerView.needsDisplay = true
+            return
         }
+        lastSelectionDecoration = decoration
+        applyHighlight(snapshot)
     }
 
     /// Matches the bracket at or next to the caret. The scan is bounded so a
@@ -870,9 +1031,10 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     }
 
     private func refreshSymbol() {
-        symbolTask?.cancel()
         let language = document.language
         guard language.supportsOutline else {
+            symbolTask?.cancel()
+            symbolTaskRevision = nil
             symbolCache = nil
             if symbolName != nil {
                 symbolName = nil
@@ -880,34 +1042,51 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             return
         }
         let revision = document.revision
-        let line = cursorLine
         // Cursor movement inside one revision reuses the scan; only the
         // lookup changes.
         if let cache = symbolCache,
            cache.revision == revision,
            cache.language == language {
-            let name = CodeSymbolIndex.symbol(at: line, in: cache.symbols)?.name
+            let name = CodeSymbolIndex.symbol(
+                at: cursorLine,
+                in: cache.symbols
+            )?.name
             if symbolName != name {
                 symbolName = name
             }
             return
         }
+        // A lookup for this revision is already scheduled or in flight. A
+        // caret move only changes the line to look up, and the running task
+        // reads `cursorLine` when it finishes, so it needs no replacement.
+        if symbolTaskRevision == revision, symbolTask != nil { return }
+        symbolTask?.cancel()
+        symbolTaskRevision = revision
         symbolTask = Task { @MainActor [weak self] in
             // Wait for the cursor to settle; moving through a line should
             // not launch a symbol scan per keystroke.
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled, let self else { return }
             guard let symbols = await self.symbolsForCurrentRevision() else {
+                self.finishSymbolTask(revision)
                 return
             }
             guard !Task.isCancelled else { return }
             let name = CodeSymbolIndex.symbol(
-                at: line,
+                at: self.cursorLine,
                 in: symbols
             )?.name
             if self.symbolName != name {
                 self.symbolName = name
             }
+            self.finishSymbolTask(revision)
+        }
+    }
+
+    private func finishSymbolTask(_ revision: UInt64) {
+        if symbolTaskRevision == revision {
+            symbolTaskRevision = nil
+            symbolTask = nil
         }
     }
 
@@ -983,10 +1162,25 @@ final class CodeTextView: NSTextView {
     }
 
     /// The viewport's rendered lines, bounded to the visible rect.
+    ///
+    /// Drawing reads this cache. `layoutViewport()` and fragment enumeration
+    /// force TextKit layout, and doing that from a draw pass re-entered
+    /// layout on every scroll frame. The controller refreshes the cache from
+    /// the bounds change (and after attributes change); the lazy refresh here
+    /// is only a first-draw fallback.
     func visibleCodeLines() -> [CodeLineLayout] {
+        if let cache = visibleLineCache { return cache.lines }
+        refreshVisibleLines()
+        return visibleLineCache?.lines ?? []
+    }
+
+    /// Recomputes the visible-line cache. Called from layout-affecting
+    /// events, never from a draw method.
+    func refreshVisibleLines() {
         guard let layout = textLayoutManager,
               let content = layout.textContentManager else {
-            return []
+            visibleLineCache = nil
+            return
         }
         let inset = textContainerInset
         let visible = visibleRect
@@ -1028,8 +1222,20 @@ final class CodeTextView: NSTextView {
             }
             return true
         }
-        return lines
+        visibleLineCache = VisibleLineCache(
+            visible: visible,
+            length: textStorage?.length ?? 0,
+            lines: lines
+        )
     }
+
+    private struct VisibleLineCache {
+        let visible: NSRect
+        let length: Int
+        let lines: [CodeLineLayout]
+    }
+
+    private var visibleLineCache: VisibleLineCache?
 
     private func drawIndentGuides() {
         let spaceWidth = (" " as NSString).size(

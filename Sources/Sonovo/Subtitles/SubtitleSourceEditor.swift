@@ -22,6 +22,8 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
     nonisolated(unsafe) private var scrollObserver: NSObjectProtocol?
     nonisolated(unsafe) private var preferenceObserver: NSObjectProtocol?
     private var highlightTask: Task<Void, Never>?
+    private var highlightGeneration: UInt64 = 0
+    private var highlightImmediate = false
     private var suppressSync = false
     private var compositionBaseline: (revision: UInt64, source: String)?
     private var didAttach = false
@@ -287,14 +289,28 @@ final class SubtitleSourceEditorController: NSObject, NSTextViewDelegate {
         }
     }
 
+    /// Coalesces scroll-and-edit repaints. Replacing the task on every call
+    /// meant a stream of bounds notifications faster than the 24 ms delay
+    /// starved the highlight; one runner takes the newest generation.
     private func scheduleHighlight(immediate: Bool = false) {
-        highlightTask?.cancel()
+        highlightGeneration &+= 1
+        if immediate { highlightImmediate = true }
+        guard highlightTask == nil else { return }
         highlightTask = Task { @MainActor [weak self] in
-            if !immediate {
-                try? await Task.sleep(for: .milliseconds(24))
+            while !Task.isCancelled {
+                guard let self else { return }
+                let generation = self.highlightGeneration
+                let skipDelay = self.highlightImmediate
+                self.highlightImmediate = false
+                if !skipDelay {
+                    try? await Task.sleep(for: .milliseconds(24))
+                }
+                guard !Task.isCancelled else { return }
+                if generation != self.highlightGeneration { continue }
+                self.applyHighlight()
+                if generation == self.highlightGeneration { break }
             }
-            guard !Task.isCancelled else { return }
-            self?.applyHighlight()
+            self?.highlightTask = nil
         }
     }
 

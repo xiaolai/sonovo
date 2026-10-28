@@ -71,20 +71,26 @@ enum MarkdownDecorationCompositor {
         decorations: MarkdownDecorationSet,
         to storage: NSTextStorage,
         affectedRange: NSRange,
+        fontRange: NSRange? = nil,
         baseAttributes: [NSAttributedString.Key: Any]
     ) {
         storage.beginEditing()
         defer { storage.endEditing() }
 
+        let metricRange = fontRange ?? affectedRange
         for key in allOwnedKeys {
+            // Font metrics are the only layer that changes layout. Keep them
+            // inside the laid-out viewport so offscreen text cannot force a
+            // layout that moves the viewport under the scroll position.
+            let target = key == .font ? metricRange : affectedRange
             if let value = baseAttributes[key] {
                 storage.addAttribute(
                     key,
                     value: value,
-                    range: affectedRange
+                    range: target
                 )
             } else {
-                storage.removeAttribute(key, range: affectedRange)
+                storage.removeAttribute(key, range: target)
             }
         }
 
@@ -101,7 +107,11 @@ enum MarkdownDecorationCompositor {
             guard clipped.length > 0 else { continue }
             let owned = Set(decoration.layer.ownedKeys)
             for (key, value) in decoration.attributes where owned.contains(key) {
-                storage.addAttribute(key, value: value, range: clipped)
+                let target = key == .font
+                    ? NSIntersectionRange(clipped, metricRange)
+                    : clipped
+                guard target.length > 0 else { continue }
+                storage.addAttribute(key, value: value, range: target)
             }
         }
     }

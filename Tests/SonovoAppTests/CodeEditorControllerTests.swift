@@ -181,9 +181,9 @@ final class CodeEditorControllerTests: XCTestCase {
         }
         XCTAssertFalse(controller.textView.hasMarkedText())
 
-        // Make the sync's selection write observable: restoreSelection always
-        // republishes the document selection, so a nil here must become the
-        // text view's range again or the sync never reached it.
+        // Make the sync's selection write observable: restoreSelection used to
+        // republish the document selection. It no longer writes document
+        // state at all; the delegate publishes real user changes.
         document.selection = nil
         let posts = NotificationCounter()
         let token = NotificationCenter.default.addObserver(
@@ -196,9 +196,9 @@ final class CodeEditorControllerTests: XCTestCase {
         defer { NotificationCenter.default.removeObserver(token) }
 
         controller.syncFromDocument()
-        XCTAssertNotNil(
+        XCTAssertNil(
             document.selection,
-            "sync did not reach restoreSelection; the guard below proves nothing"
+            "the sync path published document selection state"
         )
         XCTAssertEqual(
             posts.count,
@@ -248,6 +248,143 @@ final class CodeEditorControllerTests: XCTestCase {
             invalidated.isRaised,
             "scheduling published internal work state; SwiftUI would re-enter"
         )
+    }
+
+    /// `updateNSView` writes document state. Every write it performs must be
+    /// either unobservable or deferred past the update; a synchronous write
+    /// invalidates the view SwiftUI is currently updating and re-enters the
+    /// update. A second sync after a programmatic selection move covers the
+    /// restore path.
+    func testSyncFromDocumentPublishesNoObservableState() async throws {
+        let root = try support.makeRoot(files: [
+            "data.json": CodeTestData.utf8("{\n  \"a\": 1\n}\n")
+        ])
+        let document = CodeDocument(
+            url: root.appendingPathComponent("data.json")
+        )
+        await document.load()
+        let controller = CodeEditorController(
+            document: document,
+            settings: CodeEditorSettings()
+        )
+        controller.attach()
+        try await waitUntil("the first lex") {
+            controller.highlightSnapshot != nil
+        }
+
+        func track(_ body: () -> Void) -> Bool {
+            let invalidated = ObservationFlag()
+            withObservationTracking {
+                _ = controller.cursorLine
+                _ = controller.cursorColumn
+                _ = controller.selectionLength
+                _ = controller.symbolName
+                _ = controller.symbolScanCount
+                _ = controller.highlightSnapshot
+                _ = controller.lastCommandError
+                body()
+            } onChange: {
+                invalidated.raise()
+            }
+            return invalidated.isRaised
+        }
+
+        XCTAssertFalse(
+            track { controller.syncFromDocument() },
+            "a no-op sync published observable state synchronously"
+        )
+
+        // A programmatic selection move first publishes through the delegate
+        // (a real change), then the sync must publish nothing of its own.
+        controller.textView.setSelectedRange(
+            NSRange(location: 2, length: 0)
+        )
+        XCTAssertFalse(
+            track { controller.syncFromDocument() },
+            "a sync after a selection restore published observable state"
+        )
+
+        // The deferred publication still reaches the status bar.
+        try await waitUntil("the deferred cursor state") {
+            controller.cursorLine == 2 || controller.cursorColumn > 1
+        }
+    }
+
+    /// Cursor movement within one revision must not schedule a symbol scan per
+    /// move. The first move schedules one lookup; the rest ride on it, and the
+    /// lookup reads the settled caret when it runs.
+    func testOneHundredCursorMovesInOneRevisionScheduleOneScan() async throws {
+        let root = try support.makeRoot(files: [
+            "symbols.swift": CodeTestData.utf8(
+                "func first() {}\n\nfunc second() {}\n"
+            )
+        ])
+        let document = CodeDocument(
+            url: root.appendingPathComponent("symbols.swift")
+        )
+        await document.load()
+        let controller = CodeEditorController(
+            document: document,
+            settings: CodeEditorSettings()
+        )
+        controller.attach()
+        try await waitUntil("the first symbol scan") {
+            controller.symbolName != nil
+        }
+        let scans = controller.symbolScanCount
+        let secondLine = (document.source as NSString)
+            .range(of: "func second").location
+
+        for index in 0..<100 {
+            let location = index.isMultiple(of: 2) ? 0 : secondLine
+            controller.textView.setSelectedRange(
+                NSRange(location: location, length: 0)
+            )
+            controller.textViewDidChangeSelection(
+                Notification(
+                    name: NSTextView.didChangeSelectionNotification
+                )
+            )
+        }
+        try await waitUntil("a settled symbol") {
+            controller.symbolName != nil
+        }
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(
+            controller.symbolScanCount,
+            scans,
+            "one revision ran more than one symbol scan"
+        )
+    }
+
+    /// A stream of requests faster than the debounce must not cancel every
+    /// pass. The old code replaced the task on each call; this one triggers
+    /// every millisecond and still expects a completed lex.
+    func testRepeatedHighlightRequestsStillCompleteAPass() async throws {
+        let root = try support.makeRoot(files: [
+            "data.swift": CodeTestData.utf8("let value = 1\n")
+        ])
+        let document = CodeDocument(
+            url: root.appendingPathComponent("data.swift")
+        )
+        await document.load()
+        let controller = CodeEditorController(
+            document: document,
+            settings: CodeEditorSettings()
+        )
+        controller.attach()
+        try await waitUntil("the first lex") {
+            controller.highlightPassCount > 0
+        }
+        let before = controller.highlightPassCount
+
+        for _ in 0..<500 {
+            controller.scheduleHighlight(editedLine: 0)
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try await waitUntil("a pass under sustained requests") {
+            controller.highlightPassCount > before
+        }
     }
 
     private func waitUntil(

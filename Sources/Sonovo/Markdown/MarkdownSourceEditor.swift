@@ -107,6 +107,23 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// editor leaving the key window.
     private var windowResignObserver: NSObjectProtocol?
     private var visibleHighlightTask: Task<Void, Never>?
+    private var visibleHighlightGeneration: UInt64 = 0
+    private var visibleHighlightTaskID: UInt64 = 0
+    /// Set by a selection or text change; the coalesced viewport pass runs
+    /// the typewriter correction once. A scroll only repaints, so a user
+    /// scroll is never overridden by the caret correction.
+    private var pendingTypewriterCorrection = false
+    /// Set while `syncFromDocument` restores a selection. `setSelectedRange`
+    /// posts synchronously; the delegate must not treat that echo as a user
+    /// change or publish document state from `updateNSView`.
+    private var isRestoringSelection = false
+    private var selectionRestoreClearTask: Task<Void, Never>?
+    /// Coalesces viewport work queued by the sync path.
+    private var postSyncTask: Task<Void, Never>?
+    /// Set by a programmatic scroll; the next bounds notification is this
+    /// editor's own movement, not a user scroll, and must not be reported as
+    /// a reading anchor.
+    private var suppressNextAnchorReport = false
 
     private let parseCoordinator: MarkdownParseCoordinator
     private let parseDebounce: TimeInterval
@@ -125,6 +142,21 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     private var parseTask: Task<Void, Never>?
     private var pendingParseRevision: UInt64?
+    /// Diagnostic count of parse requests actually issued. A debounce
+    /// regression test uses it to prove a stream of edits cannot starve the
+    /// parse entirely.
+    private(set) var parseRequestCount = 0
+    /// The newest parse request. Calls update this instead of replacing the
+    /// task; one runner drains it, so a stream of keystrokes cannot cancel
+    /// every debounce before it fires.
+    private var pendingParse: ParseRequest?
+    private var parseLoopID: UInt64 = 0
+
+    private struct ParseRequest {
+        let identityGeneration: UInt64
+        let revision: UInt64
+        let source: String
+    }
     private var linkPopover: MarkdownLinkPopoverController?
     private var tablePopover: MarkdownTablePopoverController?
     /// The table the grid popover edits, captured when it opened. Commits
@@ -296,6 +328,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         reviewRulerView.lineTop = { [weak self] offset in
             self?.lineTop(offset: offset)
         }
+        reviewRulerView.lineTops = { [weak self] offsets in
+            self?.lineTops(at: offsets) ?? [:]
+        }
         reviewRulerView.onSelect = { [weak self] id in
             self?.onReviewMarkerSelected?(id)
         }
@@ -352,6 +387,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         installScrollObserver()
         syncFromDocument()
         refreshReviewMarkers()
+        textView.refreshVisibleLines()
     }
 
     isolated deinit {
@@ -460,27 +496,70 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             object: clip,
             queue: .main
         ) { _ in
+            // Capture the flag synchronously: the notification is delivered
+            // on the main queue, but the work below is a later task.
+            let isProgrammatic = MainActor.assumeIsolated {
+                let value = box.value?.suppressNextAnchorReport ?? false
+                box.value?.suppressNextAnchorReport = false
+                return value
+            }
             Task { @MainActor in
                 guard let controller = box.value else { return }
+                controller.textView.refreshVisibleLines()
                 controller.reviewRulerView.needsDisplay = true
                 controller.scheduleVisibleHighlight()
-                if let anchor = controller.readingAnchor() {
-                    controller.onVisibleAnchorChange?(anchor)
+                guard !isProgrammatic,
+                      let anchor = controller.readingAnchor() else {
+                    return
                 }
+                controller.onVisibleAnchorChange?(anchor)
             }
         }
     }
 
-    private func scheduleVisibleHighlight() {
-        guard let output = lastOutput else { return }
-        visibleHighlightTask?.cancel()
+    /// Coalesces viewport repaints, and the typewriter correction that follows
+    /// them, behind one generation token. A scroll produces a burst of bounds
+    /// notifications; applying the highlight for each one changed font
+    /// metrics, forced layout, and produced another bounds notification.
+    /// Only the newest generation paints.
+    private func scheduleVisibleHighlight(typingCorrection: Bool = false) {
+        if typingCorrection {
+            pendingTypewriterCorrection = true
+        }
+        visibleHighlightGeneration &+= 1
+        guard visibleHighlightTask == nil else { return }
+        visibleHighlightTaskID &+= 1
+        let taskID = visibleHighlightTaskID
         visibleHighlightTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 16_000_000)
-            guard !Task.isCancelled, let self else { return }
-            self.applyHighlight(
-                output,
-                decorations: self.currentDecorations
-            )
+            while !Task.isCancelled {
+                guard let self else { return }
+                let generation = self.visibleHighlightGeneration
+                try? await Task.sleep(nanoseconds: 16_000_000)
+                guard !Task.isCancelled else { return }
+                if generation != self.visibleHighlightGeneration { continue }
+                if let output = self.lastOutput {
+                    self.applyHighlight(
+                        output,
+                        decorations: self.currentDecorations
+                    )
+                }
+                // The typewriter correction follows the caret even when the
+                // buffer is too large to parse and there is no output to
+                // paint; it was previously driven by every selection change.
+                if self.pendingTypewriterCorrection {
+                    self.pendingTypewriterCorrection = false
+                    self.keepCaretNearTypewriterLine()
+                }
+                if generation == self.visibleHighlightGeneration {
+                    if self.visibleHighlightTaskID == taskID {
+                        self.visibleHighlightTask = nil
+                    }
+                    return
+                }
+            }
+            if let self, self.visibleHighlightTaskID == taskID {
+                self.visibleHighlightTask = nil
+            }
         }
     }
 
@@ -793,6 +872,34 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         return NSRange(location: lower, length: upper - lower)
     }
 
+    /// The laid-out viewport without the margin. Font metrics may change only
+    /// here: a heading font applied just past the viewport forces TextKit to
+    /// lay out offscreen content, which changes the document height and can
+    /// post another bounds notification.
+    private func visibleMetricRange() -> NSRange {
+        let length = textView.string.utf16.count
+        let full = NSRange(location: 0, length: length)
+        guard length > 0,
+              let layout = textView.textLayoutManager,
+              let content = layout.textContentManager,
+              let viewport = layout.textViewportLayoutController
+                  .viewportRange else {
+            return full
+        }
+        let start = content.offset(
+            from: content.documentRange.location,
+            to: viewport.location
+        )
+        let end = content.offset(
+            from: content.documentRange.location,
+            to: viewport.endLocation
+        )
+        let lower = max(0, min(start, end))
+        let upper = min(length, max(start, end))
+        guard upper > lower else { return full }
+        return NSRange(location: lower, length: upper - lower)
+    }
+
     // MARK: - View configuration
 
     private func configure(_ view: NSTextView) {
@@ -878,6 +985,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             // is safe.
             synchronizedRevision = document.revision
             restoreSelection(selected)
+            schedulePostSyncPublication()
             // Initial attachment copies the source in `init`, so the strings
             // are already equal and this is the only place that can start the
             // first parse. Without it an existing document stays unhighlighted
@@ -891,6 +999,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
         resetTextToDocument()
         restoreSelection(selected)
+        schedulePostSyncPublication()
         if let anchor = pendingSourceReplacementAnchor {
             pendingSourceReplacementAnchor = nil
             restoreReadingAnchor(anchor)
@@ -908,27 +1017,60 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         resetMultiCursor()
         compositionTracker = nil
         suppressSync = true
+        beginProgrammaticSelectionRestore()
         textView.string = document.source
         synchronizedRevision = document.revision
         applyBaseAttributesOnly()
         suppressSync = false
     }
 
+    /// Marks the next selection notification as this editor's own change.
+    /// The flag clears after the current actor turn: AppKit posts some
+    /// selection notifications from the text replacement itself, and the
+    /// delegate would otherwise publish them into observable document state
+    /// from `updateNSView`.
+    private func beginProgrammaticSelectionRestore() {
+        isRestoringSelection = true
+        selectionRestoreClearTask?.cancel()
+        selectionRestoreClearTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.isRestoringSelection = false
+        }
+    }
+
     /// Restores the selection without republishing it. This runs from
     /// `updateNSView`; `setSelectedRange` posts a selection notification on
     /// every call, and a notification raised inside the update path is how a
-    /// SwiftUI representable re-enters itself. The document selection is
-    /// observable, so it is written only when it differs.
+    /// SwiftUI representable re-enters itself. The delegate is suppressed for
+    /// the programmatic move, and no document state is written; a real user
+    /// change still publishes through the delegate.
     private func restoreSelection(_ selected: NSRange) {
         let length = (textView.string as NSString).length
         let location = min(max(0, selected.location), length)
         let upper = min(length, location + max(0, selected.length))
         let range = NSRange(location: location, length: upper - location)
         if textView.selectedRange() != range {
+            beginProgrammaticSelectionRestore()
             textView.setSelectedRange(range)
         }
-        if let swiftRange = Range(range), document.selection != swiftRange {
-            document.selection = swiftRange
+    }
+
+    /// Publishes the viewport work the sync path used to trigger through the
+    /// delegate, once, after `updateNSView` returns.
+    private func schedulePostSyncPublication() {
+        guard postSyncTask == nil else { return }
+        postSyncTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            self.postSyncTask = nil
+            // A suppressed programmatic restore does not reach the delegate,
+            // so the document selection is published here, after the update.
+            if let range = Range(self.textView.selectedRange()),
+               self.document.selection != range {
+                self.document.selection = range
+            }
+            self.scheduleVisibleHighlight(typingCorrection: true)
         }
     }
 
@@ -1017,7 +1159,9 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         scheduleParse()
         flushPendingCommands()
         refreshReviewMarkers()
-        keepCaretNearTypewriterLine()
+        // The typewriter correction runs with the coalesced viewport pass
+        // below, not once per keystroke.
+        scheduleVisibleHighlight(typingCorrection: true)
     }
 
     /// Records the state the current composition started from, once.
@@ -1040,6 +1184,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        guard !isRestoringSelection else { return }
         // With a caret set live, a native selection change is one of three
         // things: an echo of our own write (suppressed above), a pointer
         // gesture by the user, or a navigation another surface performed —
@@ -1074,8 +1219,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
            document.selection != range {
             document.selection = range
         }
-        scheduleVisibleHighlight()
-        keepCaretNearTypewriterLine()
+        scheduleVisibleHighlight(typingCorrection: true)
     }
 
     // The choke point: with more than one caret, any AppKit-initiated text
@@ -1912,17 +2056,31 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     /// Keeps the caret's visual line near 40% of the viewport. A line already
     /// within the jitter window does not move, and Reduce Motion falls back
     /// to the minimal scroll instead of re-centering.
+    /// Marks the next bounds notification as this editor's own movement. The
+    /// flag expires after the current runloop turn even if no notification
+    /// arrives, so it can never swallow a later user scroll.
+    private func markProgrammaticScroll() {
+        suppressNextAnchorReport = true
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.suppressNextAnchorReport = false
+        }
+    }
+
     func keepCaretNearTypewriterLine() {
         guard isTypewriterEnabled, !textView.hasMarkedText() else { return }
         let caret = textView.selectedRange().location
         // The caret may be offscreen after a programmatic move; lay its line
-        // out before measuring it.
+        // out before measuring it. The move is ours, so it is not reported as
+        // a user scroll.
+        markProgrammaticScroll()
         textView.scrollRangeToVisible(NSRange(location: caret, length: 0))
         guard let line = textView.visibleCodeLines()
             .last(where: { $0.documentOffset <= caret }) else {
             return
         }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            markProgrammaticScroll()
             textView.scrollRangeToVisible(
                 NSRange(location: caret, length: 0)
             )
@@ -1938,6 +2096,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         }
         let maximum = max(0, textView.bounds.height - visible.height)
         let y = min(max(0, target), maximum)
+        markProgrammaticScroll()
         scrollView.contentView.scroll(
             to: NSPoint(x: visible.origin.x, y: y)
         )
@@ -2697,6 +2856,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         let ns = textView.string as NSString
         guard ns.length > 0 else { return }
         let clamped = min(max(offset, 0), ns.length - 1)
+        markProgrammaticScroll()
         // Lay out the line first; `lineTop` reads the fragment geometry.
         textView.scrollRangeToVisible(
             NSRange(location: clamped, length: min(1, ns.length - clamped))
@@ -2705,6 +2865,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         let visible = scrollView.contentView.bounds
         let maximum = max(0, textView.bounds.height - visible.height)
         let target = min(max(0, top), maximum)
+        markProgrammaticScroll()
         scrollView.contentView.scroll(
             to: NSPoint(x: visible.origin.x, y: target)
         )
@@ -2766,10 +2927,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
         if let selection = anchor.selection {
             let location = min(max(selection.lowerBound, 0), ns.length)
             let upper = min(max(location, selection.upperBound), ns.length)
+            beginProgrammaticSelectionRestore()
             textView.setSelectedRange(
                 NSRange(location: location, length: upper - location)
             )
         }
+        markProgrammaticScroll()
         textView.scrollRangeToVisible(
             NSRange(location: start, length: min(1, ns.length - start))
         )
@@ -2796,6 +2959,7 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
                     - scrollView.contentView.bounds.height
             )
             let target = min(desired, available)
+            markProgrammaticScroll()
             scrollView.contentView.scroll(
                 to: NSPoint(
                     x: scrollView.contentView.bounds.origin.x,
@@ -2817,19 +2981,31 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
     /// The view-space y of the line fragment that starts at `offset`.
     private func lineTop(offset: Int) -> CGFloat? {
-        guard let layout = textView.textLayoutManager,
+        lineTops(at: [offset])[offset]
+    }
+
+    /// Resolves many marker offsets with one viewport layout. The caller
+    /// passes sorted unique offsets; the dictionary is returned to the ruler.
+    private func lineTops(at offsets: [Int]) -> [Int: CGFloat] {
+        guard !offsets.isEmpty,
+              let layout = textView.textLayoutManager,
               let content = layout.textContentManager else {
-            return nil
+            return [:]
         }
         layout.textViewportLayoutController.layoutViewport()
-        guard let location = content.location(
-            content.documentRange.location,
-            offsetBy: offset
-        ), let fragment = layout.textLayoutFragment(for: location) else {
-            return nil
+        var result: [Int: CGFloat] = [:]
+        result.reserveCapacity(offsets.count)
+        for offset in offsets {
+            guard let location = content.location(
+                content.documentRange.location,
+                offsetBy: offset
+            ), let fragment = layout.textLayoutFragment(for: location) else {
+                continue
+            }
+            result[offset] = fragment.layoutFragmentFrame.minY
+                + textView.textContainerOrigin.y
         }
-        return fragment.layoutFragmentFrame.minY
-            + textView.textContainerOrigin.y
+        return result
     }
 
     // MARK: - Find bar seeding
@@ -3144,44 +3320,70 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
     // MARK: - Parsing and highlighting
 
     func scheduleParse(immediate: Bool = false) {
-        parseTask?.cancel()
-
         // Above the editable threshold the document is presented as plain
         // source. Parsing it only to color ranges would build a second
         // document-sized AST, which is the cost the size policy exists to
         // avoid.
         guard !document.isLarge else {
+            parseTask?.cancel()
             parseTask = nil
+            pendingParse = nil
             pendingParseRevision = nil
             lastOutput = nil
             applyBaseAttributesOnly()
             return
         }
 
-        let revision = document.revision
-        let source = textView.string
-        let delay = immediate ? 0 : parseDebounce
-        pendingParseRevision = revision
+        let request = ParseRequest(
+            identityGeneration: document.identityGeneration,
+            revision: document.revision,
+            source: textView.string
+        )
+        pendingParse = request
+        pendingParseRevision = request.revision
 
-        // The debounce is input scheduling, not parse ownership: after it
-        // elapses the document-owned coordinator does the work and publishes
-        // to every consumer.
+        if immediate {
+            // Mount and reload need the parse now, not after the debounce.
+            parseTask?.cancel()
+            parseTask = nil
+            startParseLoop(delay: 0)
+        } else if parseTask == nil {
+            startParseLoop(delay: parseDebounce)
+        }
+        // Otherwise the running loop will take the newest request after its
+        // current debounce; it is not replaced per call.
+    }
+
+    private func startParseLoop(delay: TimeInterval) {
+        parseLoopID &+= 1
+        let loopID = parseLoopID
         parseTask = Task { @MainActor [weak self] in
-            if delay > 0 {
-                try? await Task.sleep(
-                    nanoseconds: UInt64(delay * 1_000_000_000)
+            while !Task.isCancelled {
+                guard let self, let request = self.pendingParse else { break }
+                self.pendingParse = nil
+                if delay > 0 {
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(delay * 1_000_000_000)
+                    )
+                }
+                guard !Task.isCancelled else { break }
+                // Take the newest request that arrived during the delay.
+                let chosen = self.pendingParse ?? request
+                self.pendingParse = nil
+                if self.pendingParseRevision == chosen.revision {
+                    self.pendingParseRevision = nil
+                }
+                self.parseRequestCount += 1
+                self.parseCoordinator.request(
+                    documentID: self.document.id,
+                    identityGeneration: chosen.identityGeneration,
+                    revision: chosen.revision,
+                    source: chosen.source
                 )
             }
-            guard !Task.isCancelled, let self else { return }
-            if self.pendingParseRevision == revision {
-                self.pendingParseRevision = nil
+            if let self, self.parseLoopID == loopID {
+                self.parseTask = nil
             }
-            self.parseCoordinator.request(
-                documentID: self.document.id,
-                identityGeneration: self.document.identityGeneration,
-                revision: revision,
-                source: source
-            )
         }
     }
 
@@ -3235,9 +3437,13 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
         lastOutput = output
         let affected = affectedRange()
+        let metrics = visibleMetricRange()
         MarkdownDecorationCompositor.apply(
             syntax: { storage in
-                MarkdownHighlighter(affectedRange: affected).apply(
+                MarkdownHighlighter(
+                    affectedRange: affected,
+                    fontRange: metrics
+                ).apply(
                     ast: output.ast,
                     to: storage
                 )
@@ -3245,10 +3451,12 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
             decorations: decorations,
             to: storage,
             affectedRange: affected,
+            fontRange: metrics,
             baseAttributes: baseAttributes
         )
 
         textView.typingAttributes = baseAttributes
+        textView.refreshVisibleLines()
         lastHighlightedRevision = output.revision
         onHighlightApplied?(output.revision)
     }
@@ -3395,6 +3603,13 @@ final class MarkdownEditorController: NSObject, NSTextViewDelegate {
 
 /// An NSTextView that accepts pasted and dropped images through the controller.
 final class MarkdownTextView: NSTextView {
+    private struct VisibleLineCache {
+        let visible: NSRect
+        let length: Int
+        let lines: [CodeLineLayout]
+    }
+
+    private var visibleLineCache: VisibleLineCache?
     var onPasteImage: ((Data, String) -> Bool)?
     /// Returns true when the controller consumed the whole-document select.
     var onSmartSelectAll: (() -> Bool)?
@@ -3622,10 +3837,22 @@ final class MarkdownTextView: NSTextView {
     /// The viewport's rendered visual lines, in view coordinates. Shared by
     /// the line-number ruler and typewriter mode, so a coordinate fix cannot
     /// drift between them.
+    ///
+    /// Drawing reads this cache. Forcing TextKit layout from a draw pass
+    /// re-entered layout on every scroll frame; the viewport is refreshed
+    /// from the bounds observer and after attributes change, and the lazy
+    /// refresh below is the first-draw fallback.
     func visibleCodeLines() -> [CodeLineLayout] {
+        if let cache = visibleLineCache { return cache.lines }
+        refreshVisibleLines()
+        return visibleLineCache?.lines ?? []
+    }
+
+    func refreshVisibleLines() {
         guard let layout = textLayoutManager,
               let content = layout.textContentManager else {
-            return []
+            visibleLineCache = nil
+            return
         }
         let inset = textContainerInset
         let visible = visibleRect
@@ -3667,7 +3894,11 @@ final class MarkdownTextView: NSTextView {
             }
             return true
         }
-        return lines
+        visibleLineCache = VisibleLineCache(
+            visible: visible,
+            length: textStorage?.length ?? 0,
+            lines: lines
+        )
     }
 }
 
@@ -4144,6 +4375,9 @@ private struct ListLine {
 
 private struct MarkdownHighlighter {
     let affectedRange: NSRange
+    /// `nil` keeps font changes inside `affectedRange`. The live editor
+    /// passes the laid-out viewport so metrics never change offscreen.
+    var fontRange: NSRange?
 
     private let textColor = NSColor(AppTheme.Palette.label)
     private let secondary = NSColor(AppTheme.Palette.secondaryLabel)
@@ -4447,9 +4681,11 @@ private struct MarkdownHighlighter {
               nsRange.location + nsRange.length <= storage.length else {
             return
         }
-        let intersection = NSIntersectionRange(nsRange, affectedRange)
-        guard intersection.length > 0 else { return }
-        storage.addAttribute(key, value: value, range: intersection)
+        let target = key == .font
+            ? NSIntersectionRange(nsRange, fontRange ?? affectedRange)
+            : NSIntersectionRange(nsRange, affectedRange)
+        guard target.length > 0 else { return }
+        storage.addAttribute(key, value: value, range: target)
     }
 
     /// Adds an attribute for a marker range that has no `SourceRange`
@@ -4465,9 +4701,11 @@ private struct MarkdownHighlighter {
               NSMaxRange(nsRange) <= storage.length else {
             return
         }
-        let intersection = NSIntersectionRange(nsRange, affectedRange)
-        guard intersection.length > 0 else { return }
-        storage.addAttribute(key, value: value, range: intersection)
+        let target = key == .font
+            ? NSIntersectionRange(nsRange, fontRange ?? affectedRange)
+            : NSIntersectionRange(nsRange, affectedRange)
+        guard target.length > 0 else { return }
+        storage.addAttribute(key, value: value, range: target)
     }
 }
 

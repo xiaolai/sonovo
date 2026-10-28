@@ -35,6 +35,10 @@ final class ReviewMarkerRulerView: NSRulerView {
 
     /// The line-fragment top for a UTF-16 offset, in client-view coordinates.
     var lineTop: ((Int) -> CGFloat?)?
+    /// Batched variant: computes every marker's top in one viewport pass.
+    /// The per-offset callback forces TextKit layout per marker, so a draw
+    /// with many comments paid for that layout once per comment.
+    var lineTops: (([Int]) -> [Int: CGFloat])?
     /// The visible visual lines, in client-view coordinates.
     var visibleLines: (() -> [CodeLineLayout])?
     /// The 1-based source line number for a UTF-16 offset.
@@ -89,12 +93,25 @@ final class ReviewMarkerRulerView: NSRulerView {
                     / AppTheme.MarkdownChrome.Comments.markerCenterDivisor
             : ruleThickness
                 / AppTheme.MarkdownChrome.Comments.markerCenterDivisor
-        var groups: [MarkerGroup] = []
-        for marker in commentMarkers {
-            guard marker.anchored,
-                  let top = lineTop?(marker.offset) else {
-                continue
+        let anchored = commentMarkers.filter(\.anchored)
+        // One batched viewport pass for every distinct offset, in sorted
+        // order. Without the batch callback, fall back to per-marker lookups.
+        let tops: [Int: CGFloat]
+        if let lineTops {
+            let offsets = Array(Set(anchored.map(\.offset))).sorted()
+            tops = lineTops(offsets)
+        } else {
+            var resolved: [Int: CGFloat] = [:]
+            for marker in anchored {
+                if let top = lineTop?(marker.offset) {
+                    resolved[marker.offset] = top
+                }
             }
+            tops = resolved
+        }
+        var groups: [MarkerGroup] = []
+        for marker in anchored {
+            guard let top = tops[marker.offset] else { continue }
             let origin = convert(NSPoint(x: 0, y: top), from: clientView)
             let rect = NSRect(
                 x: centerX - diameter / AppTheme.MarkdownChrome.Comments.markerCenterDivisor,

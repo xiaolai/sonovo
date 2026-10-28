@@ -532,6 +532,51 @@ final class MarkdownEditorTests: XCTestCase {
         )
     }
 
+    /// `updateNSView` must not publish selection echoes. A document replaced
+    /// by a shorter source clamps the view's selection; that programmatic
+    /// `setSelectedRange` posts a notification, and the delegate must not
+    /// write it back into the observable document or schedule a second pass.
+    func testSyncFromDocumentDoesNotPublishAProgrammaticSelection() throws {
+        let (document, _, controller) = makeController(
+            source: "alpha beta gamma\n"
+        )
+        controller.attach()
+        controller.textView.setSelectedRange(
+            NSRange(location: 15, length: 0)
+        )
+        XCTAssertEqual(document.selection, 15..<15)
+        document.selection = nil
+
+        try document.replaceSource("a\n")
+        controller.syncFromDocument()
+
+        XCTAssertNil(
+            document.selection,
+            "the sync echo was published onto the document"
+        )
+        XCTAssertEqual(
+            controller.textView.selectedRange().location,
+            2,
+            "the sync did not clamp and restore the selection"
+        )
+    }
+
+    /// A stream of edits faster than the parse debounce must not cancel
+    /// every parse. One runner keeps the newest request and drains it.
+    func testSustainedParseRequestsStillIssueAParse() async throws {
+        let (_, _, controller) = makeController(source: "alpha\n")
+        controller.attach()
+        for _ in 0..<500 {
+            controller.scheduleParse()
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let issued = await waitUntil { controller.parseRequestCount > 0 }
+        XCTAssertTrue(
+            issued,
+            "no parse was issued during sustained requests"
+        )
+    }
+
     // MARK: - Link routing
 
     func testSourceLinkOpenUsesTheWorkspaceRouting() {
