@@ -212,12 +212,10 @@ final class MarkdownSplitViewTests: XCTestCase {
     }
 
     func testSplitScrollSyncEchoIsSuppressed() async throws {
-        var now = Date(timeIntervalSince1970: 1_000)
         let (workspace, document, directory) = try openDocument(
             "alpha\n\nbeta\n"
         )
         defer { try? FileManager.default.removeItem(at: directory) }
-        workspace.splitSyncNow = { now }
         workspace.setSplitView(true, for: document)
         let maybeOutput = await waitForReady(workspace, document)
         let output = try XCTUnwrap(
@@ -226,6 +224,9 @@ final class MarkdownSplitViewTests: XCTestCase {
         )
         let first = try XCTUnwrap(output.ast.blocks.first?.range)
         let second = try XCTUnwrap(output.ast.blocks.last?.range)
+        let secondLineStart = (document.source as NSString)
+            .lineRange(for: NSRange(location: second.lowerBound, length: 0))
+            .location
 
         workspace.renderedDidScroll(
             RenderedReadingAnchor(
@@ -240,18 +241,30 @@ final class MarkdownSplitViewTests: XCTestCase {
             second.lowerBound
         )
 
-        // The source pane reports the programmatic scroll it just received;
-        // that report must not bounce back into a new rendered target.
+        // The source pane reports the programmatic scroll it just received.
+        // That is the one-shot echo: it consumes the token and writes no
+        // rendered target, with no wall-clock window involved.
         workspace.sourceDidScroll(
             SourceReadingAnchor(
-                lineOffset: first.lowerBound,
+                lineOffset: secondLineStart,
                 viewportOffset: 0
             ),
             in: document
         )
         XCTAssertNil(workspace.scrollTargets[document.id])
 
-        now = now.addingTimeInterval(1)
+        // Repeated notifications from the same position are the same echo,
+        // even long after any old 0.35 s window would have expired.
+        workspace.sourceDidScroll(
+            SourceReadingAnchor(
+                lineOffset: secondLineStart,
+                viewportOffset: 0
+            ),
+            in: document
+        )
+        XCTAssertNil(workspace.scrollTargets[document.id])
+
+        // A genuine user move still syncs.
         workspace.sourceDidScroll(
             SourceReadingAnchor(
                 lineOffset: first.lowerBound,
@@ -260,6 +273,55 @@ final class MarkdownSplitViewTests: XCTestCase {
             in: document
         )
         XCTAssertEqual(workspace.scrollTargets[document.id], "block-0")
+    }
+
+    /// The echo token bounds the number of target writes even when the two
+    /// panes keep reporting. The test deliberately does not advance a clock:
+    /// suppression used to be a 0.35 s window, and a slow update re-armed the
+    /// loop after it expired.
+    func testSplitScrollSyncWritesStayBoundedAcrossManyReports() async throws {
+        let (workspace, document, directory) = try openDocument(
+            "alpha\n\nbeta\n"
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        workspace.setSplitView(true, for: document)
+        let maybeOutput = await waitForReady(workspace, document)
+        let output = try XCTUnwrap(
+            maybeOutput,
+            "the document did not finish parsing"
+        )
+        let second = try XCTUnwrap(output.ast.blocks.last?.range)
+        let secondLineStart = (document.source as NSString)
+            .lineRange(for: NSRange(location: second.lowerBound, length: 0))
+            .location
+        let renderedAnchor = RenderedReadingAnchor(
+            blockOffset: second.lowerBound,
+            blockKind: .paragraph,
+            fraction: 0
+        )
+        let sourceAnchor = SourceReadingAnchor(
+            lineOffset: secondLineStart,
+            viewportOffset: 0
+        )
+
+        var writes = 0
+        for _ in 0..<50 {
+            workspace.renderedDidScroll(renderedAnchor, in: document)
+            if workspace.sourceScrollTargets[document.id] != nil {
+                writes += 1
+                workspace.sourceScrollTargets[document.id] = nil
+            }
+            workspace.sourceDidScroll(sourceAnchor, in: document)
+            if workspace.scrollTargets[document.id] != nil {
+                writes += 1
+                workspace.scrollTargets[document.id] = nil
+            }
+        }
+        XCTAssertLessThanOrEqual(
+            writes,
+            2,
+            "repeated reports kept writing targets"
+        )
     }
 
     func testScrollSyncCanBeTurnedOff() async throws {

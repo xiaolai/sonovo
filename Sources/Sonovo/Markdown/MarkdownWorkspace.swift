@@ -41,6 +41,9 @@ final class MarkdownWorkspace {
     var isHistoryVisible = false
     /// Rendered find is per document: two panes each keep their own query,
     /// matches, and current index, so neither replaces the other's results.
+    /// A view-body accessor may create the controller; that cache must not
+    /// publish observable state from the body.
+    @ObservationIgnored
     private var renderedFinds: [UUID: RenderedFindController] = [:]
     /// Review comments live in a sidecar beside each document; this
     /// controller owns their state and every write.
@@ -63,8 +66,11 @@ final class MarkdownWorkspace {
     var proposalPreview: ProposalPreview?
     var isProposalVisible = false
     var proposalError: String?
-    /// Bumped whenever snapshots or transitions change, so panels refresh.
-    private(set) var historyRevision = 0
+    /// Cheap change tokens for the history panels. Splitting them means a
+    /// snapshot capture does not make the review panel re-read the snapshot
+    /// index, and a transition decision does not reload the record list.
+    private(set) var historyRecordsRevision = 0
+    private(set) var reviewTransitionsRevision = 0
     /// The owning project routes a local asset link to its viewer. Returns
     /// false when the project does not own the file, so the link falls back
     /// to the default app.
@@ -122,24 +128,38 @@ final class MarkdownWorkspace {
     var sourceScrollTargets: [UUID: Int] = [:]
     /// Whether split scrolling follows the other pane.
     var isSplitScrollSynced = true
-    /// The clock behind split-scroll echo suppression. Tests replace it.
-    @ObservationIgnored
-    var splitSyncNow: () -> Date = { Date() }
 
-    private enum SplitSyncDirection {
-        case source
-        case rendered
+    /// One echo token per document, owned by the pane that received a
+    /// programmatic scroll. The receiving pane reports an anchor; the first
+    /// report at the delivered position consumes the token, and repeated
+    /// reports at that position are ignored until the pane moves elsewhere.
+    /// There is one in-flight token at a time; a newer target replaces it.
+    private enum SplitEchoToken: Equatable {
+        case source(lineOffset: Int)
+        case rendered(scrollTarget: String)
     }
 
-    private struct SplitSyncIgnore {
-        let direction: SplitSyncDirection
-        let until: Date
+    @ObservationIgnored
+    private var splitEchoTokens: [UUID: SplitEchoToken] = [:]
+    /// The last echo report consumed, retained so a burst of bounds
+    /// notifications from one programmatic scroll cannot restart the loop.
+    @ObservationIgnored
+    private var splitEchoSettled: [UUID: SplitEchoToken] = [:]
+    /// The last target actually written in each direction. An identical
+    /// target is not written again after the receiver clears its binding.
+    @ObservationIgnored
+    private var lastRenderedTarget: [UUID: String] = [:]
+    @ObservationIgnored
+    private var lastSourceOffset: [UUID: Int] = [:]
+
+    private enum SplitSyncVerdict {
+        case none
+        case consume
+        case repeatReport
     }
 
     @ObservationIgnored
     private var splitReturnModes: [UUID: MarkdownDocumentMode] = [:]
-    @ObservationIgnored
-    private var splitSyncIgnore: [UUID: SplitSyncIgnore] = [:]
 
     /// Per-document reading state for the current session. Source keeps the
     /// selection and the scroll origin; Rendered keeps its last scroll ID.
@@ -199,7 +219,10 @@ final class MarkdownWorkspace {
         splitDocuments.removeAll()
         sourceScrollTargets.removeAll()
         splitReturnModes.removeAll()
-        splitSyncIgnore.removeAll()
+        splitEchoTokens.removeAll()
+        splitEchoSettled.removeAll()
+        lastRenderedTarget.removeAll()
+        lastSourceOffset.removeAll()
         secondaryDocumentID = nil
         focusedDocumentID = nil
         readingPositions.removeAll()
@@ -519,7 +542,10 @@ final class MarkdownWorkspace {
         splitDocuments.remove(id)
         sourceScrollTargets.removeValue(forKey: id)
         splitReturnModes.removeValue(forKey: id)
-        splitSyncIgnore.removeValue(forKey: id)
+        splitEchoTokens.removeValue(forKey: id)
+        splitEchoSettled.removeValue(forKey: id)
+        lastRenderedTarget.removeValue(forKey: id)
+        lastSourceOffset.removeValue(forKey: id)
         readingPositions.removeValue(forKey: id)
         pendingRenderedAnchors.removeValue(forKey: id)
         autosave.forget(id)
@@ -1028,7 +1054,10 @@ final class MarkdownWorkspace {
             collapseForPolicy(.modeSwitch, document)
             captureReadingPosition(for: document)
             sourceScrollTargets.removeValue(forKey: document.id)
-            splitSyncIgnore.removeValue(forKey: document.id)
+            splitEchoTokens.removeValue(forKey: document.id)
+            splitEchoSettled.removeValue(forKey: document.id)
+            lastRenderedTarget.removeValue(forKey: document.id)
+            lastSourceOffset.removeValue(forKey: document.id)
             let mode = splitReturnModes.removeValue(forKey: document.id)
                 ?? .source
             document.mode = mode
@@ -1064,10 +1093,17 @@ final class MarkdownWorkspace {
         _ anchor: SourceReadingAnchor,
         in document: MarkdownDocument
     ) {
-        guard isSplitView(document),
-              isSplitScrollSynced,
-              !ignoresSplitSync(.source, for: document),
-              let output = currentSplitOutput(for: document),
+        guard isSplitView(document), isSplitScrollSynced else { return }
+        switch splitSyncVerdict(
+            .source(lineOffset: anchor.lineOffset),
+            for: document
+        ) {
+        case .consume, .repeatReport:
+            return
+        case .none:
+            break
+        }
+        guard let output = currentSplitOutput(for: document),
               let index = MarkdownSplitSync.renderedBlockIndex(
                   forSourceOffset: anchor.lineOffset,
                   in: output.ast.blocks
@@ -1079,7 +1115,16 @@ final class MarkdownWorkspace {
               ) else {
             return
         }
-        suppressSplitSync(.rendered, for: document)
+        // An identical target is not a new instruction. The receiving pane
+        // clears its binding after delivery; without this the same block is
+        // re-written every time that pane reports a redundant notification.
+        guard lastRenderedTarget[document.id] != target else { return }
+        // The source pane is driving: a rendered target from an earlier
+        // exchange must not suppress this one.
+        lastSourceOffset.removeValue(forKey: document.id)
+        lastRenderedTarget[document.id] = target
+        splitEchoTokens[document.id] = .rendered(scrollTarget: target)
+        splitEchoSettled.removeValue(forKey: document.id)
         scrollTargets[document.id] = target
     }
 
@@ -1090,18 +1135,94 @@ final class MarkdownWorkspace {
         in document: MarkdownDocument
     ) {
         recordRenderedAnchor(anchor, for: document)
-        guard isSplitView(document),
-              isSplitScrollSynced,
-              !ignoresSplitSync(.rendered, for: document),
-              let output = currentSplitOutput(for: document),
+        guard isSplitView(document), isSplitScrollSynced else { return }
+        let output = currentSplitOutput(for: document)
+        if let output,
+           let index = MarkdownSplitSync.renderedBlockIndex(
+               forSourceOffset: anchor.blockOffset,
+               in: output.ast.blocks
+           ),
+           let identity = MarkdownSplitSync.renderedScrollAnchor(
+               forBlockIndex: index,
+               in: output.ast.blocks,
+               headings: output.headings.headings
+           ) {
+            switch splitSyncVerdict(
+                .rendered(scrollTarget: identity),
+                for: document
+            ) {
+            case .consume, .repeatReport:
+                return
+            case .none:
+                break
+            }
+        }
+        guard let output,
               let offset = MarkdownSplitSync.sourceOffset(
                   for: anchor,
                   in: output.ast.blocks
               ) else {
             return
         }
-        suppressSplitSync(.source, for: document)
+        guard lastSourceOffset[document.id] != offset else { return }
+        lastRenderedTarget.removeValue(forKey: document.id)
+        lastSourceOffset[document.id] = offset
+        splitEchoTokens[document.id] = .source(
+            lineOffset: sourceLineStart(of: offset, in: document.source)
+        )
+        splitEchoSettled.removeValue(forKey: document.id)
         sourceScrollTargets[document.id] = offset
+    }
+
+    /// Classifies a pane's scroll report. The first report at the position a
+    /// programmatic target selected consumes that target's echo token; later
+    /// reports at the same position are the same echo. A report for another
+    /// position is a user scroll, which discards the stale token.
+    private func splitSyncVerdict(
+        _ identity: SplitEchoToken,
+        for document: MarkdownDocument
+    ) -> SplitSyncVerdict {
+        if let token = splitEchoTokens[document.id] {
+            if token == identity {
+                splitEchoTokens.removeValue(forKey: document.id)
+                splitEchoSettled[document.id] = identity
+                return .consume
+            }
+            switch (token, identity) {
+            case (.source, .rendered), (.rendered, .source):
+                // A report from the other pane is a user action there; the
+                // token still waits for the pane it was written to.
+                return .none
+            case (.source, .source), (.rendered, .rendered):
+                // Same pane, different position: the user moved it.
+                splitEchoTokens.removeValue(forKey: document.id)
+                splitEchoSettled.removeValue(forKey: document.id)
+                return .none
+            }
+        }
+        if let settled = splitEchoSettled[document.id] {
+            if settled == identity { return .repeatReport }
+            switch (settled, identity) {
+            case (.source, .source), (.rendered, .rendered):
+                splitEchoSettled.removeValue(forKey: document.id)
+            case (.source, .rendered), (.rendered, .source):
+                // The other direction's settled record is irrelevant here.
+                break
+            }
+        }
+        return .none
+    }
+
+    /// The line start containing `offset`. The source pane reveals a line at
+    /// its top edge, and reports that line's start as the anchor.
+    private func sourceLineStart(of offset: Int, in source: String) -> Int {
+        let ns = source as NSString
+        guard ns.length > 0 else { return 0 }
+        var location = min(max(offset, 0), ns.length - 1)
+        while location > 0, ns.character(at: location - 1) != 0x0A {
+            location -= 1
+        }
+        return location
     }
 
     private func currentSplitOutput(
@@ -1114,28 +1235,6 @@ final class MarkdownWorkspace {
             return nil
         }
         return output
-    }
-
-    private func ignoresSplitSync(
-        _ direction: SplitSyncDirection,
-        for document: MarkdownDocument
-    ) -> Bool {
-        guard let entry = splitSyncIgnore[document.id] else { return false }
-        if splitSyncNow() >= entry.until {
-            splitSyncIgnore.removeValue(forKey: document.id)
-            return false
-        }
-        return entry.direction == direction
-    }
-
-    private func suppressSplitSync(
-        _ direction: SplitSyncDirection,
-        for document: MarkdownDocument
-    ) {
-        splitSyncIgnore[document.id] = SplitSyncIgnore(
-            direction: direction,
-            until: splitSyncNow().addingTimeInterval(0.35)
-        )
     }
 
     /// Records where an explicit source navigation should land, so the mount
@@ -1255,7 +1354,8 @@ final class MarkdownWorkspace {
         controller.onReviewMarkerSelected = { [weak self] threadID in
             self?.revealReviewComment(threadID, in: document)
         }
-        controller.refreshReviewMarkers()
+        // Marker refresh is driven by edits, comment changes, and mount, not
+        // by every access to the controller from a view body.
         return controller
     }
 
@@ -2134,7 +2234,7 @@ final class MarkdownWorkspace {
             relativePath: relative,
             kind: kind
         )
-        historyRevision &+= 1
+        historyRecordsRevision &+= 1
         switch result {
         case .captured(let record):
             await snapshots.setBaseline(
@@ -2164,7 +2264,7 @@ final class MarkdownWorkspace {
             relativePath: relative,
             diskBytes: bytes
         )
-        historyRevision &+= 1
+        reviewTransitionsRevision &+= 1
     }
 
     // MARK: - History and review panels
@@ -2210,7 +2310,7 @@ final class MarkdownWorkspace {
                 rawBytes: rawBytes,
                 expectedDiskBytes: current
             )
-            historyRevision &+= 1
+            // `recordSaveHistory` already bumped the record list.
         } catch {
             lastError = "Restore failed: \(error)"
         }
@@ -2218,7 +2318,7 @@ final class MarkdownWorkspace {
 
     func deleteSnapshot(_ record: MarkdownSnapshotRecord) async {
         await snapshotStore?.delete(id: record.id)
-        historyRevision &+= 1
+        historyRecordsRevision &+= 1
     }
 
     func keepTransition(_ transition: MarkdownReviewTransition) async {
@@ -2226,7 +2326,7 @@ final class MarkdownWorkspace {
             transitionID: transition.id,
             keep: true
         )
-        historyRevision &+= 1
+        reviewTransitionsRevision &+= 1
     }
 
     func revertTransition(
@@ -2265,7 +2365,7 @@ final class MarkdownWorkspace {
         case .kept, .alreadyDecided:
             break
         }
-        historyRevision &+= 1
+        reviewTransitionsRevision &+= 1
     }
 
     private func startWorkspaceWatcher(for root: URL) {

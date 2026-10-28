@@ -42,6 +42,34 @@ final class ProjectEditorHostContext {
         self.canvasRadius = canvasRadius
         self.workspaceTheme = workspaceTheme
     }
+
+    /// Applies only the values that changed. `updateNSView` runs for every
+    /// environment change; writing an identical value into this observable
+    /// object invalidates the retained editor root for nothing.
+    func update(
+        colorScheme: ColorScheme,
+        displayScale: CGFloat,
+        canvasInset: CGFloat,
+        canvasRadius: CGFloat,
+        workspaceTheme: WorkspaceTheme
+    ) {
+        if self.colorScheme != colorScheme { self.colorScheme = colorScheme }
+        if self.displayScale != displayScale {
+            self.displayScale = displayScale
+        }
+        if self.canvasInset != canvasInset { self.canvasInset = canvasInset }
+        if self.canvasRadius != canvasRadius {
+            self.canvasRadius = canvasRadius
+        }
+        if self.workspaceTheme != workspaceTheme {
+            self.workspaceTheme = workspaceTheme
+        }
+    }
+
+    /// Visibility is published only from the sync pass, never from `layout()`.
+    func setVisible(_ visible: Bool) {
+        if isVisible != visible { isVisible = visible }
+    }
 }
 
 /// One retained project editor. It is a separate SwiftUI root, so every
@@ -120,11 +148,13 @@ final class ProjectEditorHostRegistry {
     ) -> Entry {
         let key = ObjectIdentifier(project)
         if let existing = entries[key] {
-            existing.context.colorScheme = colorScheme
-            existing.context.displayScale = displayScale
-            existing.context.canvasInset = canvasInset
-            existing.context.canvasRadius = canvasRadius
-            existing.context.workspaceTheme = workspaceTheme
+            existing.context.update(
+                colorScheme: colorScheme,
+                displayScale: displayScale,
+                canvasInset: canvasInset,
+                canvasRadius: canvasRadius,
+                workspaceTheme: workspaceTheme
+            )
             return existing
         }
         let context = ProjectEditorHostContext(
@@ -151,11 +181,13 @@ final class ProjectEditorHostRegistry {
         workspaceTheme: WorkspaceTheme
     ) {
         for entry in entries.values {
-            entry.context.colorScheme = colorScheme
-            entry.context.displayScale = displayScale
-            entry.context.canvasInset = canvasInset
-            entry.context.canvasRadius = canvasRadius
-            entry.context.workspaceTheme = workspaceTheme
+            entry.context.update(
+                colorScheme: colorScheme,
+                displayScale: displayScale,
+                canvasInset: canvasInset,
+                canvasRadius: canvasRadius,
+                workspaceTheme: workspaceTheme
+            )
         }
     }
 
@@ -187,6 +219,9 @@ final class ProjectEditorHostContainer: NSView {
     private var canvasRadius: CGFloat
     private var workspaceTheme: WorkspaceTheme
     private weak var visibleEntryHost: NSView?
+    /// A layout pass may have changed which host is visible; the observable
+    /// publication is deferred to the next runloop turn and coalesced.
+    private var visibilityPublishScheduled = false
 
     init(
         state: AppState,
@@ -246,12 +281,20 @@ final class ProjectEditorHostContainer: NSView {
             canvasRadius: canvasRadius,
             workspaceTheme: workspaceTheme
         )
-        updateVisibility()
+        // Visibility publication is observable; doing it inside updateNSView
+        // invalidates a view SwiftUI is currently updating. The coalesced
+        // task publishes after the update returns.
+        updateVisibility(publish: false)
+        scheduleVisibilityPublish()
     }
 
     override func layout() {
         super.layout()
-        updateVisibility()
+        // Frames and hidden flags belong here. `context.isVisible` is
+        // observable, and mutating it inside layout invalidates a SwiftUI
+        // view during layout; publish it after the pass instead.
+        updateVisibility(publish: false)
+        scheduleVisibilityPublish()
     }
 
     override func viewDidMoveToWindow() {
@@ -307,15 +350,19 @@ final class ProjectEditorHostContainer: NSView {
         registry.removeAll()
     }
 
-    private func updateVisibility() {
+    private func updateVisibility(publish: Bool = true) {
         guard let activeProject,
               projects.contains(where: { $0 === activeProject }),
               bounds.width > 0,
               bounds.height > 0 else {
-            hideAll()
+            hideAll(publish: publish)
             return
         }
-        let entry = registry.entry(
+        // Layout may show or hide an existing host, but it must not update
+        // that host's observable context. `sync` owns that publication; when
+        // no host exists yet, creating one here is a local side effect only.
+        let key = ObjectIdentifier(activeProject)
+        let entry = registry.entries[key] ?? registry.entry(
             for: activeProject,
             colorScheme: colorScheme,
             displayScale: displayScale,
@@ -331,7 +378,9 @@ final class ProjectEditorHostContainer: NSView {
 
         for other in registry.entries.values where other.project !== activeProject {
             other.host.isHidden = true
-            other.context.isVisible = false
+            if publish {
+                other.context.setVisible(false)
+            }
         }
 
         if entry.host.superview !== self {
@@ -339,18 +388,32 @@ final class ProjectEditorHostContainer: NSView {
         }
         entry.host.frame = bounds
         entry.host.isHidden = false
-        entry.context.isVisible = true
+        if publish {
+            entry.context.setVisible(true)
+        }
         visibleEntryHost = entry.host
     }
 
-    private func hideAll() {
+    private func scheduleVisibilityPublish() {
+        guard !visibilityPublishScheduled else { return }
+        visibilityPublishScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.visibilityPublishScheduled = false
+            self.updateVisibility()
+        }
+    }
+
+    private func hideAll(publish: Bool = true) {
         if let visibleEntryHost {
             resignFocus(in: visibleEntryHost)
         }
         visibleEntryHost = nil
         for entry in registry.entries.values {
             entry.host.isHidden = true
-            entry.context.isVisible = false
+            if publish {
+                entry.context.setVisible(false)
+            }
         }
     }
 

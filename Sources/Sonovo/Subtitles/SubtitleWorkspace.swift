@@ -66,6 +66,10 @@ final class SubtitleWorkspace {
 
     private var watchers: [UUID: MarkdownFileWatcher] = [:]
     private var mediaOpenTasks: [UUID: Task<Void, Never>] = [:]
+    /// Controllers are created on demand from a view body. The cache is
+    /// internal state, not view state; publishing it would invalidate the
+    /// body that just asked for the controller.
+    @ObservationIgnored
     private var sourceEditors: [UUID: SubtitleSourceEditorController] = [:]
     @ObservationIgnored
     private var autosave: AutosaveDriver<SubtitleDocument>!

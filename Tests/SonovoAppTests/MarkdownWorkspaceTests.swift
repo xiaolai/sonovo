@@ -47,6 +47,31 @@ final class MarkdownWorkspaceTests: XCTestCase {
         return condition()
     }
 
+    func testRenderedFindAccessorDoesNotPublishOnRepeat() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("doc.md")
+        try Data("abc\n".utf8).write(to: url)
+
+        let workspace = MarkdownWorkspace()
+        let document = try XCTUnwrap(workspace.open(url: url))
+        // The first access creates and caches the controller. The second is
+        // the one a view body makes on every evaluation; it must be a plain
+        // cache hit, not an observable write.
+        _ = workspace.renderedFind(for: document)
+
+        let invalidated = WorkspaceObservationFlag()
+        withObservationTracking {
+            _ = workspace.renderedFind(for: document)
+        } onChange: {
+            invalidated.raise()
+        }
+        XCTAssertFalse(
+            invalidated.isRaised,
+            "a rendered-find cache hit invalidated the view body"
+        )
+    }
+
     func testNewDocumentAndCommandRouting() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -685,5 +710,24 @@ final class MarkdownWorkspaceTests: XCTestCase {
             controller.textView.selectedRange(),
             NSRange(location: 0, length: 0)
         )
+    }
+}
+
+/// A one-way flag for `withObservationTracking` callbacks, which are
+/// `@Sendable`; the write happens synchronously on the main thread.
+private final class WorkspaceObservationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+
+    func raise() {
+        lock.lock()
+        raised = true
+        lock.unlock()
+    }
+
+    var isRaised: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return raised
     }
 }

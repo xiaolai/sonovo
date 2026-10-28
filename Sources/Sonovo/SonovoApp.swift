@@ -252,33 +252,56 @@ private func hideHairlineLayers(
     }
 }
 
-private struct WindowChromeConfigurator: NSViewRepresentable {
-    /// Coalesces the immediate and delayed chrome passes. SwiftUI can update
-    /// this view many times before the toolbar exists; only the newest
-    /// generation is allowed to apply.
+struct WindowChromeConfigurator: NSViewRepresentable {
+    /// Applies the chrome once per window/toolbar identity. SwiftUI calls
+    /// `updateNSView` for every environment change; the old code scheduled two
+    /// window-tree walks on each one. The identity check makes all but the
+    /// first pass free.
     @MainActor
     final class Coordinator {
         weak var view: NSView?
-        private var generation = 0
+        private weak var appliedWindow: NSWindow?
+        private var appliedToolbar: ObjectIdentifier?
+        private var applyScheduled = false
+        /// Test seam: production applies the real chrome.
+        var applyChrome: @MainActor (NSWindow) -> Void = configureWindowChrome
 
         func schedule(_ view: NSView) {
             self.view = view
-            generation &+= 1
-            let token = generation
+            guard !isCurrent(window: view.window) else { return }
+            guard !applyScheduled else { return }
+            applyScheduled = true
             Task { @MainActor [weak self] in
-                self?.apply(token)
-            }
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(500))
-                self?.apply(token)
+                self?.apply(retryWithoutWindow: true)
             }
         }
 
-        private func apply(_ token: Int) {
-            guard token == generation, let window = view?.window else {
+        private func isCurrent(window: NSWindow?) -> Bool {
+            guard let window else { return false }
+            return appliedWindow === window
+                && appliedToolbar
+                    == window.toolbar.map(ObjectIdentifier.init)
+        }
+
+        private func apply(retryWithoutWindow: Bool) {
+            applyScheduled = false
+            guard let window = view?.window else {
+                guard retryWithoutWindow else { return }
+                applyScheduled = true
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    self?.apply(retryWithoutWindow: false)
+                }
                 return
             }
-            configureWindowChrome(window)
+            let toolbar = window.toolbar.map(ObjectIdentifier.init)
+            guard appliedWindow !== window
+                || appliedToolbar != toolbar else {
+                return
+            }
+            applyChrome(window)
+            appliedWindow = window
+            appliedToolbar = toolbar
         }
     }
 

@@ -187,8 +187,32 @@ final class ReviewCommentsController {
     }
 
     func placements(for document: MarkdownDocument) -> [ReviewThreadPlacement] {
-        state(for: document).review.placements(in: document.source)
+        let review = state(for: document).review
+        if let cache = placementCache[document.id],
+           cache.revision == document.revision,
+           cache.review == review {
+            return cache.placements
+        }
+        let placements = review.placements(in: document.source)
+        placementCache[document.id] = PlacementCache(
+            revision: document.revision,
+            review: review,
+            placements: placements
+        )
+        return placements
     }
+
+    private struct PlacementCache {
+        let revision: UInt64
+        let review: ReviewDocument
+        let placements: [ReviewThreadPlacement]
+    }
+
+    /// Placements are recomputed whenever the source or the comments change;
+    /// the ruler and the reveal path ask for them repeatedly within one
+    /// revision. The cache is internal work state, not observable state.
+    @ObservationIgnored
+    private var placementCache: [UUID: PlacementCache] = [:]
 
     func openCount(for document: MarkdownDocument) -> Int {
         state(for: document).review.openThreadCount
@@ -371,6 +395,7 @@ final class ReviewCommentsController {
     /// Forgets a closed document. The sidecar stays on disk.
     func discard(documentID: UUID) {
         states.removeValue(forKey: documentID)
+        placementCache.removeValue(forKey: documentID)
         if selectedThreadID != nil,
            !states.values.contains(where: { state in
                state.review.threads.contains { $0.id == selectedThreadID }
@@ -381,6 +406,7 @@ final class ReviewCommentsController {
 
     func discardAll() {
         states.removeAll()
+        placementCache.removeAll()
         selectedThreadID = nil
     }
 

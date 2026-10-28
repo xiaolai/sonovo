@@ -37,6 +37,28 @@ final class SubtitleWorkspaceTests: XCTestCase {
     World
     """
 
+    func testSourceControllerAccessorDoesNotPublishOnRepeat() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("demo.srt")
+        try Data(srt.utf8).write(to: url)
+
+        let workspace = SubtitleWorkspace()
+        let document = try XCTUnwrap(workspace.open(url: url))
+        _ = workspace.sourceController(for: document)
+
+        let invalidated = SubtitleObservationFlag()
+        withObservationTracking {
+            _ = workspace.sourceController(for: document)
+        } onChange: {
+            invalidated.raise()
+        }
+        XCTAssertFalse(
+            invalidated.isRaised,
+            "a source-editor cache hit invalidated the view body"
+        )
+    }
+
     func testOpenDeduplicatesCanonicalPaths() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -214,5 +236,24 @@ final class SubtitleWorkspaceTests: XCTestCase {
         player.close()
         XCTAssertNil(player.url)
         XCTAssertNil(player.errorMessage)
+    }
+}
+
+/// A one-way flag for `withObservationTracking` callbacks, which are
+/// `@Sendable`; the write happens synchronously on the main thread.
+private final class SubtitleObservationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+
+    func raise() {
+        lock.lock()
+        raised = true
+        lock.unlock()
+    }
+
+    var isRaised: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return raised
     }
 }

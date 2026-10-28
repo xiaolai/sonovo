@@ -1484,7 +1484,7 @@ private struct MarkdownHistoryView: View {
         .frame(width: AppTheme.MarkdownChrome.PaletteChrome.width)
         .frame(height: AppTheme.MarkdownChrome.PaletteChrome.height)
         .background(AppTheme.MarkdownChrome.PaletteChrome.background)
-        .task(id: workspace.historyRevision) {
+        .task(id: workspace.historyRecordsRevision) {
             records = await workspace.historyRecords(for: document)
         }
     }
@@ -1569,7 +1569,7 @@ private struct MarkdownReviewView: View {
         .frame(width: AppTheme.MarkdownChrome.PaletteChrome.width)
         .frame(height: AppTheme.MarkdownChrome.PaletteChrome.height)
         .background(AppTheme.MarkdownChrome.PaletteChrome.background)
-        .task(id: workspace.historyRevision) {
+        .task(id: workspace.reviewTransitionsRevision) {
             transitions = await workspace.reviewTransitions(for: document)
         }
     }
