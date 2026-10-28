@@ -78,6 +78,13 @@ public enum MarkdownLimits {
     /// unbounded file.
     public static let maxMathExportBytes = 16 * 1024 * 1024
 
+    /// Maximum bytes of one fenced code block the rendered viewer will
+    /// syntax-highlight. Lexing is linear but the result is an attributed
+    /// string; a fence is authored content, and a larger one renders plain
+    /// rather than spending the reader's frame budget on it. Sized like the
+    /// diagram source limits (32 KiB) with headroom for multibyte text.
+    public static let maxHighlightedFenceBytes = 64 * 1024
+
     /// Maximum characters of Mermaid source in one fence. Diagrams are
     /// authored by hand; a larger fence is a document, not a diagram, and
     /// stays a code block.

@@ -64,7 +64,8 @@ enum MarkdownExportService {
         for document: MarkdownDocument,
         workspaceRoot: URL?,
         theme: MarkdownTheme,
-        forPrint: Bool = false
+        forPrint: Bool = false,
+        deadline: Date? = nil
     ) async throws -> String {
         let source = document.source
         // Capture the identity with the source: a Save As while this export
@@ -96,7 +97,8 @@ enum MarkdownExportService {
         // light variant only; a themed document carries both.
         let diagrams = await MarkdownDiagramAssets.build(
             from: output.ast,
-            includeDark: !forPrint
+            includeDark: !forPrint,
+            deadline: deadline
         )
         let context = MarkdownExportContext(
             title: exportTitle,
@@ -115,9 +117,12 @@ enum MarkdownExportService {
         }.value
     }
 
-    static func pdfData(forHTML html: String) async throws -> Data {
+    static func pdfData(
+        forHTML html: String,
+        deadline: Date? = nil
+    ) async throws -> Data {
         let renderer = MarkdownPDFRenderer()
-        return try await renderer.render(html: html)
+        return try await renderer.render(html: html, deadline: deadline)
     }
 
     static func write(
@@ -138,14 +143,24 @@ enum MarkdownExportService {
             try Task.checkCancellation()
             data = Data(html.utf8)
         case .pdf:
+            // Arm the export budget before the diagram phase. Diagrams used
+            // to run first with their own per-diagram timeouts, and only
+            // then did the PDF renderer start its 60 s clock.
+            let deadline = Date().addingTimeInterval(
+                MarkdownLimits.pdfRenderTimeoutSeconds
+            )
             let html = try await html(
                 for: document,
                 workspaceRoot: workspaceRoot,
                 theme: theme,
-                forPrint: true
+                forPrint: true,
+                deadline: deadline
             )
             try Task.checkCancellation()
-            data = try await pdfData(forHTML: html)
+            data = try await pdfData(
+                forHTML: html,
+                deadline: deadline
+            )
         }
         // A cancelled export must not leave a partial file behind.
         try Task.checkCancellation()
@@ -206,7 +221,7 @@ private final class MarkdownPDFRenderer: NSObject, WKNavigationDelegate {
         var errorDescription: String? { message }
     }
 
-    func render(html: String) async throws -> Data {
+    func render(html: String, deadline: Date? = nil) async throws -> Data {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         // The wait and measurement scripts run in the page world. The
@@ -238,12 +253,13 @@ private final class MarkdownPDFRenderer: NSObject, WKNavigationDelegate {
                         return
                     }
                     self.continuation = continuation
+                    let remaining = deadline.map {
+                        max(0, $0.timeIntervalSinceNow)
+                    } ?? MarkdownLimits.pdfRenderTimeoutSeconds
                     self.timeoutTask = Task { @MainActor [weak self] in
                         do {
                             try await Task.sleep(
-                                for: .seconds(
-                                    MarkdownLimits.pdfRenderTimeoutSeconds
-                                )
+                                for: .seconds(max(AppTheme.Time.minimumTimeout, remaining))
                             )
                         } catch {
                             return

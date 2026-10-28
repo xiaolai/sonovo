@@ -48,6 +48,20 @@ final class MarkdownDiagramTests: XCTestCase {
 
     // MARK: - Graphviz
 
+    /// The export's shared budget is armed before the diagram phase. Once it
+    /// is spent, the build stops instead of granting each remaining diagram a
+    /// fresh per-render timeout.
+    func testExhaustedSharedDeadlineSkipsRendering() async throws {
+        let ast = ast("```mermaid\ngraph TD; A-->B\n```\n")
+        XCTAssertFalse(MarkdownDiagramNodes.sources(from: ast).isEmpty)
+        let assets = await MarkdownDiagramAssets.build(
+            from: ast,
+            includeDark: true,
+            deadline: Date().addingTimeInterval(-1)
+        )
+        XCTAssertTrue(assets.isEmpty)
+    }
+
     func testGraphvizRendersASanitizedSVG() async throws {
         let svg = try await graphviz.render(
             source: graphvizSource,
@@ -190,7 +204,7 @@ final class MarkdownDiagramTests: XCTestCase {
 
     // MARK: - SVG fences
 
-    func testSVGFenceIsSanitizedWithoutAWebView() throws {
+    func testSVGFenceIsSanitizedWithoutAWebView() async throws {
         let source = """
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">
         <script>alert(1)</script>
@@ -198,7 +212,7 @@ final class MarkdownDiagramTests: XCTestCase {
         <text x="1" y="12">Hi</text>
         </svg>
         """
-        let svg = try DiagramRenderer.renderSVGFence(
+        let svg = try await DiagramRenderer.renderSVGFence(
             source,
             variant: .light
         )
@@ -211,37 +225,38 @@ final class MarkdownDiagramTests: XCTestCase {
         XCTAssertEqual(svg.height, 20)
     }
 
-    func testSVGFenceRejectsRemoteAndMalformedContent() throws {
+    func testSVGFenceRejectsRemoteAndMalformedContent() async throws {
         let remote = """
         <svg xmlns="http://www.w3.org/2000/svg">
         <image href="https://example.com/x.png"/>
         <use href="#local"/>
         </svg>
         """
-        let sanitized = try DiagramRenderer.renderSVGFence(
+        let sanitized = try await DiagramRenderer.renderSVGFence(
             remote,
             variant: .light
         )
         XCTAssertFalse(sanitized.markup.contains("example.com"))
         XCTAssertTrue(sanitized.markup.contains("#local"))
 
-        XCTAssertThrowsError(
-            try DiagramRenderer.renderSVGFence(
+        do {
+            _ = try await DiagramRenderer.renderSVGFence(
                 "<svg><rect></svg>",
                 variant: .light
             )
-        ) { error in
+            XCTFail("malformed SVG must be rejected")
+        } catch {
             XCTAssertEqual(error as? MarkdownDiagramError, .invalidOutput)
         }
     }
 
-    func testSVGFenceCacheReturnsTheSameResult() throws {
+    func testSVGFenceCacheReturnsTheSameResult() async throws {
         let source = "<svg viewBox=\"0 0 10 10\"><rect width=\"1\" height=\"1\"/></svg>"
-        let first = try DiagramRenderer.renderSVGFence(
+        let first = try await DiagramRenderer.renderSVGFence(
             source,
             variant: .light
         )
-        let second = try DiagramRenderer.renderSVGFence(
+        let second = try await DiagramRenderer.renderSVGFence(
             source,
             variant: .light
         )

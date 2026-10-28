@@ -1812,6 +1812,10 @@ private struct MarkdownImageView: View {
     var onOpen: (() -> Void)?
 
     @State private var image: NSImage?
+    /// The metadata identity currently displayed. The poll runs every two
+    /// seconds; a cache hit used to publish the same image and clear the
+    /// failure flag each time, invalidating the block for nothing.
+    @State private var loadedIdentity: String?
     /// The file exists but could not be decoded — most often because it
     /// exceeds the byte or pixel cap. Distinguished from a missing file so
     /// the placeholder can say which one happened.
@@ -1897,8 +1901,11 @@ private struct MarkdownImageView: View {
 
     private func loadImage() async {
         guard let url = resolvedURL else {
-            image = nil
-            decodeFailed = false
+            if image != nil || decodeFailed || loadedIdentity != nil {
+                image = nil
+                decodeFailed = false
+                loadedIdentity = nil
+            }
             return
         }
 
@@ -1921,14 +1928,21 @@ private struct MarkdownImageView: View {
         // overwrite or clear the newer image.
         guard !Task.isCancelled else { return }
         guard let identity else {
-            image = nil
-            decodeFailed = false
+            if image != nil || decodeFailed || loadedIdentity != nil {
+                image = nil
+                decodeFailed = false
+                loadedIdentity = nil
+            }
             return
         }
+        // The poll fires every two seconds; an unchanged file must publish
+        // nothing, or the rendered block invalidates forever.
+        guard identity != loadedIdentity else { return }
         let key = identity as NSString
         if let cached = Self.cache.object(forKey: key) {
             image = cached
             decodeFailed = false
+            loadedIdentity = identity
             return
         }
 
@@ -1938,6 +1952,7 @@ private struct MarkdownImageView: View {
             BoundedImageLoader.image(at: url)
         }.value
         guard !Task.isCancelled else { return }
+        loadedIdentity = identity
         guard let decoded else {
             image = nil
             // The metadata read above succeeded, so the file is there; a nil
@@ -2022,7 +2037,10 @@ struct MarkdownCodeBlockView: View {
             RoundedRectangle(cornerRadius: theme.codeRadius, style: .continuous)
         )
         .task(id: highlightKey) {
-            highlightedText = makeHighlighted()
+            highlightedText = await MarkdownFenceHighlighter.highlight(
+                code: code.code,
+                languageName: code.language
+            )
         }
     }
 
@@ -2059,17 +2077,47 @@ struct MarkdownCodeBlockView: View {
         }
     }
 
-    private func makeHighlighted() -> AttributedString? {
-        guard let language = MarkdownFenceLanguage.language(for: code.language),
-              language != .plainText else {
+}
+
+/// The rendered viewer's fenced-code highlighter.
+///
+/// Lexing a large fence on the main actor stalls the render frame, so the
+/// lexer runs in a detached task and the attributed result is assembled only
+/// after the task is still current. SwiftUI cancels the task when the fence's
+/// identity changes, and the cancellation check discards a stale result.
+enum MarkdownFenceHighlighter {
+    /// `probe` runs inside the detached lex and exists so a regression test
+    /// can prove the work is not on the main actor.
+    @MainActor
+    static func highlight(
+        code: String,
+        languageName: String?,
+        probe: (@Sendable () -> Void)? = nil
+    ) async -> AttributedString? {
+        guard let language = MarkdownFenceLanguage.language(
+            for: languageName
+        ), language != .plainText,
+           code.utf8.count <= MarkdownLimits.maxHighlightedFenceBytes else {
             return nil
         }
-        let snapshot = CodeSyntaxHighlighter.lex(
-            text: code.code,
-            language: language,
-            revision: 0
-        )
-        let ns = code.code as NSString
+        let snapshot = await Task.detached(priority: .userInitiated) {
+            probe?()
+            return CodeSyntaxHighlighter.lex(
+                text: code,
+                language: language,
+                revision: 0
+            )
+        }.value
+        guard !Task.isCancelled else { return nil }
+        return assemble(code: code, snapshot: snapshot)
+    }
+
+    @MainActor
+    private static func assemble(
+        code: String,
+        snapshot: CodeLexSnapshot
+    ) -> AttributedString? {
+        let ns = code as NSString
         let tokens = snapshot.tokens(
             intersecting: NSRange(location: 0, length: ns.length)
         ).sorted { $0.range.location < $1.range.location }
@@ -2107,7 +2155,6 @@ struct MarkdownCodeBlockView: View {
         }
         return result
     }
-
 }
 
 // MARK: - Rendered find bar

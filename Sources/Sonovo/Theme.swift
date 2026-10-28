@@ -436,6 +436,9 @@ enum AppTheme {
 
     enum Time {
         static let zero: Double = 0
+        /// Floor for a computed timeout, so an exhausted budget still gives
+        /// the timer one scheduling opportunity.
+        static let minimumTimeout: Double = 0.1
     }
 
     /// Motion shared by panes so the inspector and the sidebar feel like the

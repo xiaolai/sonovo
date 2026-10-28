@@ -213,7 +213,10 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
     /// Renders one diagram, applying the source policy and the SVG sanitizer.
     func render(
         source: String,
-        variant: DiagramThemeVariant
+        variant: DiagramThemeVariant,
+        timeout: Duration = .seconds(
+            MarkdownLimits.mermaidRenderTimeoutSeconds
+        )
     ) async throws -> SanitizedSVG {
         guard Self.accepts(source, engine: spec.engine) else {
             throw MarkdownDiagramError.rejectedSource
@@ -241,7 +244,8 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
             return try await self.performRender(
                 source: source,
                 variant: variant,
-                key: key
+                key: key,
+                timeout: timeout
             )
         }
         tail = Task { _ = try? await operation.value }
@@ -293,9 +297,10 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
     private func performRender(
         source: String,
         variant: DiagramThemeVariant,
-        key: String
+        key: String,
+        timeout: Duration
     ) async throws -> SanitizedSVG {
-        try await ensureLoaded()
+        try await ensureLoaded(timeout: timeout)
         guard let webView else { throw MarkdownDiagramError.unavailable }
         renderCount += 1
 
@@ -307,7 +312,8 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
                 "source": source,
                 "configuration": spec.configurationJSON(variant),
                 "identifier": identifier
-            ]
+            ],
+            timeout: timeout
         )
         guard let text = output,
               let data = text.data(using: .utf8),
@@ -320,9 +326,21 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
         if let message = decoded.error {
             throw MarkdownDiagramError.renderFailed(message)
         }
-        guard let raw = decoded.svg,
-              let document = SVGSource.document(from: raw),
-              let sanitized = SVGSanitizer.sanitize(document) else {
+        guard let raw = decoded.svg else {
+            throw MarkdownDiagramError.invalidOutput
+        }
+        // Parsing and sanitizing a large SVG is seconds of CPU. The web
+        // view only returned; doing this on the main actor stalls every
+        // consumer of the diagram. The sanitizer keeps its own deadline.
+        let sanitized: SanitizedSVG? = await Task.detached(
+            priority: .userInitiated
+        ) {
+            guard let document = SVGSource.document(from: raw) else {
+                return nil
+            }
+            return SVGSanitizer.sanitize(document, timeLimit: timeout)
+        }.value
+        guard let sanitized else {
             throw MarkdownDiagramError.invalidOutput
         }
         return sanitized
@@ -335,7 +353,7 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
 
     // MARK: Loading
 
-    private func ensureLoaded() async throws {
+    private func ensureLoaded(timeout: Duration) async throws {
         if isLoaded, webView != nil { return }
         guard let harness else { throw MarkdownDiagramError.unavailable }
         resetWebView()
@@ -356,16 +374,14 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
 
         let box = OnceContinuation<Void>()
         loadBox = box
-        let timeout = Task { @MainActor [weak self] in
-            try? await Task.sleep(
-                for: .seconds(MarkdownLimits.mermaidRenderTimeoutSeconds)
-            )
+        let timeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self else { return }
             if box.resume(throwing: MarkdownDiagramError.timeout) {
                 self.resetWebView()
             }
         }
-        defer { timeout.cancel() }
+        defer { timeoutTask.cancel() }
         try await withCheckedThrowingContinuation { continuation in
             box.install(continuation)
             webView.loadHTMLString(harness, baseURL: spec.baseURL)
@@ -391,19 +407,18 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
     private func callAsync(
         webView: WKWebView,
         script: String,
-        arguments: [String: Any]
+        arguments: [String: Any],
+        timeout: Duration
     ) async throws -> String? {
         let box = OnceContinuation<String?>()
-        let timeout = Task { @MainActor [weak self] in
-            try? await Task.sleep(
-                for: .seconds(MarkdownLimits.mermaidRenderTimeoutSeconds)
-            )
+        let timeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self else { return }
             if box.resume(throwing: MarkdownDiagramError.timeout) {
                 self.resetWebView()
             }
         }
-        defer { timeout.cancel() }
+        defer { timeoutTask.cancel() }
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<String?, Error>) in
             box.install(continuation)
@@ -617,7 +632,9 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
     /// Loads the isolated page without rendering. Tests drive the same page
     /// the renderer uses.
     func loadForTesting() async throws {
-        try await ensureLoaded()
+        try await ensureLoaded(
+            timeout: .seconds(MarkdownLimits.mermaidRenderTimeoutSeconds)
+        )
     }
 
     /// The live web view, for navigation-policy tests.
@@ -626,12 +643,15 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
     /// Asks the page to attempt each network path. Returns what the page
     /// observed; a working policy reports `blocked` for every network entry.
     func probeNetworkForTesting() async throws -> [String: String] {
-        try await ensureLoaded()
+        try await ensureLoaded(
+            timeout: .seconds(MarkdownLimits.mermaidRenderTimeoutSeconds)
+        )
         guard let webView else { throw MarkdownDiagramError.unavailable }
         let output = try await callAsync(
             webView: webView,
             script: "return await window.__sonovoNetworkProbe();",
-            arguments: [:]
+            arguments: [:],
+            timeout: .seconds(MarkdownLimits.mermaidRenderTimeoutSeconds)
         )
         guard let text = output,
               let data = text.data(using: .utf8),
@@ -716,26 +736,36 @@ enum DiagramRenderer {
 
     static func render(
         _ diagram: DiagramSource,
-        variant: DiagramThemeVariant
+        variant: DiagramThemeVariant,
+        timeout: Duration = .seconds(
+            MarkdownLimits.mermaidRenderTimeoutSeconds
+        )
     ) async throws -> SanitizedSVG {
         switch diagram.engine {
         case .mermaid:
             return try await MermaidRenderer.shared.render(
                 source: diagram.source,
-                variant: variant
+                variant: variant,
+                timeout: timeout
             )
         case .graphviz:
             return try await GraphvizRenderer.shared.render(
                 source: diagram.source,
-                variant: variant
+                variant: variant,
+                timeout: timeout
             )
         case .markmap:
             return try await MarkmapRenderer.shared.render(
                 source: diagram.source,
-                variant: variant
+                variant: variant,
+                timeout: timeout
             )
         case .svg:
-            return try renderSVGFence(diagram.source, variant: variant)
+            return try await renderSVGFence(
+                diagram.source,
+                variant: variant,
+                timeout: timeout
+            )
         }
     }
 
@@ -748,8 +778,11 @@ enum DiagramRenderer {
 
     static func renderSVGFence(
         _ source: String,
-        variant: DiagramThemeVariant
-    ) throws -> SanitizedSVG {
+        variant: DiagramThemeVariant,
+        timeout: Duration = .seconds(
+            MarkdownLimits.mermaidRenderTimeoutSeconds
+        )
+    ) async throws -> SanitizedSVG {
         guard SVGFencePolicy.accepts(source) else {
             throw MarkdownDiagramError.rejectedSource
         }
@@ -761,13 +794,25 @@ enum DiagramRenderer {
         if let cached = svgCache[key] {
             return try cached.get()
         }
-        let result: Result<SanitizedSVG, MarkdownDiagramError>
-        if let document = SVGSource.document(from: source),
-           let sanitized = SVGSanitizer.sanitize(document) {
-            result = .success(sanitized)
-        } else {
-            result = .failure(.invalidOutput)
-        }
+        // Parsing and sanitizing a fence can take seconds of CPU; run it off
+        // the main actor with the caller's budgeted deadline. The sanitizer
+        // keeps its own shorter cap.
+        let result = await Task.detached(priority: .userInitiated) {
+            let result: Result<SanitizedSVG, MarkdownDiagramError>
+            if let document = SVGSource.document(from: source),
+               let sanitized = SVGSanitizer.sanitize(
+                   document,
+                   timeLimit: min(
+                       timeout,
+                       .seconds(MarkdownLimits.svgSanitizeTimeoutSeconds)
+                   )
+               ) {
+                result = .success(sanitized)
+            } else {
+                result = .failure(.invalidOutput)
+            }
+            return result
+        }.value
         svgCache.insert(result, for: key)
         return try result.get()
     }
@@ -828,30 +873,66 @@ enum MarkdownDiagramAssets {
     static func build(
         from ast: SonovoAST,
         includeDark: Bool,
-        byteBudget: Int = MarkdownLimits.maxDiagramExportBytes
+        byteBudget: Int = MarkdownLimits.maxDiagramExportBytes,
+        deadline: Date? = nil
     ) async -> [String: MarkdownDiagramAsset] {
         let sources = MarkdownDiagramNodes.sources(from: ast)
             .prefix(MarkdownLimits.maxRenderedDiagrams)
         guard !sources.isEmpty else { return [:] }
 
+        // One wall clock for the whole build. Every diagram used to get a
+        // fresh 10 s, so 200 diagrams could hold an export for half an hour
+        // before the PDF budget even started.
+        let budgetDeadline = deadline ?? Date().addingTimeInterval(
+            MarkdownLimits.pdfRenderTimeoutSeconds
+        )
         var assets: [String: MarkdownDiagramAsset] = [:]
         assets.reserveCapacity(sources.count)
         var totalBytes = 0
 
-        for diagram in sources {
-            guard let light = try? await DiagramRenderer.render(
-                diagram,
-                variant: .light
-            ) else {
+        diagramLoop: for diagram in sources {
+            let remaining = budgetDeadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            let timeout = Duration.seconds(
+                min(MarkdownLimits.mermaidRenderTimeoutSeconds, remaining)
+            )
+            let light: SanitizedSVG
+            do {
+                light = try await DiagramRenderer.render(
+                    diagram,
+                    variant: .light,
+                    timeout: timeout
+                )
+            } catch let error as MarkdownDiagramError {
+                // A timeout means the shared budget is spent; trying the
+                // next diagram would only stall the export again.
+                if error == .timeout { break }
+                continue
+            } catch {
                 continue
             }
             var dark = light.markup
-            if includeDark, diagram.engine != .svg,
-               let rendered = try? await DiagramRenderer.render(
-                   diagram,
-                   variant: .dark
-               ) {
-                dark = rendered.markup
+            if includeDark, diagram.engine != .svg {
+                let darkRemaining = budgetDeadline.timeIntervalSinceNow
+                guard darkRemaining > 0 else { break }
+                let darkTimeout = Duration.seconds(
+                    min(
+                        MarkdownLimits.mermaidRenderTimeoutSeconds,
+                        darkRemaining
+                    )
+                )
+                do {
+                    let rendered = try await DiagramRenderer.render(
+                        diagram,
+                        variant: .dark,
+                        timeout: darkTimeout
+                    )
+                    dark = rendered.markup
+                } catch let error as MarkdownDiagramError {
+                    if error == .timeout { break diagramLoop }
+                } catch {
+                    // Keep the light variant.
+                }
             }
             let bytes = light.markup.utf8.count + dark.utf8.count
             if totalBytes + bytes > byteBudget {

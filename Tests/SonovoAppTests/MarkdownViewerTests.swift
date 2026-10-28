@@ -12,6 +12,39 @@ final class MarkdownViewerTests: XCTestCase {
         return (ast, HeadingIndex(ast: ast))
     }
 
+    /// The rendered viewer used to lex a fence synchronously from its `.task`,
+    /// which is main-actor work. The lexer must run detached.
+    func testFenceHighlightLexesOffTheMainActor() async throws {
+        let probe = FenceLexProbe()
+        let result = await MarkdownFenceHighlighter.highlight(
+            code: "let value = 1\n",
+            languageName: "swift",
+            probe: { probe.record() }
+        )
+        XCTAssertNotNil(result)
+        XCTAssertEqual(probe.count, 1)
+        XCTAssertFalse(
+            probe.ranOnMain,
+            "the fence lexer ran on the main actor"
+        )
+    }
+
+    /// A fence over the cap renders plain and never reaches the lexer.
+    func testOversizedFenceIsNotLexed() async {
+        let code = String(
+            repeating: "a",
+            count: MarkdownLimits.maxHighlightedFenceBytes + 1
+        )
+        let probe = FenceLexProbe()
+        let result = await MarkdownFenceHighlighter.highlight(
+            code: code,
+            languageName: "swift",
+            probe: { probe.record() }
+        )
+        XCTAssertNil(result)
+        XCTAssertEqual(probe.count, 0)
+    }
+
     func testWikiURLRoundTrips() throws {
         let link = WikiLink(
             target: "Act One",
@@ -137,5 +170,32 @@ final class MarkdownViewerTests: XCTestCase {
         let hosting = NSHostingView(rootView: viewer)
         hosting.layoutSubtreeIfNeeded()
         XCTAssertGreaterThanOrEqual(hosting.fittingSize.width, 0)
+    }
+}
+
+/// Records where the fence lexer ran. The probe crosses into `Task.detached`
+/// and the test thread reads only after the await.
+private final class FenceLexProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observations = 0
+    private var mainThread = false
+
+    func record() {
+        lock.lock()
+        observations += 1
+        mainThread = mainThread || Thread.isMainThread
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return observations
+    }
+
+    var ranOnMain: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return mainThread
     }
 }

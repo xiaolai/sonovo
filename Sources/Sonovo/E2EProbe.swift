@@ -1102,7 +1102,7 @@ enum E2EProbe {
         }
 
         do {
-            let svg = try DiagramRenderer.renderSVGFence(
+            let svg = try await DiagramRenderer.renderSVGFence(
                 """
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">
                 <script>alert(1)</script>
