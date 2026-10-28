@@ -163,6 +163,7 @@ private struct ProductionListView: View {
                         get: { state.selectedAssetID },
                         set: { state.openAsset($0) }
                     ),
+                    forceExpanded: !state.filterText.isEmpty,
                     row: { asset in
                         AssetRow(state: state, asset: asset)
                     }
@@ -181,16 +182,31 @@ private struct SidebarGroupedList<
     let title: (Group) -> String
     let items: (Group) -> [Item]
     let selection: Binding<String?>
+    /// A non-empty filter overrides collapsed groups so a match is never
+    /// hidden inside one the user closed earlier.
+    var forceExpanded = false
     let row: (Item) -> Row
+
+    @State private var expansion = NavigatorGroupExpansion<Group.ID>()
 
     var body: some View {
         List(selection: selection) {
             ForEach(groups) { group in
-                Section {
+                DisclosureGroup(
+                    isExpanded: Binding(
+                        get: {
+                            expansion.isExpanded(
+                                group.id,
+                                forceExpanded: forceExpanded
+                            )
+                        },
+                        set: { expansion.setExpanded($0, for: group.id) }
+                    )
+                ) {
                     ForEach(items(group)) { item in
                         row(item).tag(item.id)
                     }
-                } header: {
+                } label: {
                     SidebarSectionHeader(
                         title: title(group),
                         count: items(group).count
@@ -200,6 +216,27 @@ private struct SidebarGroupedList<
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
+    }
+}
+
+/// Expansion state for the grouped navigator.
+///
+/// Groups start expanded. A collapsed group stays collapsed until the user
+/// expands it, and a non-empty filter forces every group open so a match can
+/// never be hidden behind a collapsed group.
+struct NavigatorGroupExpansion<ID: Hashable> {
+    private var collapsed: Set<ID> = []
+
+    func isExpanded(_ id: ID, forceExpanded: Bool) -> Bool {
+        forceExpanded || !collapsed.contains(id)
+    }
+
+    mutating func setExpanded(_ expanded: Bool, for id: ID) {
+        if expanded {
+            collapsed.remove(id)
+        } else {
+            collapsed.insert(id)
+        }
     }
 }
 
@@ -293,6 +330,7 @@ private struct ProjectAssetListView: View {
                         get: { state.selectedAssetID },
                         set: { state.openAsset($0) }
                     ),
+                    forceExpanded: !state.filterText.isEmpty,
                     row: { asset in
                         ProjectAssetRow(state: state, asset: asset)
                     }
