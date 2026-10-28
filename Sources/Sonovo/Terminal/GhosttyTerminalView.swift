@@ -28,11 +28,9 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
     /// Set before the surface starts. Project terminals open at the project
     /// root; the demo terminal keeps the shell's default.
     var initialWorkingDirectory: String?
-    /// Text typed into the shell before the user sees the prompt. Used to
-    /// replace the shell with a tmux client; nil starts a plain shell.
-    var initialInput: String?
-    /// Runs instead of the user's shell. tmux tabs use `/bin/sh` so the
-    /// launcher is POSIX even when the configured shell is fish.
+    /// Runs instead of the user's shell, through `/bin/sh -c`. tmux tabs put
+    /// their launcher here, so it executes rather than being typed into a
+    /// shell; nil starts a plain shell.
     var initialCommand: String?
 
     var onCloseRequested: (() -> Void)?
@@ -119,9 +117,6 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
         let workingDirectoryPointer = initialWorkingDirectory.flatMap {
             strdup($0)
         }
-        let initialInputPointer = initialInput.flatMap {
-            strdup($0)
-        }
         let initialCommandPointer = initialCommand.flatMap {
             strdup($0)
         }
@@ -129,17 +124,11 @@ final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClient {
             if let workingDirectoryPointer {
                 free(workingDirectoryPointer)
             }
-            if let initialInputPointer {
-                free(initialInputPointer)
-            }
             if let initialCommandPointer {
                 free(initialCommandPointer)
             }
         }
         config.working_directory = workingDirectoryPointer.map {
-            UnsafePointer($0)
-        }
-        config.initial_input = initialInputPointer.map {
             UnsafePointer($0)
         }
         config.command = initialCommandPointer.map {

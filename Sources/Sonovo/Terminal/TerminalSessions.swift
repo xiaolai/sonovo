@@ -220,22 +220,39 @@ final class TerminalSessionsStore {
         )
         switch launch {
         case .create:
-            session.view.initialCommand = "/bin/sh"
-            session.view.initialInput = terminalEnvironment.tmux?
-                .launchInput(
+            // Ghostty executes `command` through `/bin/sh -c`. Feeding the
+            // bootstrap as `initial_input` typed it into the pty instead, so
+            // the tty echoed the whole script before tmux started. The
+            // script ends in `exec tmux … attach`, so the tab's lifetime is
+            // unchanged.
+            session.view.initialCommand = launchCommand(
+                terminalEnvironment.tmux?.launchInput(
                     name: tmuxName ?? "",
                     directory: workingDirectory,
                     ownership: launchOwnership()
                 )
+            )
         case .attach:
-            session.view.initialCommand = "/bin/sh"
-            session.view.initialInput = terminalEnvironment.tmux?
-                .attachOnlyInput(name: tmuxName ?? "")
+            session.view.initialCommand = launchCommand(
+                terminalEnvironment.tmux?.attachOnlyInput(name: tmuxName ?? "")
+            )
         case .directShell:
             break
         }
         wire(session)
         return session
+    }
+
+    /// A launch command runs through the shell, so an empty string would
+    /// start a blank shell. `nil` falls back to the configured shell.
+    private func launchCommand(_ value: String?) -> String? {
+        guard let value,
+              !value.trimmingCharacters(
+                  in: .whitespacesAndNewlines
+              ).isEmpty else {
+            return nil
+        }
+        return value
     }
 
     private func allocateSession(name: String?) {
@@ -300,8 +317,9 @@ final class TerminalSessionsStore {
             }) {
                 // Discovery saw the session: an as-yet-unstarted tab must
                 // attach, not create it again.
-                existing.view.initialInput = terminalEnvironment.tmux?
-                    .attachOnlyInput(name: name)
+                existing.view.initialCommand = launchCommand(
+                    terminalEnvironment.tmux?.attachOnlyInput(name: name)
+                )
                 continue
             }
             // A discovered session may vanish before the surface starts.
@@ -560,10 +578,11 @@ final class TerminalSessionsStore {
         if let existing = sessions.first(where: {
             $0.tmuxSessionName == name
         }) {
-            // The session exists now; rewriting the launch input prevents a
+            // The session exists now; rewriting the launch command prevents a
             // later restart from recreating it after it disappears.
-            existing.view.initialInput = terminalEnvironment.tmux?
-                .attachOnlyInput(name: name)
+            existing.view.initialCommand = launchCommand(
+                terminalEnvironment.tmux?.attachOnlyInput(name: name)
+            )
             selectedID = existing.id
             return true
         }

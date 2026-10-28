@@ -535,7 +535,7 @@ final class TmuxMigrationTests: XCTestCase {
             newName
         )
         XCTAssertEqual(
-            destinationStore.sessions.last?.view.initialInput,
+            destinationStore.sessions.last?.view.initialCommand,
             "launch:\(newName):~"
         )
     }

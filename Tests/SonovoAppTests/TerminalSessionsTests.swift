@@ -84,9 +84,8 @@ final class TerminalSessionsTests: XCTestCase {
             store.sessions[0].tmuxSessionName,
             prefix + "1"
         )
-        XCTAssertEqual(store.sessions[0].view.initialCommand, "/bin/sh")
         XCTAssertEqual(
-            store.sessions[0].view.initialInput,
+            store.sessions[0].view.initialCommand,
             "launch:\(prefix)1:"
                 + FileManager.default.temporaryDirectory.path
         )
@@ -122,7 +121,7 @@ final class TerminalSessionsTests: XCTestCase {
             prefix + "3"
         )
         XCTAssertEqual(
-            store.sessions[1].view.initialInput,
+            store.sessions[1].view.initialCommand,
             "attach:\(prefix)3"
         )
 
