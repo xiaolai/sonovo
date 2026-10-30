@@ -2,6 +2,16 @@ import AppKit
 import Observation
 import SwiftUI
 
+/// How a close request for a tmux-backed tab is resolved.
+enum TmuxCloseDecision: Equatable {
+    /// Close the tab; the session keeps running.
+    case keepRunning
+    /// End the session, then close the tab.
+    case endSession
+    /// Leave the tab open.
+    case cancel
+}
+
 @MainActor
 @Observable
 final class TerminalSession: Identifiable {
@@ -401,9 +411,25 @@ final class TerminalSessionsStore {
         guard let session = sessions.first(where: { $0.id == id }) else {
             return
         }
-        if session.tmuxSessionName == nil,
-           session.view.processAlive,
-           !confirmClose(session) {
+        if let name = session.tmuxSessionName {
+            // A tmux tab's session outlives the client, so closing it is a
+            // decision: detach, end it, or keep the tab. Keep Running is the
+            // default because it preserves work that may still be running.
+            switch tmuxClosePrompt(session.title, name) {
+            case .cancel:
+                return
+            case .keepRunning:
+                discoveryGeneration &+= 1
+                removeSession(session)
+            case .endSession:
+                Task { @MainActor [weak self] in
+                    // The close prompt already asked; do not ask again.
+                    await self?.endSession(id, confirmed: true)
+                }
+            }
+            return
+        }
+        if session.view.processAlive, !confirmClose(session) {
             return
         }
         // A discovery result that arrives after this close must not bring
@@ -412,9 +438,59 @@ final class TerminalSessionsStore {
         removeSession(session)
     }
 
+    /// Production asks with an alert. Tests replace it so no modal runs, and
+    /// the probe build detaches instead of blocking automation.
+    var tmuxClosePrompt: (_ title: String, _ name: String) -> TmuxCloseDecision = {
+        title, name in
+        #if SONOVO_E2E_PROBE
+        return .keepRunning
+        #else
+        return TerminalSessionsStore.askCloseDecision(
+            title: title,
+            name: name
+        )
+        #endif
+    }
+
+    private static func askCloseDecision(
+        title: String,
+        name: String
+    ) -> TmuxCloseDecision {
+        let alert = NSAlert()
+        alert.messageText = "Close \(title)?"
+        alert.informativeText =
+            "The tmux session \(name) keeps running unless you end it."
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "End Session")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[2].keyEquivalent = "\u{1b}"
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .keepRunning
+        case .alertSecondButtonReturn:
+            return .endSession
+        default:
+            return .cancel
+        }
+    }
+
+    /// Ends every tmux-backed session. Quit uses this when the user chooses
+    /// to end sessions; the quit prompt is the confirmation, so each end does
+    /// not ask again. Identity is still revalidated per session.
+    func endAllAttachedSessions() async {
+        let ids = sessions
+            .filter { $0.tmuxSessionName != nil }
+            .map(\.id)
+        for id in ids {
+            await endSession(id, confirmed: true)
+        }
+    }
+
     /// Ends a tmux session and closes its tab. This is the only path that
-    /// stops an agent in a tmux-backed tab.
-    func endSession(_ id: UUID) async {
+    /// stops an agent in a tmux-backed tab. `confirmed` means the caller
+    /// already asked (a close prompt, the quit prompt, or a bulk decision),
+    /// so a running session is not questioned twice.
+    func endSession(_ id: UUID, confirmed: Bool = false) async {
         guard let session = sessions.first(where: { $0.id == id }) else {
             return
         }
@@ -460,9 +536,9 @@ final class TerminalSessionsStore {
                 )?.contains(name)
             }.value
             guard sessions.contains(where: { $0.id == id }) else { return }
-            if running != false {
-                let confirmed = endConfirmation?(name) ?? confirmEnd(name)
-                guard confirmed else { return }
+            if running != false, !confirmed {
+                let allowed = endConfirmation?(name) ?? confirmEnd(name)
+                guard allowed else { return }
             }
             if let coordinator = terminalEnvironment.coordinator?() {
                 guard let identity else {

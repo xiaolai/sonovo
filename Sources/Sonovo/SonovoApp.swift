@@ -174,27 +174,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var terminationPending = false
 
+    private enum TmuxQuitDecision {
+        case keepRunning
+        case endSessions
+        case cancel
+    }
+
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
-        guard let state = AppStateRegistry.active,
-              state.hasDirtyDocuments else {
+        guard let state = AppStateRegistry.active else {
+            return .terminateNow
+        }
+        if !terminationPending,
+           !state.hasDirtyDocuments,
+           state.attachedTmuxSessionCount == 0 {
             return .terminateNow
         }
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
 
-        // Every project is flushed, active first. A pending save decision
-        // cancels the quit and leaves the failing project active; the user
-        // resolves it and quits again. No project is left unwatched or
-        // half-saved by this path.
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // Saves settle first: a cancelled quit must not have ended any
+            // session already. The tmux decision is therefore the last
+            // prompt before the quit actually proceeds.
             let allowed = await state.flushAllBeforeClose()
+            guard allowed else {
+                self.terminationPending = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            if state.attachedTmuxSessionCount > 0 {
+                #if SONOVO_E2E_PROBE
+                // The probe quits itself; a modal would hang automation.
+                #else
+                switch self.askAboutTmuxSessions(
+                    count: state.attachedTmuxSessionCount
+                ) {
+                case .cancel:
+                    self.terminationPending = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                    return
+                case .keepRunning:
+                    break
+                case .endSessions:
+                    await state.endAllAttachedTmuxSessions()
+                }
+                #endif
+            }
             self.terminationPending = false
-            sender.reply(toApplicationShouldTerminate: allowed)
+            sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    private func askAboutTmuxSessions(count: Int) -> TmuxQuitDecision {
+        let alert = NSAlert()
+        alert.messageText = count == 1
+            ? "End the tmux session?"
+            : "End \(count) tmux sessions?"
+        alert.informativeText =
+            "They keep running after Sonovo quits unless you end them."
+        alert.addButton(withTitle: "Keep Running")
+        alert.addButton(withTitle: "End Sessions")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[2].keyEquivalent = "\u{1b}"
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .keepRunning
+        case .alertSecondButtonReturn:
+            return .endSessions
+        default:
+            return .cancel
+        }
     }
 }
 

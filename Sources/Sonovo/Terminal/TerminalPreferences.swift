@@ -4,6 +4,15 @@ import Foundation
 /// The C API has no config setter, so loading a file is the supported way to
 /// apply a font family, size, and the shell command for new surfaces.
 enum TerminalPreferences {
+    /// Whether new terminal tabs use tmux. Off by default: persistence is
+    /// opt-in, so a new tab is a plain shell unless the user asks for a
+    /// session.
+    static let tmuxKey = "sonovo.terminals.tmux"
+
+    static func tmuxEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: tmuxKey) as? Bool ?? false
+    }
+
     /// Writes the override file and returns its path. The file is only
     /// rewritten when its contents change.
     static func overrideConfigURL() -> URL? {

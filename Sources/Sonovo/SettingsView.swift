@@ -66,7 +66,7 @@ struct SettingsView: View {
     @AppStorage("sonovo.shell") private var shell = ""
     @AppStorage("sonovo.terminalFont") private var terminalFont = "SF Mono 12"
     @AppStorage("sonovo.loginShell") private var loginShell = true
-    @AppStorage("sonovo.terminals.tmux") private var terminalTmux = true
+    @AppStorage(TerminalPreferences.tmuxKey) private var terminalTmux = false
     @State private var outputDevices: [AudioOutputDevice] = []
     @State private var terminalFontCatalog: [String] = []
     @State private var editingCustomShell = false
@@ -619,9 +619,9 @@ struct SettingsView: View {
                 SettingsRow {
                     Toggle("Keep terminals in tmux", isOn: $terminalTmux)
                     Text(
-                        "Sessions outlive Sonovo and can be reattached "
-                            + "over SSH. New tabs use tmux; existing tabs "
-                            + "keep their mode."
+                        "Off by default. Sessions outlive Sonovo and can be "
+                            + "reattached over SSH. New tabs use tmux when "
+                            + "enabled; existing tabs keep their mode."
                     )
                     if !LiveTmux.shared.isAvailable {
                         Text(

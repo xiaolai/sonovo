@@ -18,6 +18,16 @@ final class TerminalPreferencesTests: XCTestCase {
         XCTAssertNil(TerminalPreferences.parsedFont(from: "   "))
     }
 
+    /// Persistence is opt-in: a fresh profile starts on plain shells.
+    func testTmuxIsOffUntilEnabled() {
+        let suite = "sonovo-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertFalse(TerminalPreferences.tmuxEnabled(in: defaults))
+        defaults.set(true, forKey: TerminalPreferences.tmuxKey)
+        XCTAssertTrue(TerminalPreferences.tmuxEnabled(in: defaults))
+    }
+
     func testConfigTextUsesTheConfiguredFont() {
         let text = TerminalPreferences.configText()
         XCTAssertTrue(text.contains("font-family = SF Mono"))

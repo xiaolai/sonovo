@@ -312,7 +312,7 @@ final class TerminalSessionsTests: XCTestCase {
         if fake.identity == nil {
             fake.identity = TmuxTestData.identity()
         }
-        return TerminalSessionsStore(
+        let store = TerminalSessionsStore(
             workingDirectory: FileManager.default.temporaryDirectory.path,
             projectKey: path,
             projectName: URL(fileURLWithPath: path).lastPathComponent,
@@ -321,9 +321,40 @@ final class TerminalSessionsTests: XCTestCase {
                 isEnabled: { true }
             )
         )
+        // Closing a tmux tab asks in production; tests never run a modal.
+        store.tmuxClosePrompt = { _, _ in .keepRunning }
+        return store
+    }
+
+    func testClosingATmuxTabHonoursThePrompt() async throws {
+        let fake = FakeTmux()
+        let store = makeTmuxStore(fake: fake, path: "/tmp/project")
+        let name = try XCTUnwrap(store.sessions[0].tmuxSessionName)
+        fake.markRunning([name])
+
+        store.tmuxClosePrompt = { _, _ in .cancel }
+        store.closeSession(store.sessions[0].id)
+        XCTAssertEqual(store.sessions.count, 1)
+
+        store.tmuxClosePrompt = { _, _ in .endSession }
+        store.closeSession(store.sessions[0].id)
+        let deadline = Date().addingTimeInterval(2)
+        while !store.sessions.isEmpty, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertEqual(fake.killedNames, [name])
+    }
+
+    func testClosingATmuxTabCanDetach() throws {
+        let fake = FakeTmux()
+        let store = makeTmuxStore(fake: fake, path: "/tmp/project")
+        store.tmuxClosePrompt = { _, _ in .keepRunning }
+        store.closeSession(store.sessions[0].id)
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertTrue(fake.killedNames.isEmpty)
     }
 }
-
 private final class FakeTmux: TmuxControlling, @unchecked Sendable {
     let isAvailable = true
     private let lock = NSLock()

@@ -334,11 +334,7 @@ final class AppState {
             coordinator: coordinator,
             archive: archive,
             environment: TerminalEnvironment.live(
-                isEnabled: {
-                    UserDefaults.standard.object(
-                        forKey: "sonovo.terminals.tmux"
-                    ) as? Bool ?? true
-                },
+                isEnabled: { TerminalPreferences.tmuxEnabled() },
                 coordinator: { [weak coordinator] in coordinator }
             )
         )
@@ -1113,6 +1109,25 @@ final class AppState {
 
     var hasDirtyDocuments: Bool {
         workspace.hasDirtyDocuments
+    }
+
+    /// tmux-backed tabs attached right now, across every project. Quit uses
+    /// this to decide whether a session prompt is needed.
+    var attachedTmuxSessionCount: Int {
+        workspace.allProjects.reduce(0) { total, project in
+            total + project.terminalSessions.sessions.filter {
+                $0.tmuxSessionName != nil
+            }.count
+        }
+    }
+
+    /// Ends every attached tmux session. Quit calls this only when the user
+    /// chooses to end them; a failure leaves the session running and reports
+    /// in that terminal's error surface.
+    func endAllAttachedTmuxSessions() async {
+        for project in workspace.allProjects {
+            await project.terminalSessions.endAllAttachedSessions()
+        }
     }
 
     func prepareForTermination() {
