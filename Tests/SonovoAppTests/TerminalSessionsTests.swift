@@ -86,8 +86,9 @@ final class TerminalSessionsTests: XCTestCase {
         )
         XCTAssertEqual(
             store.sessions[0].view.initialCommand,
-            "launch:\(prefix)1:"
+            "/bin/sh -c 'launch:\(prefix)1:"
                 + FileManager.default.temporaryDirectory.path
+                + "'"
         )
 
         store.addSession()
@@ -122,7 +123,7 @@ final class TerminalSessionsTests: XCTestCase {
         )
         XCTAssertEqual(
             store.sessions[1].view.initialCommand,
-            "attach:\(prefix)3"
+            "/bin/sh -c 'attach:\(prefix)3'"
         )
 
         store.addSession()

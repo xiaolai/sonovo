@@ -225,7 +225,7 @@ final class TerminalSessionsStore {
             // the tty echoed the whole script before tmux started. The
             // script ends in `exec tmux … attach`, so the tab's lifetime is
             // unchanged.
-            session.view.initialCommand = launchCommand(
+            session.view.initialCommand = executableCommand(
                 terminalEnvironment.tmux?.launchInput(
                     name: tmuxName ?? "",
                     directory: workingDirectory,
@@ -233,7 +233,7 @@ final class TerminalSessionsStore {
                 )
             )
         case .attach:
-            session.view.initialCommand = launchCommand(
+            session.view.initialCommand = executableCommand(
                 terminalEnvironment.tmux?.attachOnlyInput(name: tmuxName ?? "")
             )
         case .directShell:
@@ -253,6 +253,14 @@ final class TerminalSessionsStore {
             return nil
         }
         return value
+    }
+
+    /// Ghostty wraps a surface command as `exec -l <command>` inside a shell,
+    /// so a compound script must be handed to a shell explicitly. `/bin/sh -c`
+    /// is POSIX and the tmux launcher is written for it.
+    private func executableCommand(_ script: String?) -> String? {
+        guard let script = launchCommand(script) else { return nil }
+        return "/bin/sh -c " + TmuxNaming.shellQuote(script)
     }
 
     private func allocateSession(name: String?) {
@@ -317,7 +325,7 @@ final class TerminalSessionsStore {
             }) {
                 // Discovery saw the session: an as-yet-unstarted tab must
                 // attach, not create it again.
-                existing.view.initialCommand = launchCommand(
+                existing.view.initialCommand = executableCommand(
                     terminalEnvironment.tmux?.attachOnlyInput(name: name)
                 )
                 continue
@@ -580,7 +588,7 @@ final class TerminalSessionsStore {
         }) {
             // The session exists now; rewriting the launch command prevents a
             // later restart from recreating it after it disappears.
-            existing.view.initialCommand = launchCommand(
+            existing.view.initialCommand = executableCommand(
                 terminalEnvironment.tmux?.attachOnlyInput(name: name)
             )
             selectedID = existing.id
