@@ -25,6 +25,8 @@ struct CodeEditorSettings: Equatable, Sendable {
 
     var usesTabs = false
     var wrapsLines = false
+    /// The chosen Nerd Font family, or empty for system mono.
+    var monoFamily = ""
 
     static let tabWidthKey = "sonovo.codeTabWidth"
     static let usesTabsKey = "sonovo.codeUsesTabs"
@@ -33,11 +35,13 @@ struct CodeEditorSettings: Equatable, Sendable {
     init(
         tabWidth: Int = AppTheme.Code.tabWidthDefault,
         usesTabs: Bool = false,
-        wrapsLines: Bool = false
+        wrapsLines: Bool = false,
+        monoFamily: String = ""
     ) {
         storedTabWidth = AppTheme.Code.clampedTabWidth(tabWidth)
         self.usesTabs = usesTabs
         self.wrapsLines = wrapsLines
+        self.monoFamily = monoFamily
     }
 
     static func load(from defaults: UserDefaults = .standard) -> Self {
@@ -47,7 +51,10 @@ struct CodeEditorSettings: Equatable, Sendable {
                 ? storedWidth
                 : AppTheme.Code.tabWidthDefault,
             usesTabs: defaults.bool(forKey: usesTabsKey),
-            wrapsLines: defaults.bool(forKey: wrapLinesKey)
+            wrapsLines: defaults.bool(forKey: wrapLinesKey),
+            monoFamily: defaults.string(
+                forKey: FontPreferences.codeFamilyKey
+            ) ?? ""
         )
     }
 }
@@ -247,9 +254,9 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     }
 
     private var baseFont: NSFont {
-        NSFont.monospacedSystemFont(
-            ofSize: AppTheme.Code.fontSize,
-            weight: .regular
+        AppFonts.codeFont(
+            size: AppTheme.Code.fontSize,
+            family: settings.monoFamily
         )
     }
 

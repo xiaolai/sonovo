@@ -98,6 +98,12 @@ struct MarkdownViewer: View {
     private let headingByScrollID: [String: HeadingEntry]
 
     @State private var expansion: [Int: Bool] = [:]
+    /// Fonts read this preference when they build the CoreText cascade. The
+    /// observation makes a face change repaint the reader.
+    @AppStorage(FontPreferences.chineseFaceKey)
+    private var readingChineseFace = FontPreferences.defaultChineseFace
+    @AppStorage(FontPreferences.readingFaceKey)
+    private var readingFace = ReadingFace.theme.rawValue
     @State private var keys: [DetailsContentKey] = []
     @State private var scrollPosition = ScrollPosition(idType: String.self)
     @State private var blockFrames: [String: CGRect] = [:]
@@ -249,6 +255,8 @@ struct MarkdownViewer: View {
             .onChange(of: find.currentIndex) { _, _ in
                 scrollToCurrent(proxy)
             }
+            .onChange(of: readingChineseFace) { _, _ in }
+            .onChange(of: readingFace) { _, _ in }
         }
     }
 

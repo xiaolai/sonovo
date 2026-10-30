@@ -62,6 +62,12 @@ struct SettingsView: View {
         AppTheme.Code.tabWidthDefault
     @AppStorage("sonovo.codeUsesTabs") private var codeUsesTabs = false
     @AppStorage("sonovo.codeWrapLines") private var codeWrapLines = false
+    @AppStorage(FontPreferences.readingFaceKey)
+    private var readingFace = ReadingFace.theme.rawValue
+    @AppStorage(FontPreferences.chineseFaceKey)
+    private var readingChineseFace = FontPreferences.defaultChineseFace
+    @AppStorage(FontPreferences.codeFamilyKey)
+    private var codeFontFamily = ""
     @AppStorage("sonovo.audioDevice") private var audioDevice = ""
     @AppStorage("sonovo.shell") private var shell = ""
     @AppStorage("sonovo.terminalFont") private var terminalFont = "SF Mono 12"
@@ -69,6 +75,7 @@ struct SettingsView: View {
     @AppStorage(TerminalPreferences.tmuxKey) private var terminalTmux = false
     @State private var outputDevices: [AudioOutputDevice] = []
     @State private var terminalFontCatalog: [String] = []
+    @State private var nerdFontFamilies: [String] = []
     @State private var editingCustomShell = false
     @State private var customShellDraft = ""
     @State private var customShellError: String?
@@ -103,6 +110,7 @@ struct SettingsView: View {
         }
         .task {
             terminalFontCatalog = TerminalFontCatalog.monospacedFamilies()
+            nerdFontFamilies = NerdFonts.installedFamilies
         }
         .task {
             guard tmuxVersion == nil else { return }
@@ -436,9 +444,93 @@ struct SettingsView: View {
                     Toggle("Line numbers", isOn: $markdownLineNumbers)
                     Text("Show source line numbers in the gutter.")
                 }
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                        HStack {
+                            Text("Reading typeface")
+                            Spacer()
+                            Picker("", selection: readingFaceSelection) {
+                                ForEach(ReadingFace.installed) { face in
+                                    Text(face.displayName).tag(face.rawValue)
+                                }
+                            }
+                            .labelsHidden()
+                            .accessibilityLabel("Reading typeface")
+                            .frame(
+                                width: AppTheme.Layout.settingsPickerWidth
+                            )
+                        }
+                        Text(
+                            "Overrides the theme's Latin face for body and "
+                                + "headings. Follow theme keeps New York for "
+                                + "Paper and Charter for Book and Editorial."
+                        )
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                        HStack {
+                            Text("Chinese reading face")
+                            Spacer()
+                            Picker("", selection: chineseFaceSelection) {
+                                ForEach(ChineseFace.installed) { face in
+                                    Text(face.displayName).tag(face.fontName)
+                                }
+                            }
+                            .labelsHidden()
+                            .accessibilityLabel("Chinese reading face")
+                            .frame(
+                                width: AppTheme.Layout.settingsPickerWidth
+                            )
+                        }
+                        Text(
+                            "PingFang 简体 is the default. Each family ships "
+                                + "in Simplified and Traditional cuts."
+                        )
+                        .font(.system(size: AppTheme.TypeScale.xs))
+                        .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             SettingsGroup {
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: AppTheme.Spacing.sm) {
+                        HStack {
+                            Text("Code font")
+                            Spacer()
+                            Picker("", selection: $codeFontFamily) {
+                                Text("System Mono (SF Mono)").tag("")
+                                ForEach(nerdFontOptions, id: \.self) {
+                                    family in
+                                    Text(
+                                        family == NerdFonts.recommendedFamily
+                                            ? "\(family) (Recommended)"
+                                            : family
+                                    )
+                                    .tag(family)
+                                }
+                            }
+                            .labelsHidden()
+                            .accessibilityLabel("Code font")
+                            .frame(
+                                width: AppTheme.Layout.settingsPickerWidth
+                            )
+                        }
+                        if !codeFontFamily.isEmpty,
+                           !AppFonts.isInstalled(codeFontFamily) {
+                            Text(
+                                "That font is not installed; the editor "
+                                    + "falls back to system mono."
+                            )
+                            .font(.system(size: AppTheme.TypeScale.xs))
+                            .foregroundStyle(AppTheme.Palette.warning)
+                        }
+                        nerdFontHelp
+                    }
+                }
                 SettingsRow {
                     HStack {
                         Text("Code tab width")
@@ -594,6 +686,9 @@ struct SettingsView: View {
                     }
                 }
                 SettingsRow {
+                    nerdFontHelp
+                }
+                SettingsRow {
                     HStack {
                         Text("Size")
                         Spacer()
@@ -662,6 +757,72 @@ struct SettingsView: View {
     // MARK: - Terminal settings
 
     private static let customShellTag = "__custom__"
+
+    private var readingFaceSelection: Binding<String> {
+        Binding(
+            get: {
+                ReadingFace(rawValue: readingFace)?.available.rawValue
+                    ?? ReadingFace.theme.rawValue
+            },
+            set: { readingFace = $0 }
+        )
+    }
+
+    private var chineseFaceSelection: Binding<String> {
+        Binding(
+            get: {
+                ChineseFace.valid(fontName: readingChineseFace)
+                    ?? FontPreferences.defaultChineseFace
+            },
+            set: { readingChineseFace = $0 }
+        )
+    }
+
+    private var nerdFontOptions: [String] {
+        var options = nerdFontFamilies
+        if !codeFontFamily.isEmpty,
+           !options.contains(codeFontFamily) {
+            options.insert(codeFontFamily, at: 0)
+        }
+        return options
+    }
+
+    private var nerdFontHelp: some View {
+        VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+            Text(
+                "Nerd Fonts add the icons used by prompts and CLIs. "
+                    + "Recommended: JetBrains Mono Nerd Font."
+            )
+            .font(.system(size: AppTheme.TypeScale.xs))
+            .foregroundStyle(.secondary)
+            HStack(spacing: AppTheme.Spacing.sm) {
+                Button("Download JetBrains Mono") {
+                    NSWorkspace.shared.open(NerdFonts.recommendedDownload)
+                }
+                Button("All Nerd Fonts…") {
+                    NSWorkspace.shared.open(NerdFonts.downloadPage)
+                }
+            }
+            HStack(spacing: AppTheme.Spacing.sm) {
+                Text(NerdFonts.installCommand)
+                    .font(
+                        .system(
+                            size: AppTheme.TypeScale.xxs,
+                            design: .monospaced
+                        )
+                    )
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        NerdFonts.installCommand,
+                        forType: .string
+                    )
+                }
+            }
+        }
+    }
 
     private var terminalFontParts: (family: String, size: Double) {
         TerminalPreferences.parsedFont(from: terminalFont)

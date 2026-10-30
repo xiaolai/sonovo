@@ -1471,9 +1471,29 @@ private struct Renderer {
     }
 
     private func fontStack(_ font: ThemeFont) -> String {
-        var families = font.families
+        var families = font.effectiveFamilies
+        if font.effectiveDesign == .mono {
+            let code = FontPreferences.codeFamily()
+            if !code.isEmpty, !families.contains(code) {
+                families.insert(code, at: 0)
+            }
+        }
+        if families.isEmpty {
+            // WebKit maps these to New York, SF Pro, and SF Mono. Naming a
+            // system face keeps the export's Latin glyphs in the same design
+            // as the app before the Chinese fallback is consulted.
+            switch font.effectiveDesign {
+            case .serif: families = ["ui-serif"]
+            case .sans: families = ["system-ui"]
+            case .mono: families = ["ui-monospace"]
+            }
+        }
         if let resolved = font.resolvedFamily, !families.contains(resolved) {
             families.insert(resolved, at: 0)
+        }
+        if let chinese = FontPreferences.chineseFaceName(),
+           !families.contains(chinese) {
+            families.append(chinese)
         }
         let quoted = families.map { family in
             let escaped = family
@@ -1488,7 +1508,7 @@ private struct Renderer {
             return "\"\(escaped)\""
         }
         let generic: String
-        switch font.design {
+        switch font.effectiveDesign {
         case .serif: generic = "serif"
         case .sans: generic = "sans-serif"
         case .mono: generic = "monospace"

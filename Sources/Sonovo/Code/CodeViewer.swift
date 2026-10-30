@@ -125,12 +125,15 @@ struct CodeViewer: View {
     private var codeTabWidth = AppTheme.Code.tabWidthDefault
     @AppStorage("sonovo.codeUsesTabs") private var codeUsesTabs = false
     @AppStorage("sonovo.codeWrapLines") private var codeWrapLines = false
+    @AppStorage(FontPreferences.codeFamilyKey)
+    private var codeFontFamily = ""
 
     private var editorSettings: CodeEditorSettings {
         CodeEditorSettings(
             tabWidth: codeTabWidth,
             usesTabs: codeUsesTabs,
-            wrapsLines: codeWrapLines
+            wrapsLines: codeWrapLines,
+            monoFamily: codeFontFamily
         )
     }
 
@@ -257,6 +260,10 @@ struct CodeViewer: View {
                 .updateSettings(editorSettings)
         }
         .onChange(of: codeWrapLines) { _, _ in
+            workspace.controller(for: document)
+                .updateSettings(editorSettings)
+        }
+        .onChange(of: codeFontFamily) { _, _ in
             workspace.controller(for: document)
                 .updateSettings(editorSettings)
         }

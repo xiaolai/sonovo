@@ -62,14 +62,15 @@ enum ThemeFontDesign: String, Sendable {
     case serif
     case sans
     case mono
+}
 
-    var swiftUI: Font.Design {
-        switch self {
-        case .serif: .serif
-        case .sans: .default
-        case .mono: .monospaced
-        }
-    }
+/// What a theme font is for. A global reading-face preference overrides the
+/// themed face for body and heading text, but never chrome or code.
+enum ThemeFontRole: String, Sendable {
+    case body
+    case heading
+    case ui
+    case code
 }
 
 /// A font stack. The first installed family wins; otherwise the system font
@@ -77,31 +78,35 @@ enum ThemeFontDesign: String, Sendable {
 struct ThemeFont: Equatable, Sendable {
     let families: [String]
     let design: ThemeFontDesign
+    let role: ThemeFontRole
 
-    private static let installedFamilies = Set(
-        NSFontManager.shared.availableFontFamilies
-    )
-
-    var resolvedFamily: String? {
-        families.first { family in
-            Self.installedFamilies.contains(family)
-                || NSFontManager.shared.font(
-                    withFamily: family,
-                    traits: [],
-                    weight: 5,
-                    size: 12
-                ) != nil
-        }
+    var effectiveFamilies: [String] {
+        guard role == .body || role == .heading else { return families }
+        let face = FontPreferences.readingFace()
+        guard face != .theme else { return families }
+        return face.families
     }
 
+    var effectiveDesign: ThemeFontDesign {
+        guard role == .body || role == .heading else { return design }
+        let face = FontPreferences.readingFace()
+        guard face != .theme else { return design }
+        return face.design
+    }
+
+    var resolvedFamily: String? {
+        AppFonts.resolvedFamily(from: effectiveFamilies)
+    }
+
+    /// A SwiftUI font carrying the reading Chinese face as a CoreText
+    /// cascade; Latin stays in the theme face.
     func font(size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        let base: Font
-        if let family = resolvedFamily {
-            base = .custom(family, size: size)
-        } else {
-            base = .system(size: size, design: design.swiftUI)
-        }
-        return base.weight(weight)
+        AppFonts.themedFont(
+            families: effectiveFamilies,
+            design: effectiveDesign,
+            size: size,
+            weight: weight
+        )
     }
 }
 
@@ -713,11 +718,13 @@ final class MarkdownThemeStore {
             name: document.name,
             bodyFont: ThemeFont(
                 families: document.typography.bodyFont.families,
-                design: bodyDesign
+                design: bodyDesign,
+                role: .body
             ),
             uiFont: ThemeFont(
                 families: document.typography.uiFont.families,
-                design: uiDesign
+                design: uiDesign,
+                role: .ui
             ),
             bodySize: clamp(
                 document.typography.bodySize,
@@ -741,7 +748,8 @@ final class MarkdownThemeStore {
             ),
             headingFont: ThemeFont(
                 families: document.typography.headingFont.families,
-                design: headingDesign
+                design: headingDesign,
+                role: .heading
             ),
             headingSizes: document.typography.headingSizes.map {
                 clamp($0, MarkdownThemeLimits.headingSize, "headingSize")
@@ -751,7 +759,8 @@ final class MarkdownThemeStore {
             },
             codeFont: ThemeFont(
                 families: document.typography.codeFont.families,
-                design: codeDesign
+                design: codeDesign,
+                role: .code
             ),
             codeSize: clamp(
                 document.typography.codeSize,
