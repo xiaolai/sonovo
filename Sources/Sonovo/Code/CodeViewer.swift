@@ -1,4 +1,5 @@
 import AppKit
+import SonovoCore
 import SwiftUI
 
 // MARK: - Reference delivery
@@ -118,6 +119,8 @@ struct CodeViewer: View {
     @State private var referenceMessage: String?
     @State private var symbols: [CodeSymbol] = []
     @State private var symbolTask: Task<Void, Never>?
+    @State private var workflow: Workflow?
+    @State private var showsWorkflowChart = false
     @AppStorage("sonovo.codeTabWidth")
     private var codeTabWidth = AppTheme.Code.tabWidthDefault
     @AppStorage("sonovo.codeUsesTabs") private var codeUsesTabs = false
@@ -242,6 +245,9 @@ struct CodeViewer: View {
                 .updateSettings(editorSettings)
             loadSymbols()
         }
+        .task(id: workflowRefreshID) {
+            await refreshWorkflow()
+        }
         .onChange(of: codeTabWidth) { _, _ in
             workspace.controller(for: document)
                 .updateSettings(editorSettings)
@@ -256,6 +262,13 @@ struct CodeViewer: View {
         }
         .onChange(of: document.revision) { _, _ in
             loadSymbols()
+        }
+        .onChange(of: document.viewMode) { _, mode in
+            // Every path that leaves Source hides the chart, including the
+            // review banner and revert, not just the mode picker.
+            if mode != .source {
+                showsWorkflowChart = false
+            }
         }
         .onChange(of: document.language) { _, _ in
             // Save As can change the language without changing the revision.
@@ -274,10 +287,14 @@ struct CodeViewer: View {
             undoRedo
             Divider().frame(height: AppTheme.Size.toolbarDividerHeight)
             modePicker
+            if let workflow, document.viewMode == .source {
+                workflowToggle(workflow)
+            }
 
             Spacer(minLength: AppTheme.Spacing.sm)
 
             Button {
+                showSource()
                 workspace.controller(for: document).showFindBar()
             } label: {
                 toolbarIcon("magnifyingglass")
@@ -287,6 +304,7 @@ struct CodeViewer: View {
             .accessibilityLabel("Find")
 
             Button {
+                showSource()
                 goToLineText = "\(workspace.controller(for: document).cursorLine)"
                 showGoToLine = true
             } label: {
@@ -297,6 +315,7 @@ struct CodeViewer: View {
             .accessibilityLabel("Go to Line")
 
             Button {
+                showSource()
                 showSymbols = true
             } label: {
                 toolbarIcon("list.bullet.indent")
@@ -448,12 +467,38 @@ struct CodeViewer: View {
         .accessibilityLabel("Source or Diff")
     }
 
+    private func workflowToggle(_ workflow: Workflow) -> some View {
+        Toggle(isOn: $showsWorkflowChart) {
+            HStack(spacing: AppTheme.Spacing.xxs) {
+                Label(
+                    "Workflow",
+                    systemImage: "point.3.connected.trianglepath.dotted"
+                )
+                if workflow.errorCount > 0 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color(AppTheme.Palette.error))
+                }
+            }
+        }
+        .toggleStyle(.button)
+        .controlSize(.small)
+        .fixedSize()
+        .help(
+            showsWorkflowChart
+                ? "Show the YAML source"
+                : "Show the workflow chart"
+        )
+        .accessibilityLabel("Workflow chart")
+    }
+
     private var referenceMenu: some View {
         Menu {
             Button("Copy Reference") {
+                showSource()
                 deliverReference(copyOnly: true)
             }
             Button("Send Reference to Terminal") {
+                showSource()
                 deliverReference(copyOnly: false)
             }
             Button("Copy Diff") {
@@ -500,9 +545,87 @@ struct CodeViewer: View {
                     onCopyDiff: copyDiff
                 )
             }
+        } else if showsWorkflowChart, let workflow {
+            WorkflowPanel(workflow: workflow) { line in
+                showSource()
+                workspace.controller(for: document).goToLine(line)
+            }
         } else {
             CodeSourceView(document: document, workspace: workspace)
         }
+    }
+
+    // MARK: Workflow
+
+    private var workflowRefreshID: String {
+        "\(document.revision)\u{1F}\(document.language.rawValue)"
+            + "\u{1F}\(document.fileURL.path)"
+    }
+
+    /// Re-reads the workflow after a quiet period, then feeds the chart and
+    /// the source underlines. The parse runs off the main actor; a newer
+    /// revision cancels this one through `.task(id:)`.
+    private func refreshWorkflow() async {
+        let revision = document.revision
+        let source = document.source
+        let path = document.fileURL.path
+        guard document.language == .yaml else {
+            applyWorkflow(
+                nil,
+                revision: revision,
+                language: document.language
+            )
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(120))
+        if Task.isCancelled { return }
+        let parsed: Workflow? = await Task.detached(
+            priority: .userInitiated
+        ) { () -> Workflow? in
+            guard WorkflowDetection.acceptsSource(source),
+                  WorkflowDetection.isWorkflowPath(path)
+                    || WorkflowDetection.hasWorkflowShape(source) else {
+                return nil
+            }
+            return WorkflowParser.parse(source)
+        }.value
+        if Task.isCancelled { return }
+        guard document.revision == revision,
+              document.source == source else {
+            return
+        }
+        applyWorkflow(parsed, revision: revision, language: .yaml)
+    }
+
+    /// Source-targeted commands and the chart cannot share the surface.
+    /// Returning to Source first keeps Find, Go to Line, and references
+    /// operating on the editor the user can see.
+    private func showSource() {
+        if showsWorkflowChart {
+            showsWorkflowChart = false
+        }
+    }
+
+    private func applyWorkflow(
+        _ workflow: Workflow?,
+        revision: UInt64,
+        language: CodeLanguage
+    ) {
+        self.workflow = workflow
+        if workflow == nil {
+            showsWorkflowChart = false
+        }
+        workspace.controller(for: document).updateDiagnostics(
+            (workflow?.diagnostics ?? []).compactMap { diagnostic in
+                guard let line = diagnostic.line else { return nil }
+                return CodeDiagnostic(
+                    line: line,
+                    isError: diagnostic.isError
+                )
+            },
+            revision: revision,
+            language: language
+        )
     }
 
     private var diffPair: CodeDiffPair? {

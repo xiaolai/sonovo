@@ -21,6 +21,10 @@ public enum DiagramEngine: String, CaseIterable, Sendable {
     case graphviz
     case markmap
     case svg
+    /// A GitHub Actions workflow chart. Its source is DOT generated from the
+    /// workflow YAML and rendered by the Graphviz engine, but the engine name
+    /// stays distinct so the cache, the label, and the copy source agree.
+    case workflow
 }
 
 /// A fenced block that a diagram renderer owns, with its source.
@@ -62,9 +66,134 @@ public enum DiagramPolicy {
         case "svg":
             guard SVGFencePolicy.accepts(code.code) else { return nil }
             return DiagramSource(engine: .svg, source: code.code)
+        case "yaml", "yml":
+            return WorkflowDiagramPolicy.diagramSource(
+                from: code.code,
+                explicit: false
+            )
+        case "workflow":
+            return WorkflowDiagramPolicy.diagramSource(
+                from: code.code,
+                explicit: true
+            )
         default:
             return nil
         }
+    }
+}
+
+/// A YAML fence becomes a workflow chart only when its content is a GitHub
+/// Actions workflow. Any other YAML stays a code block.
+///
+/// Detection here is lexical and never runs the YAML parser: this policy is
+/// called while a Markdown view body is evaluated. The workflow source stays
+/// YAML; `DiagramRenderer` converts it to DOT off the main actor.
+public enum WorkflowDiagramPolicy {
+    public static func accepts(_ source: String, explicit: Bool) -> Bool {
+        guard WorkflowDetection.acceptsSource(source) else { return false }
+        return explicit
+            ? WorkflowDetection.hasJobsKey(source)
+            : WorkflowDetection.hasWorkflowShape(source)
+    }
+
+    public static func diagramSource(
+        from source: String,
+        explicit: Bool
+    ) -> DiagramSource? {
+        guard accepts(source, explicit: explicit) else { return nil }
+        return DiagramSource(engine: .workflow, source: source)
+    }
+
+    /// The DOT for a workflow source, or `nil` when the document has no jobs
+    /// or the graph exceeds the renderer's source limit. Runs off the main
+    /// actor when called by the diagram renderer.
+    /// One bounded, content-addressed parse cache shared by the reader's
+    /// diagnostics and the DOT conversion. Both run off the main actor; the
+    /// lock only protects the small dictionary.
+    private static let parseCache = WorkflowParseCache(limit: 8)
+
+    public static func workflow(from source: String) -> Workflow {
+        parseCache.value(for: source) {
+            WorkflowParser.parse(source)
+        }
+    }
+
+    public static func dot(
+        from source: String,
+        variant: DiagramThemeVariant = .light
+    ) -> String? {
+        let workflow = workflow(from: source)
+        guard workflow.hasJobs else { return nil }
+        let dot = WorkflowDOT.render(workflow, variant: variant)
+        guard GraphvizDiagramPolicy.accepts(dot) else { return nil }
+        return dot
+    }
+}
+
+/// A small content-addressed cache for parsed workflows. The lock is held
+/// only for dictionary access; parsing happens outside it.
+private final class WorkflowParseCache: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let limit: Int
+    private var entries: [String: Workflow] = [:]
+    private var order: [String] = []
+    private var building: Set<String> = []
+    /// Keys a caller is waiting on. They are ineligible for eviction until
+    /// the waiter has read the result, so a wake-up always finds the entry.
+    private var waiters: [String: Int] = [:]
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    func value(for source: String, build: () -> Workflow) -> Workflow {
+        let key = SHA256.hash(data: Data(source.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        condition.lock()
+        while building.contains(key) {
+            waiters[key, default: 0] += 1
+            condition.wait()
+            waiters[key, default: 0] -= 1
+            if waiters[key] == 0 {
+                waiters.removeValue(forKey: key)
+            }
+        }
+        if let cached = entries[key] {
+            condition.unlock()
+            return cached
+        }
+        building.insert(key)
+        condition.unlock()
+
+        let value = build()
+
+        condition.lock()
+        if entries[key] == nil {
+            entries[key] = value
+            order.append(key)
+            if order.count > limit {
+                let removeCount = max(1, limit / 4)
+                var removed = 0
+                var index = 0
+                while removed < removeCount, index < order.count {
+                    let candidate = order[index]
+                    if waiters[candidate, default: 0] > 0 {
+                        index += 1
+                        continue
+                    }
+                    entries.removeValue(forKey: candidate)
+                    order.remove(at: index)
+                    removed += 1
+                }
+            }
+        }
+        let result = entries[key] ?? value
+        building.remove(key)
+        condition.broadcast()
+        condition.unlock()
+        return result
     }
 }
 

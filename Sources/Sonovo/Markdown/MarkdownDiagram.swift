@@ -146,7 +146,11 @@ struct DiagramEngineSpec: Sendable {
               format: 'svg'
             });
             if (options.theme === 'dark') {
-              const style = '<style>text,[fill="black"]{fill:#E6E6E6}'
+              // Restyle default ink only. Plain Graphviz labels often carry
+              // no fill attribute at all, while an explicit fill, stroke,
+              // or fontcolor is the author's choice and must survive.
+              const style = '<style>'
+                + 'text:not([fill]),[fill="black"]{fill:#E6E6E6}'
                 + '[stroke="black"]{stroke:#E6E6E6}'
                 + 'polygon[fill="white"]{fill:transparent}</style>';
               const index = svg.lastIndexOf('</svg>');
@@ -285,6 +289,10 @@ final class WebDiagramRenderer: NSObject, WKNavigationDelegate {
             return MermaidDiagramPolicy.accepts(source)
         case .graphviz:
             return GraphvizDiagramPolicy.accepts(source)
+        case .workflow:
+            // A workflow source is YAML; the DOT conversion happens in
+            // DiagramRenderer before the Graphviz engine sees it.
+            return WorkflowDetection.acceptsSource(source)
         case .markmap:
             return MarkmapDiagramPolicy.accepts(source)
         case .svg:
@@ -751,6 +759,22 @@ enum DiagramRenderer {
         case .graphviz:
             return try await GraphvizRenderer.shared.render(
                 source: diagram.source,
+                variant: variant,
+                timeout: timeout
+            )
+        case .workflow:
+            // Parsing YAML is real work; keep it off the main actor, which
+            // the reader and the exporter both run on.
+            let dot = await Task.detached(priority: .userInitiated) {
+                WorkflowDiagramPolicy.dot(
+                    from: diagram.source,
+                    variant: variant
+                )
+            }.value
+            try Task.checkCancellation()
+            guard let dot else { throw MarkdownDiagramError.rejectedSource }
+            return try await GraphvizRenderer.shared.render(
+                source: dot,
                 variant: variant,
                 timeout: timeout
             )

@@ -3,6 +3,13 @@ import Foundation
 import Observation
 import SonovoCore
 
+/// One line the source view underlines. Lines are 1-based; the message is
+/// shown by the panel, not carried into the editor's paint state.
+struct CodeDiagnostic: Equatable, Sendable {
+    let line: Int
+    let isError: Bool
+}
+
 /// Editor preferences the code surface reads. Stored in UserDefaults so a
 /// setting applies to every open code document immediately.
 struct CodeEditorSettings: Equatable, Sendable {
@@ -70,6 +77,13 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
     /// uses it to prove a stream of requests cannot starve the work.
     @ObservationIgnored private(set) var highlightPassCount = 0
     private(set) var lastCommandError: Error?
+    /// Problems the source view underlines. They are repainted with the
+    /// highlight pass, so they follow scrolling without a second layout.
+    /// The revision and language bind the line numbers to the text they were
+    /// computed for; a stale set must not paint on newer text.
+    @ObservationIgnored private(set) var diagnostics: [CodeDiagnostic] = []
+    @ObservationIgnored private var diagnosticsRevision: UInt64?
+    @ObservationIgnored private var diagnosticsLanguage: CodeLanguage?
 
     private var settings: CodeEditorSettings
     // Work state, not view state. The controller is @Observable, and SwiftUI
@@ -716,6 +730,35 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
                 range: NSIntersectionRange(range, affected)
             )
         }
+
+        // Diagnostic underlines are part of the same pass, so scrolling into
+        // a line paints its problem without a second layout. A diagnostic
+        // set from an older revision is discarded rather than applied to
+        // shifted lines.
+        if diagnosticsRevision == snapshot.revision,
+           diagnosticsLanguage == snapshot.language {
+            for diagnostic in diagnostics {
+                guard let lineRange = snapshot.range(
+                    ofLine: diagnostic.line
+                ) else {
+                    continue
+                }
+                let visible = NSIntersectionRange(lineRange, affected)
+                guard visible.length > 0 else { continue }
+                storage.addAttribute(
+                    .underlineStyle,
+                    value: NSUnderlineStyle.single.rawValue,
+                    range: visible
+                )
+                storage.addAttribute(
+                    .underlineColor,
+                    value: diagnostic.isError
+                        ? NSColor(AppTheme.Palette.error)
+                        : NSColor(AppTheme.Palette.warning),
+                    range: visible
+                )
+            }
+        }
         storage.endEditing()
 
         textView.typingAttributes = baseAttributes
@@ -899,6 +942,31 @@ final class CodeEditorController: NSObject, NSTextViewDelegate {
             cursor += isOpening ? 1 : -1
         }
         return nil
+    }
+
+    // MARK: - Diagnostics
+
+    /// Replaces the underlined lines for a specific document revision. An
+    /// unchanged set is a no-op, so the workflow parser and the editor do not
+    /// repaint each other in a loop.
+    func updateDiagnostics(
+        _ diagnostics: [CodeDiagnostic],
+        revision: UInt64,
+        language: CodeLanguage
+    ) {
+        let changed = self.diagnostics != diagnostics
+            || diagnosticsRevision != revision
+            || diagnosticsLanguage != language
+        guard changed else { return }
+        self.diagnostics = diagnostics
+        diagnosticsRevision = revision
+        diagnosticsLanguage = language
+        guard let snapshot = highlightSnapshot,
+              snapshot.revision == document.revision,
+              snapshot.language == document.language else {
+            return
+        }
+        applyHighlight(snapshot)
     }
 
     // MARK: - Navigation

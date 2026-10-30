@@ -349,7 +349,7 @@ private struct Renderer {
                 lightClass: "mermaid mermaid-light",
                 darkClass: "mermaid mermaid-dark"
             )
-        case .graphviz, .markmap:
+        case .graphviz, .workflow, .markmap:
             return themedDiagramHTML(
                 asset,
                 figureClass: "diagram-block \(asset.engine.rawValue)-block",

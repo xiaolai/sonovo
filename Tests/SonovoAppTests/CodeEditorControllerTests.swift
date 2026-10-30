@@ -387,6 +387,70 @@ final class CodeEditorControllerTests: XCTestCase {
         }
     }
 
+    /// A workflow problem underlines its source line and clears with the
+    /// diagnostic, without touching the text or the undo history.
+    func testDiagnosticsUnderlineAndClearSourceLines() async throws {
+        let root = try support.makeRoot(files: [
+            "ci.yml": CodeTestData.utf8(
+                "on: push\njobs:\n  build:\n    runs-on: x\n"
+            )
+        ])
+        let url = root.appendingPathComponent("ci.yml")
+        let document = CodeDocument(url: url)
+        await document.load()
+        let controller = CodeEditorController(
+            document: document,
+            settings: CodeEditorSettings()
+        )
+        controller.attach()
+        try await waitUntil("the first lex") {
+            controller.highlightSnapshot != nil
+        }
+        let snapshot = try XCTUnwrap(controller.highlightSnapshot)
+        let lineRange = try XCTUnwrap(snapshot.range(ofLine: 2))
+        let storage = try XCTUnwrap(controller.textView.textStorage)
+
+        controller.updateDiagnostics(
+            [CodeDiagnostic(line: 2, isError: true)],
+            revision: document.revision,
+            language: document.language
+        )
+        let underlined = storage.attributes(
+            at: lineRange.location,
+            effectiveRange: nil
+        )
+        XCTAssertEqual(
+            underlined[.underlineStyle] as? Int,
+            NSUnderlineStyle.single.rawValue
+        )
+        XCTAssertNotNil(underlined[.underlineColor] as? NSColor)
+
+        // A set computed for another revision must not paint on this text.
+        controller.updateDiagnostics(
+            [CodeDiagnostic(line: 2, isError: true)],
+            revision: document.revision + 1,
+            language: document.language
+        )
+        XCTAssertNil(
+            storage.attributes(
+                at: lineRange.location,
+                effectiveRange: nil
+            )[.underlineStyle]
+        )
+
+        controller.updateDiagnostics(
+            [],
+            revision: document.revision,
+            language: document.language
+        )
+        let cleared = storage.attributes(
+            at: lineRange.location,
+            effectiveRange: nil
+        )
+        XCTAssertNil(cleared[.underlineStyle])
+        XCTAssertEqual(document.source, "on: push\njobs:\n  build:\n    runs-on: x\n")
+    }
+
     private func waitUntil(
         _ description: String,
         timeout: TimeInterval = 8,

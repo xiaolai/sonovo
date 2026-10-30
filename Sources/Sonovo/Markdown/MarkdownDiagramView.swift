@@ -20,6 +20,10 @@ struct MarkdownDiagramView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var state: RenderState = .loading
     @State private var copied = false
+    /// Workflow problems, when this fence is a workflow chart. A fence has no
+    /// source editor to underline, so the card reports the count and lists
+    /// the messages on hover.
+    @State private var problems: [WorkflowDiagnostic] = []
 
     private enum RenderState {
         case loading
@@ -39,7 +43,11 @@ struct MarkdownDiagramView: View {
     }
 
     private var label: String {
-        diagram.engine == .graphviz ? "dot" : diagram.engine.rawValue
+        switch diagram.engine {
+        case .graphviz: "dot"
+        case .workflow: "workflow"
+        default: diagram.engine.rawValue
+        }
     }
 
     private var cardGround: Color {
@@ -56,15 +64,30 @@ struct MarkdownDiagramView: View {
             case let .diagram(image, svg):
                 diagramCard(image, svg)
             case .fallback:
-                MarkdownCodeBlockView(
-                    code: code,
-                    theme: theme,
-                    palette: palette,
-                    highlightQuery: highlightQuery
-                )
+                VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
+                    if !problems.isEmpty {
+                        problemsBadge
+                            .padding(.horizontal, theme.codePadding)
+                    }
+                    MarkdownCodeBlockView(
+                        code: code,
+                        theme: theme,
+                        palette: palette,
+                        highlightQuery: highlightQuery
+                    )
+                }
             }
         }
         .task(id: taskID) {
+            if diagram.engine == .workflow {
+                let parsed = await Task.detached(priority: .userInitiated) {
+                    WorkflowDiagramPolicy.workflow(from: code.code)
+                }.value
+                if Task.isCancelled { return }
+                problems = parsed.diagnostics
+            } else {
+                problems = []
+            }
             await render()
         }
     }
@@ -90,6 +113,25 @@ struct MarkdownDiagramView: View {
         .accessibilityLabel("Rendering \(label) diagram")
     }
 
+    private var problemsBadge: some View {
+        Label(
+            "\(problems.count) "
+                + (problems.count == 1 ? "problem" : "problems"),
+            systemImage: "exclamationmark.triangle.fill"
+        )
+        .font(
+            theme.uiFont.font(
+                size: theme.captionSize,
+                weight: .medium
+            )
+        )
+        .foregroundStyle(palette.warning.color)
+        .help(problems.map(\.message).joined(separator: "\n"))
+        .accessibilityLabel(
+            problems.map(\.message).joined(separator: ", ")
+        )
+    }
+
     private func diagramCard(_ image: NSImage, _ svg: SanitizedSVG) -> some View {
         VStack(alignment: .leading, spacing: AppTheme.Spacing.xs) {
             HStack(spacing: AppTheme.Spacing.sm) {
@@ -105,6 +147,9 @@ struct MarkdownDiagramView: View {
                             ? theme.palette(for: .light).secondaryInk.color
                             : palette.secondaryInk.color
                     )
+                if !problems.isEmpty {
+                    problemsBadge
+                }
                 Spacer(minLength: AppTheme.Spacing.sm)
                 Button {
                     copySource()
@@ -185,6 +230,8 @@ struct MarkdownDiagramView: View {
     }
 
     private func copySource() {
+        // A workflow source is the fenced YAML itself; the DOT is generated
+        // by the renderer and never stored here.
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(diagram.source, forType: .string)
         copied = true

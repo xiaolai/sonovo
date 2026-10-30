@@ -32,6 +32,14 @@ let package = Package(
         .package(
             url: "https://github.com/mgriebling/SwiftMath.git",
             exact: "1.7.3"
+        ),
+        // GitHub Actions workflow charts need a real YAML parser: the
+        // workflow document's jobs and needs are read from the node tree,
+        // not from a syntax-only scan. Pinned to an exact release; libyaml
+        // is wrapped by the package and needs no system install.
+        .package(
+            url: "https://github.com/jpsim/Yams.git",
+            exact: "6.2.2"
         )
     ],
     targets: [
@@ -42,7 +50,8 @@ let package = Package(
         .target(
             name: "SonovoCore",
             dependencies: [
-                .product(name: "Markdown", package: "swift-markdown")
+                .product(name: "Markdown", package: "swift-markdown"),
+                .product(name: "Yams", package: "Yams")
             ],
             path: "Sources/SonovoCore"
         ),

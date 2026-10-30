@@ -161,6 +161,9 @@ enum AppTheme {
         static let reviewNoteHeight: CGFloat = 96
         static let reviewQueueHeight: CGFloat = 440
         static let goToLineFieldWidth: CGFloat = 120
+        /// The problems list above a workflow chart stops growing here and
+        /// scrolls instead.
+        static let workflowDiagnosticsMaxHeight: CGFloat = 144
         static let tabWidthDefault: Int = 4
         static let tabWidthRange: ClosedRange<Int> = 2...8
 

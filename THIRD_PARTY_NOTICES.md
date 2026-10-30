@@ -43,6 +43,18 @@ and ships these font licenses: GUST Font License
 (`Vendor/SwiftMath-OFL.txt`), and a MathChat MIT notice bundled by SwiftMath
 (`Vendor/SwiftMath-Fonts-LICENSE.txt`).
 
+## Yams
+
+- **Project:** https://github.com/jpsim/Yams
+- **License:** MIT
+- **Copyright:** Copyright (c) 2016 JP Simard
+- **Used as:** the pinned Swift package (`exact: "6.2.2"`) that reads GitHub
+  Actions workflow YAML into the job graph the code viewer charts. Yams wraps
+  libyaml (`CYaml`); no system library is required and nothing is fetched at
+  runtime.
+
+The MIT text is in `Vendor/Yams-LICENSE.txt`.
+
 ## Mermaid
 
 - **Project:** https://github.com/mermaid-js/mermaid

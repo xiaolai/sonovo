@@ -102,6 +102,48 @@ final class MarkdownDiagramTests: XCTestCase {
         // The dark pass rewrites Graphviz's black default ink; a dropped
         // style would leave the diagram invisible on dark paper.
         XCTAssertTrue(dark.markup.contains("#E6E6E6"))
+        // Default Graphviz text has no fill attribute; the dark restyle must
+        // still reach it without touching explicit author colours.
+        XCTAssertTrue(dark.markup.contains("text:not([fill])"))
+    }
+
+    func testWorkflowFenceRendersThroughGraphviz() async throws {
+        let source = """
+            on: push
+            jobs:
+              build:
+                runs-on: macos-15
+                steps:
+                  - run: swift test
+              deploy:
+                needs: [build, missing]
+                runs-on: macos-15
+            """
+        let ast = ast("```yaml\n\(source)\n```\n")
+        guard case let .codeBlock(code, _) = ast.blocks.first else {
+            return XCTFail("expected a code block")
+        }
+        let diagram = try XCTUnwrap(DiagramPolicy.source(from: code))
+        XCTAssertEqual(diagram.engine, .workflow)
+        // The fence carries YAML; the dispatcher converts it to DOT.
+        XCTAssertTrue(diagram.source.contains("on: push"))
+
+        let svg = try await DiagramRenderer.render(diagram, variant: .light)
+        XCTAssertTrue(svg.markup.contains("<svg"))
+        XCTAssertTrue(svg.markup.contains("build"))
+        XCTAssertTrue(svg.markup.contains("deploy"))
+        XCTAssertTrue(svg.markup.lowercased().contains("#c0392b"))
+        XCTAssertTrue(svg.markup.lowercased().contains("#fafafb"))
+        XCTAssertTrue(svg.markup.contains("missing"))
+        XCTAssertFalse(svg.markup.lowercased().contains("<script"))
+        let image = try XCTUnwrap(NSImage(data: Data(svg.markup.utf8)))
+        XCTAssertGreaterThan(image.size.width, 0)
+        XCTAssertGreaterThan(image.size.height, 0)
+
+        // The dark restyle recolors text but must leave the error border.
+        let dark = try await DiagramRenderer.render(diagram, variant: .dark)
+        XCTAssertTrue(dark.markup.lowercased().contains("#e06c61"))
+        XCTAssertTrue(dark.markup.lowercased().contains("#1c1d20"))
     }
 
     func testInvalidDOTFails() async throws {
