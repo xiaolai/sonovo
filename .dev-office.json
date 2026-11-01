@@ -1,0 +1,16 @@
+{
+  "tests": {
+    "tiers": {
+      "full": "Scripts/test.sh"
+    }
+  },
+  "release": {
+    "changelog": null,
+    "version_files": [
+      {
+        "file": "Sources/Sonovo/Resources/version.txt",
+        "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$"
+      }
+    ]
+  }
+}
