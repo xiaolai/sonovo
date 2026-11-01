@@ -173,23 +173,23 @@ final class CodeEncodingTests: XCTestCase {
     }
 
     func testCodeSaveNeverWritesDirectly() throws {
-        let root = FileManager.default.temporaryDirectory
-        let directory = root.appendingPathComponent("SonovoCodeScan")
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directory) }
         let source = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Sources/Sonovo/Code")
-        let files = try FileManager.default.contentsOfDirectory(
-            at: source,
-            includingPropertiesForKeys: nil
-        )
-        for file in files where file.pathExtension == "swift" {
+            .appendingPathComponent("Sources/SonovoCodeFeature")
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(
+            at: source, includingPropertiesForKeys: nil
+        ))
+        let files = enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        let names = Set(files.map(\.lastPathComponent))
+        XCTAssertTrue(names.contains("CodeDocument.swift"), "the policy must inspect the real document implementation")
+        XCTAssertTrue(names.contains("CodeWorkspace.swift"), "an empty or stale source path must not pass")
+        // Review snapshots are app-owned Application Support metadata, not
+        // project files. The old policy excluded them in the separate Review
+        // directory; preserve that boundary after the target extraction.
+        let projectFiles = files.filter { $0.lastPathComponent != "CodeReviewStore.swift" }
+        for file in projectFiles {
             let text = try String(contentsOf: file, encoding: .utf8)
             XCTAssertFalse(
                 text.contains("data.write(to:"),
