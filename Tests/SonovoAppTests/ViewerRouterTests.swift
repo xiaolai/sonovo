@@ -1,3 +1,4 @@
+@testable import SonovoViewerFeature
 import XCTest
 @testable import Sonovo
 

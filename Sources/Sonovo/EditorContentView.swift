@@ -1,3 +1,7 @@
+import SonovoWorkspaceHost
+import SonovoFeatureAPI
+import SonovoDomainTypes
+import SonovoDesignSystem
 import SwiftUI
 
 struct EditorContentView: View {
@@ -31,9 +35,9 @@ struct EditorContentView: View {
         case .stills:
             StillsView(state: state, project: project)
         case .subtitle:
-            SubtitleWorkspaceView(project: project)
+            featureContent(provider: "builtin.subtitle.editor", asset: project.selectedAsset)
         case .model3d:
-            Model3DWorkspaceView(project: project)
+            featureContent(provider: "builtin.model.editor", asset: project.selectedAsset)
         case .html:
             HTMLPreviewView()
         case .delivery:
@@ -41,101 +45,32 @@ struct EditorContentView: View {
         case .code, .mdx:
             EmptyEditorView()
         case .timeline:
-            TimelineDocumentView(
-                workspace: project.timelines,
-                assets: project.assets,
-                project: project,
-                isVisible: project.isActive
-                    && state.terminalPresentation != .full,
-                scanRevision: project.scanRevision
-            )
+            featureContent(provider: "builtin.timeline.editor", asset: project.selectedAsset)
         case .document, .image, .archive, .other:
             EmptyEditorView()
         }
     }
 
-    @ViewBuilder
     private func projectContent(for tab: EditorTab) -> some View {
-        switch tab.kind {
-        case .script:
-            MarkdownWorkspaceView(project: project)
-        case .subtitle:
-            SubtitleWorkspaceView(project: project)
-        case .model3d:
-            Model3DWorkspaceView(project: project)
-        case .code:
-            CodeWorkspaceView(workspace: project.code, project: project)
-        case .mdx:
-            MDXWorkspaceView(workspace: project.mdx, project: project)
-        case .timeline:
-            TimelineDocumentView(
-                workspace: project.timelines,
-                assets: project.assets,
-                project: project,
-                isVisible: project.isActive
-                    && state.terminalPresentation != .full,
-                scanRevision: project.scanRevision
-            )
-        case .audio, .video:
-            if let asset = project.selectedAsset {
-                MediaAssetView(
-                    asset: asset,
-                    project: project,
-                    appState: state
-                )
-                    .id(asset.id)
-            } else {
-                ProjectNoFileView()
-            }
-        case .image, .document, .html:
-            if let asset = project.selectedAsset {
-                documentContent(for: asset)
-            } else {
-                ProjectNoFileView()
-            }
-        case .archive, .other:
-            if let asset = project.selectedAsset {
-                MetadataAssetView(asset: asset)
-                    .id("\(asset.id)-\(asset.revision.token)")
-            } else {
-                ProjectNoFileView()
-            }
-        case .stills, .delivery:
-            EmptyEditorView()
+        RegisteredProjectEditor(project: project, isVisible: project.isActive && state.terminalPresentation != .full,
+            terminalReferences: terminalReferenceService, mediaReplaceRequests: state)
+    }
+
+    @ViewBuilder private func featureContent(provider: EditorProviderID, asset: ProjectAsset?) -> some View {
+        if let contribution = project.featureEditors.contribution(for: provider) {
+            contribution.makeView(EditorRequest(project: project, asset: asset,
+                isVisible: project.isActive && state.terminalPresentation != .full,
+                terminalReferences: terminalReferenceService, mediaReplaceRequests: state))
+        } else {
+            Text("Editor unavailable for this file.")
+                .font(.system(size: AppTheme.TypeScale.sm))
+                .foregroundStyle(.secondary)
         }
     }
 
-    @ViewBuilder
-    private func documentContent(for asset: ProjectAsset) -> some View {
-        switch ViewerRouter.route(for: asset) {
-        case .image:
-            // The comparison can show any other image, so every image
-            // revision participates in this view's identity. Unrelated
-            // assets do not, which keeps playback elsewhere undisturbed.
-            ImageDocumentView(
-                asset: asset,
-                comparisonCandidates: project.assets.filter {
-                    $0.id != asset.id
-                        && ViewerRouter.route(for: $0) == .image
-                }
-            )
-            // The viewer's identity follows only the displayed image. An
-            // unrelated candidate's revision must not reset zoom/pan or
-            // dismiss an active comparison.
-            .id("\(asset.id)-\(asset.revision.token)")
-        case .pdf:
-            PDFDocumentView(asset: asset)
-                .id("\(asset.id)-\(asset.revision.token)")
-        case .localWeb:
-            LocalDocumentView(asset: asset)
-                .id("\(asset.id)-\(asset.revision.token)")
-        case .quickLook:
-            QuickLookDocumentView(asset: asset)
-                .id("\(asset.id)-\(asset.revision.token)")
-        case .metadata:
-            MetadataAssetView(asset: asset)
-                .id("\(asset.id)-\(asset.revision.token)")
-        }
+    private var terminalReferenceService: TerminalReferenceService {
+        TerminalReferenceService(recipientTitle: { project.terminalSessions.selectedSession?.title },
+            delivery: { state.codeReferenceDelivery(for: project) })
     }
 
     @ViewBuilder
@@ -180,16 +115,3 @@ struct EmptyEditorView: View {
 }
 
 /// The editor content when a tab has no file to show.
-struct ProjectNoFileView: View {
-    var body: some View {
-        VStack(spacing: AppTheme.Spacing.md) {
-            Image(systemName: "doc")
-                .font(.system(size: AppTheme.TypeScale.displayLarge, weight: .ultraLight))
-                .foregroundStyle(.tertiary)
-            Text("No File")
-                .font(.system(size: AppTheme.TypeScale.lg, weight: .medium))
-        }
-        .padding(AppTheme.Spacing.lg)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}

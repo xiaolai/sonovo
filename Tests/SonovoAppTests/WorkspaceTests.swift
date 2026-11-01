@@ -1,7 +1,15 @@
+import SonovoFileIO
+import SonovoWorkspaceHost
+@testable import SonovoTerminalFeature
+@testable import SonovoModel3DFeature
+@testable import SonovoSubtitleFeature
+@testable import SonovoMarkdownFeature
+import SonovoDomainTypes
 import Foundation
 import XCTest
 @testable import Sonovo
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 
 @MainActor
 final class WorkspaceTests: XCTestCase {

@@ -1,3 +1,4 @@
+import SonovoWorkspaceHost
 import Foundation
 
 enum SampleDocumentError: LocalizedError, Equatable {

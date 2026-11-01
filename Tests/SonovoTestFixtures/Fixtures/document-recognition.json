@@ -1,0 +1,1606 @@
+[
+  {
+    "kind": "code",
+    "name": ".bash_profile"
+  },
+  {
+    "kind": "code",
+    "name": ".bashrc"
+  },
+  {
+    "kind": "code",
+    "name": ".zprofile"
+  },
+  {
+    "kind": "code",
+    "name": ".zshenv"
+  },
+  {
+    "kind": "code",
+    "name": ".zshrc"
+  },
+  {
+    "kind": "code",
+    "name": "Containerfile"
+  },
+  {
+    "kind": "nil",
+    "name": "DOCKERFILE"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.3mf"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.aac"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ai"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.aif"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.aiff"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.arw"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ascmhl"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ass"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.avi"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.avif"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.bash"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.bashrc"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.blend"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.bmp"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.c"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.cc"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.cjs"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.cpp"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.cr3"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.css"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.csv"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.cts"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.cxx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.dae"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.dng"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.docx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.edl"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.eps"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.epub"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.exr"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.fbx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.fcpxml"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.fdx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.fish"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.flac"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.fountain"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.gif"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.glb"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.gltf"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.go"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.h"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.hdr"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.heic"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.heif"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.hh"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.hpp"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.htm"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.html"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.hxx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.java"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.jpeg"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.jpg"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.js"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.json"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.jsonc"
+  },
+  {
+    "kind": "mdx",
+    "name": "Dockerfile.jsx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.key"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.kt"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.kts"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.log"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.lua"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.m"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.m4a"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.m4v"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.markdown"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.md"
+  },
+  {
+    "kind": "mdx",
+    "name": "Dockerfile.mdx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mhl"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mjs"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mkv"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mm"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mov"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mp3"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mp4"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mts"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.mxf"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.nef"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.obj"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.odt"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ogg"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.opus"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.otio"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.pages"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.pdf"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.php"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ply"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.png"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.pptx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.psb"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.psd"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.py"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.pyi"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.pyw"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.rb"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.rs"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.rtf"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.scss"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.sh"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.sql"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.srt"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ssa"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.stl"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.svg"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.swift"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.tif"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.tiff"
+  },
+  {
+    "kind": "timeline",
+    "name": "Dockerfile.timeline.json"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.toml"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.ts"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.tsv"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.tsx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.txt"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.usd"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.usda"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.usdc"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.usdz"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.vtt"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.wav"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.webm"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.webp"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.xlsx"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.xml"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.yaml"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.yml"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.zip"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.zsh"
+  },
+  {
+    "kind": "code",
+    "name": "Dockerfile.zshrc"
+  },
+  {
+    "kind": "code",
+    "name": "GNUmakefile"
+  },
+  {
+    "kind": "code",
+    "name": "Gemfile"
+  },
+  {
+    "kind": "nil",
+    "name": "MAKEFILE"
+  },
+  {
+    "kind": "code",
+    "name": "Makefile"
+  },
+  {
+    "kind": "nil",
+    "name": "README"
+  },
+  {
+    "kind": "code",
+    "name": "Rakefile"
+  },
+  {
+    "kind": "nil",
+    "name": "dockerfile"
+  },
+  {
+    "kind": "timeline",
+    "name": "edit.TIMELINE.JSON"
+  },
+  {
+    "kind": "timeline",
+    "name": "edit.timeline.JSON"
+  },
+  {
+    "kind": "timeline",
+    "name": "edit.timeline.json"
+  },
+  {
+    "kind": "nil",
+    "name": "file"
+  },
+  {
+    "kind": "nil",
+    "name": "file."
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.3MF"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.3mf"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.AAC"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.AI"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.AIF"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.AIFF"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.ARW"
+  },
+  {
+    "kind": "archive",
+    "name": "fixture.ASCMHL"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.ASS"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.AVI"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.AVIF"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.BASH"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.BASHRC"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.BLEND"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.BMP"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.C"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.CC"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.CJS"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.CPP"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.CR3"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.CSS"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.CSV"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.CTS"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.CXX"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.DAE"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.DNG"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.DOCX"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.EDL"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.EPS"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.EPUB"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.EXR"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.FBX"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.FCPXML"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.FDX"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.FISH"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.FLAC"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.FOUNTAIN"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.GIF"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.GLB"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.GLTF"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.GO"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.H"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.HDR"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.HEIC"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.HEIF"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.HH"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.HPP"
+  },
+  {
+    "kind": "html",
+    "name": "fixture.HTM"
+  },
+  {
+    "kind": "html",
+    "name": "fixture.HTML"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.HXX"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.JAVA"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.JPEG"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.JPG"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.JS"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.JSON"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.JSONC"
+  },
+  {
+    "kind": "mdx",
+    "name": "fixture.JSX"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.KEY"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.KT"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.KTS"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.LOG"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.LUA"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.M"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.M4A"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.M4V"
+  },
+  {
+    "kind": "script",
+    "name": "fixture.MARKDOWN"
+  },
+  {
+    "kind": "script",
+    "name": "fixture.MD"
+  },
+  {
+    "kind": "mdx",
+    "name": "fixture.MDX"
+  },
+  {
+    "kind": "archive",
+    "name": "fixture.MHL"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.MJS"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.MKV"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.MM"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.MOV"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.MP3"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.MP4"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.MTS"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.MXF"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.NEF"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.OBJ"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.ODT"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.OGG"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.OPUS"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.OTIO"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.PAGES"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.PDF"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.PHP"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.PLY"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.PNG"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.PPTX"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.PSB"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.PSD"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.PY"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.PYI"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.PYW"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.RB"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.RS"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.RTF"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.SCSS"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.SH"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.SQL"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.SRT"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.SSA"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.STL"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.SVG"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.SWIFT"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.TIF"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.TIFF"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.TOML"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.TS"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.TSV"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.TSX"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.TXT"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.USD"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.USDA"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.USDC"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.USDZ"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.VTT"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.WAV"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.WEBM"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.WEBP"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.XLSX"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.XML"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.YAML"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.YML"
+  },
+  {
+    "kind": "archive",
+    "name": "fixture.ZIP"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.ZSH"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.ZSHRC"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.aac"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.ai"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.aif"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.aiff"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.arw"
+  },
+  {
+    "kind": "archive",
+    "name": "fixture.ascmhl"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.ass"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.avi"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.avif"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.bash"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.bashrc"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.blend"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.bmp"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.c"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.cc"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.cjs"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.cpp"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.cr3"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.css"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.csv"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.cts"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.cxx"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.dae"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.dng"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.docx"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.edl"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.eps"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.epub"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.exr"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.fbx"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.fcpxml"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.fdx"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.fish"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.flac"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.fountain"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.gif"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.glb"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.gltf"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.go"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.h"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.hdr"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.heic"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.heif"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.hh"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.hpp"
+  },
+  {
+    "kind": "html",
+    "name": "fixture.htm"
+  },
+  {
+    "kind": "html",
+    "name": "fixture.html"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.hxx"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.java"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.jpeg"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.jpg"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.js"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.json"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.jsonc"
+  },
+  {
+    "kind": "mdx",
+    "name": "fixture.jsx"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.key"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.kt"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.kts"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.log"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.lua"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.m"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.m4a"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.m4v"
+  },
+  {
+    "kind": "script",
+    "name": "fixture.markdown"
+  },
+  {
+    "kind": "script",
+    "name": "fixture.md"
+  },
+  {
+    "kind": "mdx",
+    "name": "fixture.mdx"
+  },
+  {
+    "kind": "archive",
+    "name": "fixture.mhl"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.mjs"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.mkv"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.mm"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.mov"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.mp3"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.mp4"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.mts"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.mxf"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.nef"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.obj"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.odt"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.ogg"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.opus"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.otio"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.pages"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.pdf"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.php"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.ply"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.png"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.pptx"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.psb"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.psd"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.py"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.pyi"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.pyw"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.rb"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.rs"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.rtf"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.scss"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.sh"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.sql"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.srt"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.ssa"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.stl"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.svg"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.swift"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.tif"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.tiff"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.toml"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.ts"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.tsv"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.tsx"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.txt"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.usd"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.usda"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.usdc"
+  },
+  {
+    "kind": "model3d",
+    "name": "fixture.usdz"
+  },
+  {
+    "kind": "subtitle",
+    "name": "fixture.vtt"
+  },
+  {
+    "kind": "audio",
+    "name": "fixture.wav"
+  },
+  {
+    "kind": "video",
+    "name": "fixture.webm"
+  },
+  {
+    "kind": "image",
+    "name": "fixture.webp"
+  },
+  {
+    "kind": "document",
+    "name": "fixture.xlsx"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.xml"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.yaml"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.yml"
+  },
+  {
+    "kind": "archive",
+    "name": "fixture.zip"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.zsh"
+  },
+  {
+    "kind": "code",
+    "name": "fixture.zshrc"
+  },
+  {
+    "kind": "code",
+    "name": "makefile"
+  },
+  {
+    "kind": "nil",
+    "name": "unknown.xyz"
+  }
+]

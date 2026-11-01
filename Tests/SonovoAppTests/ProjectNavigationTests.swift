@@ -1,3 +1,9 @@
+import SonovoDomainTypes
+import SonovoWorkspaceHost
+@testable import SonovoTerminalFeature
+@testable import SonovoModel3DFeature
+@testable import SonovoSubtitleFeature
+@testable import SonovoMarkdownFeature
 import XCTest
 @testable import Sonovo
 

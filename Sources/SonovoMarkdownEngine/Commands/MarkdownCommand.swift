@@ -1,0 +1,2003 @@
+import Foundation
+
+/// A command the rail, menu, palette, and key equivalents all execute.
+public enum MarkdownCommandKind: Sendable, Equatable, Hashable {
+    case toggleEmphasis
+    case toggleStrong
+    case toggleInlineCode
+    case toggleStrikethrough
+    case toggleHighlight
+    case toggleUnderline
+    case toggleSuperscript
+    case toggleSubscript
+    case toggleHeading(level: Int)
+    case toggleBlockQuote
+    case toggleList(kind: MarkdownListKind)
+    case insertLink(destination: String)
+    case insertImage(destination: String, alt: String)
+    case insertCodeFence
+    case insertRule
+    case insertWikiLink(target: String, alias: String?)
+    case insertDetails(summary: String)
+    case insertTOC
+    case replaceAll(query: String, replacement: String, caseSensitive: Bool)
+    case setDetailsOpen(Bool)
+    case insertTable(rows: Int, columns: Int)
+    case insertTableRowAbove
+    case insertTableRowBelow
+    case deleteTableRow
+    case insertTableColumnLeft
+    case insertTableColumnRight
+    case deleteTableColumn
+    case deleteTable
+    case setTableAlignment(TableBlock.Alignment)
+    case formatTable
+    /// Replaces exactly the frontmatter range the panel was opened on.
+    case replaceFrontmatter(range: Range<Int>, text: String)
+    case lineUp
+    case lineDown
+    case duplicateLine
+    case deleteLine
+    case joinLines
+    case removeBlankLines
+    case sortLinesAscending
+    case sortLinesDescending
+    case uppercase
+    case lowercase
+    case titleCase
+    case toggleCase
+    case trimTrailingSpaces
+    case collapseBlankLines
+    /// Explicit CJK spacing and punctuation normalization.
+    case formatCJK
+    /// Selection-only. Adds the next exact occurrence of the primary's
+    /// selected text, or of the word under its caret. The source is
+    /// unchanged; the result carries a caret set.
+    case addNextOccurrence
+    /// Selection-only. Selects every exact occurrence of the primary's text,
+    /// refusing beyond the caret cap. The source is unchanged.
+    case selectAllOccurrences
+}
+
+/// The list shapes a toggle can produce.
+public enum MarkdownListKind: Sendable, Equatable, Hashable {
+    case bullet
+    case ordered
+    case task
+}
+
+/// The exact bytes and identity an action was prepared against.
+///
+/// A command that presents UI, schedules asynchronous work, or applies an edit
+/// captures a target first and refuses when any component differs. The source
+/// slice check catches a moved or edited range even when the revision counter
+/// was not advanced by the caller.
+public struct MarkdownActionTarget: Sendable, Equatable {
+    public let documentID: UUID
+    public let identityGeneration: UInt64
+    public let sourceRevision: UInt64
+    public let range: Range<Int>
+    public let expectedSlice: String
+    public let rootGeneration: UInt64
+
+    public init(
+        documentID: UUID,
+        identityGeneration: UInt64,
+        sourceRevision: UInt64,
+        range: Range<Int>,
+        expectedSlice: String,
+        rootGeneration: UInt64
+    ) {
+        self.documentID = documentID
+        self.identityGeneration = identityGeneration
+        self.sourceRevision = sourceRevision
+        self.range = range
+        self.expectedSlice = expectedSlice
+        self.rootGeneration = rootGeneration
+    }
+
+    /// Whether the target still names the same bytes in the same document.
+    public func isCurrent(in context: MarkdownCommandContext) -> Bool {
+        guard let documentID = context.documentID,
+              documentID == self.documentID,
+              context.identityGeneration == identityGeneration,
+              context.sourceRevision == sourceRevision,
+              context.rootGeneration == rootGeneration else {
+            return false
+        }
+        let ns = context.source as NSString
+        guard range.lowerBound >= 0,
+              range.upperBound <= ns.length,
+              range.lowerBound <= range.upperBound else {
+            return false
+        }
+        let slice = ns.substring(
+            with: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            )
+        )
+        return slice == expectedSlice
+    }
+}
+
+/// Everything a command needs to decide availability and apply itself.
+public struct MarkdownCommandContext: Sendable, Equatable {
+    public var source: String
+    /// UTF-16 offsets.
+    public var selection: Range<Int>
+    public var isReadOnly: Bool
+    public var hasMarkedText: Bool
+    public var mode: MarkdownDocumentMode
+    /// The document identity. `nil` in pure command tests that do not need a
+    /// stale-target check.
+    public var documentID: UUID?
+    /// Incremented by Save As or another identity change.
+    public var identityGeneration: UInt64
+    /// The source revision the caller believes it is editing.
+    public var sourceRevision: UInt64
+    /// Incremented when the effective root changes or a document is
+    /// re-resolved to a different path.
+    public var rootGeneration: UInt64
+    /// The captured target for an action that must prove it still applies.
+    public var target: MarkdownActionTarget?
+    /// The editor's live caret set, when more than one caret is placed. A
+    /// placement command needs every caret to choose where the next
+    /// occurrence or the whole set goes; other commands ignore it.
+    public var carets: MultiCursorSelection?
+
+    public init(
+        source: String,
+        selection: Range<Int>,
+        isReadOnly: Bool = false,
+        hasMarkedText: Bool = false,
+        mode: MarkdownDocumentMode = .source,
+        documentID: UUID? = nil,
+        identityGeneration: UInt64 = 0,
+        sourceRevision: UInt64 = 0,
+        rootGeneration: UInt64 = 0,
+        target: MarkdownActionTarget? = nil,
+        carets: MultiCursorSelection? = nil
+    ) {
+        self.source = source
+        self.selection = selection
+        self.isReadOnly = isReadOnly
+        self.hasMarkedText = hasMarkedText
+        self.mode = mode
+        self.documentID = documentID
+        self.identityGeneration = identityGeneration
+        self.sourceRevision = sourceRevision
+        self.rootGeneration = rootGeneration
+        self.target = target
+        self.carets = carets
+    }
+}
+
+/// The new source and selection a command produces.
+public struct MarkdownCommandResult: Sendable, Equatable {
+    public let source: String
+    public let selection: Range<Int>
+    public let actionName: String
+    /// The minimal UTF-16 range that differs from the input.
+    public let changedRange: Range<Int>
+    /// A caret set for a selection-only command. The source is unchanged and
+    /// the editor adopts this set instead of a single selection.
+    public let carets: MultiCursorSelection?
+
+    public init(
+        source: String,
+        selection: Range<Int>,
+        actionName: String,
+        previousSource: String,
+        carets: MultiCursorSelection? = nil
+    ) {
+        self.source = source
+        self.selection = selection
+        self.actionName = actionName
+        self.changedRange = Self.minimalChange(
+            from: previousSource,
+            to: source
+        )
+        self.carets = carets
+    }
+
+    private static func minimalChange(from old: String, to new: String) -> Range<Int> {
+        let a = old as NSString
+        let b = new as NSString
+        let limit = min(a.length, b.length)
+        var prefix = 0
+        while prefix < limit, a.character(at: prefix) == b.character(at: prefix) {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < limit - prefix,
+              a.character(at: a.length - 1 - suffix)
+                == b.character(at: b.length - 1 - suffix) {
+            suffix += 1
+        }
+        var lower = prefix
+        var upper = b.length - suffix
+        // Never return a boundary inside a UTF-16 surrogate pair. The editor
+        // replaces the changed range, and half a pair corrupts the text.
+        if lower > 0, lower < b.length,
+           isHighSurrogate(b.character(at: lower - 1)),
+           isLowSurrogate(b.character(at: lower)) {
+            lower -= 1
+        }
+        if upper > 0, upper < b.length,
+           isHighSurrogate(b.character(at: upper - 1)),
+           isLowSurrogate(b.character(at: upper)) {
+            upper += 1
+        }
+        return lower..<upper
+    }
+
+    private static func isHighSurrogate(_ value: unichar) -> Bool {
+        value >= 0xD800 && value <= 0xDBFF
+    }
+
+    private static func isLowSurrogate(_ value: unichar) -> Bool {
+        value >= 0xDC00 && value <= 0xDFFF
+    }
+}
+
+public enum MarkdownCommandError: Error, Equatable {
+    case unavailable(String)
+    case invalidSelection
+    case invalidDestination(String)
+    case detailsNotFound
+    case staleTarget
+    /// The caret is not in a context the command can edit.
+    case notApplicable(String)
+    /// The enclosing table is malformed or the operation is structurally
+    /// impossible.
+    case tableRefused(String)
+}
+
+/// The single command registry.
+///
+/// Every command is a pure transform with an explicit resulting selection.
+/// A source edit returns the new source; a selection-only placement command
+/// returns the same source and a caret set. The rail, menus, palette, and
+/// keyboard all call `apply`; there is no second implementation path.
+public struct MarkdownCommandRegistry: Sendable {
+    public init() {}
+
+    public func isAvailable(
+        _ command: MarkdownCommandKind,
+        in context: MarkdownCommandContext
+    ) -> Bool {
+        guard !context.isReadOnly,
+              !context.hasMarkedText,
+              context.mode == .source else {
+            return false
+        }
+        if let target = context.target, !target.isCurrent(in: context) {
+            return false
+        }
+        switch command {
+        case .toggleHeading(let level):
+            return (1...6).contains(level)
+        case .insertLink(let destination):
+            return destination.isEmpty || MarkdownSecurity.linkDecision(for: destination).isAllowed
+        case .insertImage(let destination, _):
+            return destination.isEmpty || MarkdownSecurity.linkDecision(for: destination).isAllowed
+        case .insertWikiLink(let target, _):
+            return target.isEmpty || MarkdownSecurity.isValidWikiTarget(target)
+        case .replaceAll(let query, _, _):
+            return !query.isEmpty
+        case .addNextOccurrence:
+            guard let selection = currentSelection(context) else {
+                return false
+            }
+            return (try? OccurrenceSearch.addingNext(
+                to: selection,
+                in: context.source
+            )) != nil
+        case .selectAllOccurrences:
+            guard let selection = currentSelection(context) else {
+                return false
+            }
+            return (try? OccurrenceSearch.selectingAll(
+                in: selection,
+                source: context.source
+            )) != nil
+        default:
+            return true
+        }
+    }
+
+    /// The editor's caret set, or a one-caret set built from the native
+    /// selection. nil when the selection cannot name a valid caret (it never
+    /// should: AppKit keeps native selections on grapheme boundaries).
+    private func currentSelection(
+        _ context: MarkdownCommandContext
+    ) -> MultiCursorSelection? {
+        if let carets = context.carets, !carets.carets.isEmpty {
+            return carets
+        }
+        let ns = context.source as NSString
+        guard context.selection.lowerBound >= 0,
+              context.selection.upperBound >= context.selection.lowerBound,
+              context.selection.upperBound <= ns.length else {
+            return nil
+        }
+        return try? MultiCursorSelection(
+            [
+                MultiCursorSelection.Caret(
+                    anchor: context.selection.lowerBound,
+                    active: context.selection.upperBound
+                )
+            ],
+            primary: 0,
+            source: context.source
+        )
+    }
+
+    public func title(for command: MarkdownCommandKind) -> String {
+        switch command {
+        case .toggleEmphasis: "Italic"
+        case .toggleStrong: "Bold"
+        case .toggleInlineCode: "Inline Code"
+        case .toggleStrikethrough: "Strikethrough"
+        case .toggleHighlight: "Highlight"
+        case .toggleUnderline: "Underline"
+        case .toggleSuperscript: "Superscript"
+        case .toggleSubscript: "Subscript"
+        case .toggleHeading(let level): "Heading \(level)"
+        case .toggleBlockQuote: "Block Quote"
+        case .toggleList(.bullet): "Bullet List"
+        case .toggleList(.ordered): "Numbered List"
+        case .toggleList(.task): "Task List"
+        case .insertLink: "Link"
+        case .insertImage: "Image"
+        case .insertCodeFence: "Code Block"
+        case .insertRule: "Horizontal Rule"
+        case .insertWikiLink: "Wiki Link"
+        case .insertDetails: "Details"
+        case .insertTOC: "Table of Contents"
+        case .replaceAll: "Replace All"
+        case .setDetailsOpen(true): "Open Details"
+        case .setDetailsOpen(false): "Close Details"
+        case .insertTable: "Insert Table"
+        case .insertTableRowAbove: "Insert Row Above"
+        case .insertTableRowBelow: "Insert Row Below"
+        case .deleteTableRow: "Delete Row"
+        case .insertTableColumnLeft: "Insert Column Left"
+        case .insertTableColumnRight: "Insert Column Right"
+        case .deleteTableColumn: "Delete Column"
+        case .deleteTable: "Delete Table"
+        case .setTableAlignment(.none): "Clear Column Alignment"
+        case .setTableAlignment(.left): "Align Column Left"
+        case .setTableAlignment(.center): "Align Column Center"
+        case .setTableAlignment(.right): "Align Column Right"
+        case .formatTable: "Format Table"
+        case .replaceFrontmatter: "Edit Frontmatter"
+        case .lineUp: "Move Line Up"
+        case .lineDown: "Move Line Down"
+        case .duplicateLine: "Duplicate Line"
+        case .deleteLine: "Delete Line"
+        case .joinLines: "Join Lines"
+        case .removeBlankLines: "Remove Blank Lines"
+        case .sortLinesAscending: "Sort Lines Ascending"
+        case .sortLinesDescending: "Sort Lines Descending"
+        case .uppercase: "Uppercase"
+        case .lowercase: "Lowercase"
+        case .titleCase: "Title Case"
+        case .toggleCase: "Toggle Case"
+        case .trimTrailingSpaces: "Remove Trailing Spaces"
+        case .collapseBlankLines: "Collapse Blank Lines"
+        case .formatCJK: "Format CJK Spacing"
+        case .addNextOccurrence: "Add Next Occurrence"
+        case .selectAllOccurrences: "Select All Occurrences"
+        }
+    }
+
+    public func apply(
+        _ command: MarkdownCommandKind,
+        to context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        if let target = context.target, !target.isCurrent(in: context) {
+            throw MarkdownCommandError.staleTarget
+        }
+        guard isAvailable(command, in: context) else {
+            throw MarkdownCommandError.unavailable(title(for: command))
+        }
+
+        switch command {
+        case .toggleEmphasis:
+            return try toggleWrap("*", name: "Italic", context)
+        case .toggleStrong:
+            return try toggleWrap("**", name: "Bold", context)
+        case .toggleStrikethrough:
+            return try toggleWrap("~~", name: "Strikethrough", context)
+        case .toggleHighlight:
+            return try toggleHTMLTag(
+                .mark,
+                name: title(for: command),
+                context
+            )
+        case .toggleUnderline:
+            return try toggleHTMLTag(
+                .underline,
+                name: title(for: command),
+                context
+            )
+        case .toggleSuperscript:
+            return try toggleHTMLTag(
+                .superscript,
+                name: title(for: command),
+                context
+            )
+        case .toggleSubscript:
+            return try toggleHTMLTag(
+                .subscriptTag,
+                name: title(for: command),
+                context
+            )
+        case .toggleInlineCode:
+            return try toggleInlineCode(context)
+        case .toggleHeading(let level):
+            return try toggleHeading(level: level, context)
+        case .toggleBlockQuote:
+            return try toggleBlockQuote(context)
+        case .toggleList(let kind):
+            return try toggleList(kind, context)
+        case .insertLink(let destination):
+            return try insertLink(
+                destination: destination,
+                image: false,
+                alt: "",
+                context
+            )
+        case .insertImage(let destination, let alt):
+            return try insertLink(
+                destination: destination,
+                image: true,
+                alt: alt,
+                context
+            )
+        case .insertCodeFence:
+            return try insertCodeFence(context)
+        case .insertRule:
+            return insertRule(context)
+        case .insertWikiLink(let target, let alias):
+            return try insertWikiLink(target: target, alias: alias, context)
+        case .insertDetails(let summary):
+            return try insertDetails(summary: summary, context)
+        case .insertTOC:
+            return insertTOC(context)
+        case .replaceAll(let query, let replacement, let caseSensitive):
+            return try replaceAll(
+                query: query,
+                replacement: replacement,
+                caseSensitive: caseSensitive,
+                context
+            )
+        case .setDetailsOpen(let open):
+            return try setDetailsOpen(open, context)
+        case .insertTable(let rows, let columns):
+            return try applyTable(
+                .insert(rows: rows, columns: columns),
+                name: title(for: command),
+                context
+            )
+        case .insertTableRowAbove:
+            return try applyTable(
+                .insertRowAbove,
+                name: title(for: command),
+                context
+            )
+        case .insertTableRowBelow:
+            return try applyTable(
+                .insertRowBelow,
+                name: title(for: command),
+                context
+            )
+        case .deleteTableRow:
+            return try applyTable(
+                .deleteRow,
+                name: title(for: command),
+                context
+            )
+        case .insertTableColumnLeft:
+            return try applyTable(
+                .insertColumnLeft,
+                name: title(for: command),
+                context
+            )
+        case .insertTableColumnRight:
+            return try applyTable(
+                .insertColumnRight,
+                name: title(for: command),
+                context
+            )
+        case .deleteTableColumn:
+            return try applyTable(
+                .deleteColumn,
+                name: title(for: command),
+                context
+            )
+        case .deleteTable:
+            return try applyTable(
+                .deleteTable,
+                name: title(for: command),
+                context
+            )
+        case .setTableAlignment(let alignment):
+            return try applyTable(
+                .setAlignment(alignment),
+                name: title(for: command),
+                context
+            )
+        case .formatTable:
+            return try applyTable(
+                .format,
+                name: title(for: command),
+                context
+            )
+        case .replaceFrontmatter(let range, let text):
+            return try replaceFrontmatter(
+                range: range,
+                text: text,
+                context
+            )
+        case .lineUp, .lineDown, .duplicateLine, .deleteLine, .joinLines,
+             .removeBlankLines, .sortLinesAscending, .sortLinesDescending,
+             .uppercase, .lowercase, .titleCase, .toggleCase,
+             .trimTrailingSpaces, .collapseBlankLines:
+            return try applyLine(
+                lineCommand(for: command),
+                name: title(for: command),
+                context
+            )
+        case .formatCJK:
+            return formatCJK(context)
+        case .addNextOccurrence:
+            return try placement(.addingNext, command, context)
+        case .selectAllOccurrences:
+            return try placement(.selectingAll, command, context)
+        }
+    }
+
+    private enum Placement {
+        case addingNext
+        case selectingAll
+    }
+
+    /// Selection-only placement. The source is returned unchanged and the
+    /// resulting caret set travels in the result for the editor to adopt.
+    private func placement(
+        _ mode: Placement,
+        _ command: MarkdownCommandKind,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        guard let selection = currentSelection(context) else {
+            throw MarkdownCommandError.invalidSelection
+        }
+        let placed: MultiCursorSelection
+        switch mode {
+        case .addingNext:
+            placed = try OccurrenceSearch.addingNext(
+                to: selection,
+                in: context.source
+            )
+        case .selectingAll:
+            placed = try OccurrenceSearch.selectingAll(
+                in: selection,
+                source: context.source
+            )
+        }
+        return MarkdownCommandResult(
+            source: context.source,
+            selection: placed.primaryRange,
+            actionName: title(for: command),
+            previousSource: context.source,
+            carets: placed
+        )
+    }
+
+    /// One whole-document replacement; the editor applies it as one undo
+    /// step named "Format CJK Spacing". Nothing is written when no rule
+    /// applies.
+    private func formatCJK(
+        _ context: MarkdownCommandContext
+    ) -> MarkdownCommandResult {
+        let formatted = MarkdownCJKFormatter.format(
+            source: context.source,
+            selection: context.selection
+        )
+        return MarkdownCommandResult(
+            source: formatted.source,
+            selection: formatted.selection,
+            actionName: "Format CJK Spacing",
+            previousSource: context.source
+        )
+    }
+
+    private func lineCommand(
+        for command: MarkdownCommandKind
+    ) -> MarkdownLineCommand {
+        switch command {
+        case .lineUp: return .moveUp
+        case .lineDown: return .moveDown
+        case .duplicateLine: return .duplicate
+        case .deleteLine: return .delete
+        case .joinLines: return .join
+        case .removeBlankLines: return .removeBlankLines
+        case .sortLinesAscending: return .sortAscending
+        case .sortLinesDescending: return .sortDescending
+        case .uppercase: return .uppercase
+        case .lowercase: return .lowercase
+        case .titleCase: return .titleCase
+        case .toggleCase: return .toggleCase
+        case .trimTrailingSpaces: return .trimTrailingSpaces
+        case .collapseBlankLines: return .collapseBlankLines
+        default: return .join
+        }
+    }
+
+    private func applyLine(
+        _ command: MarkdownLineCommand,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let edit = MarkdownLineEditor.edit(
+            command,
+            source: context.source,
+            selection: context.selection
+        )
+        switch edit.outcome {
+        case .notApplicable:
+            throw MarkdownCommandError.notApplicable(name)
+        case .refused:
+            throw MarkdownCommandError.notApplicable(name)
+        case .handled:
+            guard let range = edit.range,
+                  let replacement = edit.replacement else {
+                throw MarkdownCommandError.notApplicable(name)
+            }
+            let ns = context.source as NSString
+            guard range.lowerBound >= 0,
+                  range.upperBound <= ns.length else {
+                throw MarkdownCommandError.invalidSelection
+            }
+            let newSource = ns.replacingCharacters(
+                in: NSRange(
+                    location: range.lowerBound,
+                    length: range.upperBound - range.lowerBound
+                ),
+                with: replacement
+            )
+            return MarkdownCommandResult(
+                source: newSource,
+                selection: edit.selection ?? context.selection,
+                actionName: name,
+                previousSource: context.source
+            )
+        }
+    }
+
+    /// Replaces exactly the frontmatter range. The caller captures the range
+    /// and slice in a target; a stale target refuses before this runs.
+    private func replaceFrontmatter(
+        range: Range<Int>,
+        text: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        guard range.lowerBound >= 0,
+              range.upperBound <= ns.length,
+              range.lowerBound <= range.upperBound else {
+            throw MarkdownCommandError.invalidSelection
+        }
+        let newSource = ns.replacingCharacters(
+            in: NSRange(
+                location: range.lowerBound,
+                length: range.upperBound - range.lowerBound
+            ),
+            with: text
+        )
+        let caret = min(
+            range.lowerBound + (text as NSString).length,
+            (newSource as NSString).length
+        )
+        return MarkdownCommandResult(
+            source: newSource,
+            selection: caret..<caret,
+            actionName: "Edit Frontmatter",
+            previousSource: context.source
+        )
+    }
+
+    /// Applies a source-level table edit through the one command path.
+    private func applyTable(
+        _ command: MarkdownTableCommand,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let edit = MarkdownTableEditor.edit(
+            command,
+            source: context.source,
+            selection: context.selection
+        )
+        switch edit.outcome {
+        case .notApplicable:
+            throw MarkdownCommandError.notApplicable(name)
+        case .refused(let reason):
+            throw MarkdownCommandError.tableRefused(reason.rawValue)
+        case .handled:
+            guard let range = edit.range,
+                  let replacement = edit.replacement else {
+                throw MarkdownCommandError.notApplicable(name)
+            }
+            let ns = context.source as NSString
+            guard range.lowerBound >= 0,
+                  range.upperBound <= ns.length else {
+                throw MarkdownCommandError.invalidSelection
+            }
+            let newSource = ns.replacingCharacters(
+                in: NSRange(
+                    location: range.lowerBound,
+                    length: range.upperBound - range.lowerBound
+                ),
+                with: replacement
+            )
+            return MarkdownCommandResult(
+                source: newSource,
+                selection: edit.selection ?? context.selection,
+                actionName: name,
+                previousSource: context.source
+            )
+        }
+    }
+
+    // MARK: - Selection helpers
+
+    private func validatedSelection(
+        _ context: MarkdownCommandContext
+    ) throws -> NSRange {
+        let ns = context.source as NSString
+        guard context.selection.lowerBound >= 0,
+              context.selection.upperBound >= context.selection.lowerBound,
+              context.selection.upperBound <= ns.length else {
+            throw MarkdownCommandError.invalidSelection
+        }
+        return NSRange(
+            location: context.selection.lowerBound,
+            length: context.selection.upperBound - context.selection.lowerBound
+        )
+    }
+
+    private func isSpace(_ character: unichar) -> Bool {
+        character == 0x20 || character == 0x09
+    }
+
+    private func trimmedCore(_ ns: NSString, _ selection: NSRange) -> NSRange {
+        var location = selection.location
+        var length = selection.length
+        while length > 0, isSpace(ns.character(at: location)) {
+            location += 1
+            length -= 1
+        }
+        while length > 0, isSpace(ns.character(at: location + length - 1)) {
+            length -= 1
+        }
+        return NSRange(location: location, length: length)
+    }
+
+    private func result(
+        _ source: String,
+        selection: NSRange,
+        name: String,
+        previous: String
+    ) -> MarkdownCommandResult {
+        let ns = source as NSString
+        let location = min(max(0, selection.location), ns.length)
+        let length = min(max(0, selection.length), ns.length - location)
+        return MarkdownCommandResult(
+            source: source,
+            selection: location..<(location + length),
+            actionName: name,
+            previousSource: previous
+        )
+    }
+
+    // MARK: - Wrapping
+
+    /// Wraps or unwraps the selection in an allowlisted inline HTML pair.
+    ///
+    /// Unlike the delimiter form, the opening and closing sequences differ.
+    /// The three states mirror `toggleWrap`: no selection inserts an empty
+    /// pair, text already wrapped from the outside unwraps, and a selection
+    /// that includes both tags unwraps to its inner text.
+    private func toggleHTMLTag(
+        _ tag: MarkdownInlineHTMLTag,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let core = trimmedCore(ns, selection)
+        let open = tag.openTag as NSString
+        let close = tag.closeTag as NSString
+
+        if core.length == 0 {
+            let location = min(core.location, ns.length)
+            let source = ns.replacingCharacters(
+                in: NSRange(location: location, length: 0),
+                with: tag.openTag + tag.closeTag
+            )
+            return result(
+                source,
+                selection: NSRange(
+                    location: location + open.length,
+                    length: 0
+                ),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        let beforeStart = core.location - open.length
+        if beforeStart >= 0,
+           core.location + core.length + close.length <= ns.length,
+           ns.substring(
+               with: NSRange(location: beforeStart, length: open.length)
+           ) == (open as String),
+           ns.substring(
+               with: NSRange(
+                   location: core.location + core.length,
+                   length: close.length
+               )
+           ) == (close as String) {
+            let mutable = NSMutableString(string: context.source)
+            mutable.deleteCharacters(
+                in: NSRange(
+                    location: core.location + core.length,
+                    length: close.length
+                )
+            )
+            mutable.deleteCharacters(
+                in: NSRange(location: beforeStart, length: open.length)
+            )
+            return result(
+                mutable as String,
+                selection: NSRange(location: beforeStart, length: core.length),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        if core.length >= open.length + close.length {
+            let slice = ns.substring(with: core)
+            if slice.hasPrefix(tag.openTag), slice.hasSuffix(tag.closeTag) {
+                let inner = ns.substring(
+                    with: NSRange(
+                        location: core.location + open.length,
+                        length: core.length - open.length - close.length
+                    )
+                )
+                return result(
+                    ns.replacingCharacters(in: core, with: inner),
+                    selection: NSRange(
+                        location: core.location,
+                        length: (inner as NSString).length
+                    ),
+                    name: name,
+                    previous: context.source
+                )
+            }
+        }
+
+        let wrapped = tag.openTag + ns.substring(with: core) + tag.closeTag
+        return result(
+            ns.replacingCharacters(in: core, with: wrapped),
+            selection: NSRange(
+                location: core.location + open.length,
+                length: core.length
+            ),
+            name: name,
+            previous: context.source
+        )
+    }
+
+    private func toggleWrap(
+        _ marker: String,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let markerNS = marker as NSString
+        let markerLength = markerNS.length
+        let core = trimmedCore(ns, selection)
+
+        if core.length == 0 {
+            let location = min(selection.location, ns.length)
+            let insertion = marker + marker
+            let source = ns.replacingCharacters(
+                in: NSRange(location: location, length: 0),
+                with: insertion
+            )
+            let cursor = location + markerLength
+            return result(
+                source,
+                selection: NSRange(location: cursor, length: 0),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        // Already wrapped from the outside. A run of exactly this command's
+        // marker is the formatting it toggles; a longer run can mean combined
+        // formatting. `*` inside `**word**` is bold, so italic adds a star;
+        // inside `***word***` italic is already applied, so it removes one
+        // and restores the bold underneath.
+        let markerCharacter = marker.unicodeScalars.first!.value
+        let unwrapRuns: Set<Int>
+        switch marker {
+        case "*", "_": unwrapRuns = [1, 3]
+        case "**", "__": unwrapRuns = [2, 3]
+        default: unwrapRuns = [markerLength]
+        }
+
+        var beforeRun = 0
+        var probe = core.location - 1
+        while probe >= 0, ns.character(at: probe) == markerCharacter {
+            beforeRun += 1
+            probe -= 1
+        }
+        var afterRun = 0
+        probe = core.location + core.length
+        while probe < ns.length, ns.character(at: probe) == markerCharacter {
+            afterRun += 1
+            probe += 1
+        }
+        if beforeRun == afterRun,
+           unwrapRuns.contains(beforeRun),
+           // The run's first marker decides whether the delimiter is
+           // escaped, not its last one.
+           !isEscaped(core.location - beforeRun, in: ns),
+           !isEscaped(core.location + core.length, in: ns) {
+            let before = NSRange(
+                location: core.location - markerLength,
+                length: markerLength
+            )
+            let after = NSRange(
+                location: core.location + core.length,
+                length: markerLength
+            )
+            let mutable = NSMutableString(string: context.source)
+            mutable.deleteCharacters(in: after)
+            mutable.deleteCharacters(in: before)
+            return result(
+                mutable as String,
+                selection: NSRange(location: before.location, length: core.length),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        // The selection itself includes the markers. The same run rule
+        // applies: `**word**` is bold, `***word***` is both, and toggling
+        // italic removes exactly one star from each side.
+        var selectedPrefixRun = 0
+        while selectedPrefixRun < core.length,
+              ns.character(at: core.location + selectedPrefixRun) == markerCharacter {
+            selectedPrefixRun += 1
+        }
+        var selectedSuffixRun = 0
+        while selectedSuffixRun < core.length,
+              ns.character(at: core.location + core.length - selectedSuffixRun - 1)
+                == markerCharacter {
+            selectedSuffixRun += 1
+        }
+        if core.length >= markerLength * 2,
+           selectedPrefixRun == selectedSuffixRun,
+           unwrapRuns.contains(selectedPrefixRun),
+           !isEscaped(core.location, in: ns),
+           !isEscaped(
+               core.location + core.length - selectedSuffixRun,
+               in: ns
+           ) {
+            let inner = NSRange(
+                location: core.location + markerLength,
+                length: core.length - markerLength * 2
+            )
+            let source = ns.replacingCharacters(in: core, with: ns.substring(with: inner))
+            // The markers are gone, so the inner text now starts where the
+            // selected range started.
+            return result(
+                source,
+                selection: NSRange(location: core.location, length: inner.length),
+                name: name,
+                previous: context.source
+            )
+        }
+
+        let mutable = NSMutableString(string: context.source)
+        mutable.insert(marker, at: core.location + core.length)
+        mutable.insert(marker, at: core.location)
+        return result(
+            mutable as String,
+            selection: NSRange(location: core.location + markerLength, length: core.length),
+            name: name,
+            previous: context.source
+        )
+    }
+
+    private func toggleInlineCode(
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let core = trimmedCore(ns, selection)
+
+        if core.length == 0 {
+            let location = min(selection.location, ns.length)
+            let source = ns.replacingCharacters(
+                in: NSRange(location: location, length: 0),
+                with: "``"
+            )
+            return result(
+                source,
+                selection: NSRange(location: location + 1, length: 0),
+                name: "Inline Code",
+                previous: context.source
+            )
+        }
+
+        // Detect an existing backtick run wrapping the core. A padded fence
+        // (` `` `code` `` `) has one space between the run and the content.
+        var beforeRun = 0
+        var beforePadding = false
+        var probe = core.location - 1
+        if probe >= 0, ns.character(at: probe) == 0x20 {
+            beforePadding = true
+            probe -= 1
+        }
+        while probe >= 0, ns.character(at: probe) == 0x60 {
+            beforeRun += 1
+            probe -= 1
+        }
+
+        var afterRun = 0
+        var afterPadding = false
+        probe = core.location + core.length
+        if probe < ns.length, ns.character(at: probe) == 0x20 {
+            afterPadding = true
+            probe += 1
+        }
+        while probe < ns.length, ns.character(at: probe) == 0x60 {
+            afterRun += 1
+            probe += 1
+        }
+
+        let openerStart = core.location - beforeRun
+            - (beforePadding ? 1 : 0)
+        let closerStart = core.location + core.length
+            + (afterPadding ? 1 : 0)
+        if beforeRun > 0,
+           beforeRun == afterRun,
+           beforePadding == afterPadding,
+           !isEscaped(openerStart, in: ns),
+           !isEscaped(closerStart, in: ns),
+           !containsBacktickRun(ofLength: beforeRun, in: ns, range: core) {
+            let padding = beforePadding ? 1 : 0
+            let beforeStart = core.location - beforeRun - padding
+            let afterStart = core.location + core.length
+            let afterEnd = afterStart + afterRun + padding
+            let mutable = NSMutableString(string: context.source)
+            mutable.deleteCharacters(
+                in: NSRange(location: afterStart, length: afterEnd - afterStart)
+            )
+            mutable.deleteCharacters(
+                in: NSRange(
+                    location: beforeStart,
+                    length: core.location - beforeStart
+                )
+            )
+            return result(
+                mutable as String,
+                selection: NSRange(location: beforeStart, length: core.length),
+                name: "Inline Code",
+                previous: context.source
+            )
+        }
+
+        var leading = 0
+        while leading < core.length,
+              ns.character(at: core.location + leading) == 0x60 {
+            leading += 1
+        }
+        var trailing = 0
+        while trailing < core.length,
+              ns.character(at: core.location + core.length - trailing - 1) == 0x60 {
+            trailing += 1
+        }
+        let text = ns.substring(with: core)
+        if leading > 0, leading == trailing, core.length >= leading * 2,
+           !isEscaped(core.location, in: ns),
+           !containsBacktickRun(
+               ofLength: leading,
+               in: ns,
+               range: NSRange(
+                   location: core.location + leading,
+                   length: core.length - leading * 2
+               )
+           ) {
+            var innerStart = core.location + leading
+            var innerLength = core.length - leading * 2
+            // Padded content has one space on each side inside the fence;
+            // CommonMark treats that pair as padding, not content.
+            if innerLength >= 2,
+               ns.character(at: innerStart) == 0x20,
+               ns.character(at: innerStart + innerLength - 1) == 0x20 {
+                let inner = ns.substring(
+                    with: NSRange(location: innerStart, length: innerLength)
+                )
+                // CommonMark keeps an all-space span intact; only a mixed
+                // span treats the boundary spaces as padding.
+                if !inner.allSatisfy({ $0 == " " }) {
+                    innerStart += 1
+                    innerLength -= 2
+                }
+            }
+            let source = ns.replacingCharacters(
+                in: core,
+                with: ns.substring(
+                    with: NSRange(location: innerStart, length: innerLength)
+                )
+            )
+            return result(
+                source,
+                selection: NSRange(location: core.location, length: innerLength),
+                name: "Inline Code",
+                previous: context.source
+            )
+        }
+
+        // Choose a fence longer than any backtick run inside the selection.
+        let longest = longestRun(of: "`", in: text)
+        let fence = String(repeating: "`", count: max(1, longest + 1))
+        // A space on both sides keeps the fence from merging with a backtick
+        // at either edge of the content. CommonMark strips one leading and
+        // trailing space from a code span, so the content is unchanged.
+        let padded = text.hasPrefix("`") || text.hasSuffix("`")
+        let opening = fence + (padded ? " " : "")
+        let closing = (padded ? " " : "") + fence
+        let mutable = NSMutableString(string: context.source)
+        mutable.insert(closing, at: core.location + core.length)
+        mutable.insert(opening, at: core.location)
+        return result(
+            mutable as String,
+            selection: NSRange(
+                location: core.location + (opening as NSString).length,
+                length: core.length
+            ),
+            name: "Inline Code",
+            previous: context.source
+        )
+    }
+
+    // MARK: - Line transforms
+
+    private struct Line {
+        let content: String
+    }
+
+    private func lines(
+        _ ns: NSString,
+        covering selection: NSRange
+    ) -> (block: NSRange, lines: [Line]) {
+        let start = min(selection.location, ns.length)
+        let end = min(selection.location + selection.length, ns.length)
+
+        // The last selected character decides the last line. `end` is
+        // exclusive, so probe once at `end - 1`; decrementing `end` first
+        // skipped a selected blank line.
+        let first = ns.lineRange(for: NSRange(location: start, length: 0))
+        let last = ns.lineRange(for: NSRange(location: max(start, end - 1), length: end > start ? 1 : 0))
+        let block = NSRange(
+            location: first.location,
+            length: NSMaxRange(last) - first.location
+        )
+
+        var result: [Line] = []
+        var cursor = block.location
+        while cursor < NSMaxRange(block) {
+            let lineRange = ns.lineRange(for: NSRange(location: cursor, length: 0))
+            let limited = NSIntersectionRange(lineRange, block)
+            var content = ns.substring(with: limited)
+            if content.hasSuffix("\n") { content.removeLast() }
+            result.append(Line(content: content))
+            cursor = NSMaxRange(limited)
+        }
+
+        if result.isEmpty {
+            result.append(Line(content: ""))
+        }
+        return (block, result)
+    }
+
+    private func splitIndent(_ line: String) -> (indent: String, rest: String) {
+        var indent = ""
+        var rest = line
+        while let first = rest.first, first == " " || first == "\t" {
+            indent.append(first)
+            rest.removeFirst()
+        }
+        return (indent, rest)
+    }
+
+    private func toggleHeading(
+        level: Int,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let (block, lines) = lines(ns, covering: selection)
+
+        // The hashes alone are a valid empty heading; trailing content and
+        // the separating space are optional.
+        let pattern = try NSRegularExpression(pattern: #"^(#{1,6})(?:([ \t]+)(.*))?$"#)
+        var transformed: [String] = []
+
+        let nonEmpty = lines.filter {
+            !$0.content.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        let allRequested = !nonEmpty.isEmpty && nonEmpty.allSatisfy { line in
+            let (_, rest) = splitIndent(line.content)
+            let range = NSRange(location: 0, length: (rest as NSString).length)
+            guard let match = pattern.firstMatch(in: rest, range: range) else {
+                return false
+            }
+            return (rest as NSString).substring(with: match.range(at: 1)).count == level
+        }
+
+        for line in lines {
+            let (indent, rest) = splitIndent(line.content)
+            let range = NSRange(location: 0, length: (rest as NSString).length)
+            let match = pattern.firstMatch(in: rest, range: range)
+
+            if allRequested {
+                // Removal must leave non-heading lines (including blank
+                // separators) untouched.
+                if let match {
+                    transformed.append(
+                        indent + headingContent(match, in: rest as NSString)
+                    )
+                } else {
+                    transformed.append(line.content)
+                }
+            } else {
+                let content = match.map {
+                    headingContent($0, in: rest as NSString)
+                } ?? rest
+                let hashes = String(repeating: "#", count: level)
+                let prefix = content.isEmpty ? hashes : hashes + " "
+                transformed.append(
+                    indent + prefix + content
+                )
+            }
+        }
+
+        return replaceLines(
+            ns: ns,
+            block: block,
+            lines: transformed,
+            hadTrailingNewline: block.length > 0
+                && ns.substring(with: block).hasSuffix("\n"),
+            name: "Heading \(level)",
+            context: context
+        )
+    }
+
+    /// The content of an ATX heading match, or an empty string when the
+    /// heading has no content (for example `##`).
+    private func headingContent(
+        _ match: NSTextCheckingResult,
+        in rest: NSString
+    ) -> String {
+        let range = match.range(at: 3)
+        guard range.location != NSNotFound else { return "" }
+        var content = rest.substring(with: range)
+        while let last = content.last, last == " " || last == "\t" {
+            content.removeLast()
+        }
+        // An optional ATX closing sequence is a run of `#` preceded by
+        // whitespace and not backslash-escaped. It is syntax, not content.
+        var hashStart = content.endIndex
+        while hashStart > content.startIndex {
+            let previous = content.index(before: hashStart)
+            guard content[previous] == "#" else { break }
+            hashStart = previous
+        }
+        if hashStart < content.endIndex {
+            if hashStart == content.startIndex {
+                content = ""
+            } else {
+                let before = content.index(before: hashStart)
+                let precededBySpace = content[before] == " "
+                    || content[before] == "\t"
+                // A backslash before the hash run would leave no preceding
+                // whitespace, which already fails this test. An escaped
+                // space before the run does not escape the hashes.
+                if precededBySpace {
+                    content = String(content[..<before])
+                    while let last = content.last,
+                          last == " " || last == "\t" {
+                        content.removeLast()
+                    }
+                }
+            }
+        }
+        return content
+    }
+
+    /// Whether the character at `index` is escaped by an odd run of
+    /// backslashes. A marker after a backslash is literal text, not a
+    /// delimiter this command may remove.
+    private func isEscaped(_ index: Int, in ns: NSString) -> Bool {
+        guard index >= 0, index < ns.length else { return false }
+        var backslashes = 0
+        var probe = index - 1
+        while probe >= 0, ns.character(at: probe) == 0x5C {
+            backslashes += 1
+            probe -= 1
+        }
+        return backslashes % 2 == 1
+    }
+
+    /// Whether `range` contains a run of exactly `length` backticks. A code
+    /// span's closing run must equal its opening run, so an equal run inside
+    /// the candidate means the delimiters do not enclose a single span.
+    private func containsBacktickRun(
+        ofLength length: Int,
+        in ns: NSString,
+        range: NSRange
+    ) -> Bool {
+        let end = NSMaxRange(range)
+        var index = range.location
+        while index < end {
+            if ns.character(at: index) == 0x60 {
+                var run = 0
+                while index + run < end,
+                      ns.character(at: index + run) == 0x60 {
+                    run += 1
+                }
+                if run == length { return true }
+                index += run
+            } else {
+                index += 1
+            }
+        }
+        return false
+    }
+
+    private func toggleBlockQuote(
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let (block, lines) = lines(ns, covering: selection)
+
+        let nonEmpty = lines.filter {
+            !$0.content.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        // An empty selection has no lines to quote; it must toggle on, not
+        // satisfy `allSatisfy` vacuously and do nothing.
+        let allQuoted = !nonEmpty.isEmpty && nonEmpty.allSatisfy {
+            splitIndent($0.content).rest.hasPrefix(">")
+        }
+
+        let transformed = lines.map { line -> String in
+            let (indent, rest) = splitIndent(line.content)
+            if allQuoted {
+                guard rest.hasPrefix(">") else { return line.content }
+                var remainder = String(rest.dropFirst())
+                if remainder.hasPrefix(" ") { remainder.removeFirst() }
+                return indent + remainder
+            }
+            return indent + "> " + rest
+        }
+
+        return replaceLines(
+            ns: ns,
+            block: block,
+            lines: transformed,
+            hadTrailingNewline: block.length > 0
+                && ns.substring(with: block).hasSuffix("\n"),
+            name: "Block Quote",
+            context: context
+        )
+    }
+
+    private func toggleList(
+        _ kind: MarkdownListKind,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let (block, lines) = lines(ns, covering: selection)
+
+        // A list marker may be followed by no content at all (`-`, `1.`);
+        // requiring whitespace missed those empty items and added a second
+        // marker instead of toggling the existing one off.
+        let markerPattern = try NSRegularExpression(
+            pattern: #"^(\s*)([-*+]|[0-9]{1,9}[.)])([ \t]+|$)(\[[ xX]\](?:[ \t]+|$))?"#
+        )
+
+        func marker(of line: String) -> (matchedKind: MarkdownListKind?, rest: String, indent: String)? {
+            let range = NSRange(location: 0, length: (line as NSString).length)
+            guard let match = markerPattern.firstMatch(in: line, range: range) else {
+                return nil
+            }
+            let indent = (line as NSString).substring(with: match.range(at: 1))
+            let token = (line as NSString).substring(with: match.range(at: 2))
+            let hasTask = match.range(at: 4).location != NSNotFound
+            let matchedKind: MarkdownListKind
+            if hasTask {
+                matchedKind = .task
+            } else if let last = token.last, last == "." || last == ")" {
+                matchedKind = .ordered
+            } else {
+                matchedKind = .bullet
+            }
+            let rest = (line as NSString).substring(from: NSMaxRange(match.range))
+            return (matchedKind, rest, indent)
+        }
+
+        let nonEmpty = lines.filter {
+            !$0.content.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        let allRequested = !nonEmpty.isEmpty && nonEmpty.allSatisfy {
+            marker(of: $0.content)?.matchedKind == kind
+        }
+
+        var counter = 1
+        let transformed = lines.map { line -> String in
+            let parsed = marker(of: line.content)
+            let indent = parsed?.indent ?? splitIndent(line.content).indent
+            let rest = parsed?.rest ?? splitIndent(line.content).rest
+
+            if rest.trimmingCharacters(in: .whitespaces).isEmpty {
+                if allRequested { return "" }
+                if parsed?.matchedKind == kind {
+                    // Keep an empty task's checked state intact.
+                    return line.content
+                }
+                return indent + markerPrefix(kind, counter: &counter)
+            }
+            if allRequested {
+                return indent + rest
+            }
+            if parsed?.matchedKind == kind {
+                // Already this list kind: keep authored numbering and task
+                // checked state instead of re-emitting a default marker.
+                return line.content
+            }
+
+            return indent + markerPrefix(kind, counter: &counter) + rest
+        }
+
+        return replaceLines(
+            ns: ns,
+            block: block,
+            lines: transformed,
+            hadTrailingNewline: block.length > 0
+                && ns.substring(with: block).hasSuffix("\n"),
+            name: "List",
+            context: context
+        )
+    }
+
+    private func markerPrefix(
+        _ kind: MarkdownListKind,
+        counter: inout Int
+    ) -> String {
+        switch kind {
+        case .bullet:
+            return "- "
+        case .ordered:
+            defer { counter += 1 }
+            return "\(counter). "
+        case .task:
+            return "- [ ] "
+        }
+    }
+
+    private func replaceLines(
+        ns: NSString,
+        block: NSRange,
+        lines: [String],
+        hadTrailingNewline: Bool,
+        name: String,
+        context: MarkdownCommandContext
+    ) -> MarkdownCommandResult {
+        var replacement = lines.joined(separator: "\n")
+        if hadTrailingNewline { replacement += "\n" }
+        let source = ns.replacingCharacters(in: block, with: replacement)
+        return result(
+            source,
+            selection: NSRange(
+                location: block.location,
+                length: (replacement as NSString).length
+            ),
+            name: name,
+            previous: context.source
+        )
+    }
+
+    // MARK: - Insertions
+
+    private func insertLink(
+        destination: String,
+        image: Bool,
+        alt: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        if !destination.isEmpty,
+           !MarkdownSecurity.linkDecision(for: destination).isAllowed {
+            throw MarkdownCommandError.invalidDestination(destination)
+        }
+        // A link destination cannot contain a line ending in either form.
+        // Check scalars: Swift treats CRLF as one Character.
+        if destination.unicodeScalars.contains(where: {
+            $0 == "\n" || $0 == "\r"
+        }) {
+            throw MarkdownCommandError.invalidDestination(destination)
+        }
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let selected = ns.substring(with: selection)
+        let label = image
+            ? (alt.isEmpty ? selected : alt)
+            : (selected.isEmpty ? "text" : selected)
+        let insertion = image
+            ? "![\(escapedLabel(label))](\(serializedDestination(destination)))"
+            : "[\(escapedLabel(label))](\(serializedDestination(destination)))"
+        let source = ns.replacingCharacters(in: selection, with: insertion)
+
+        let cursor: Int
+        if destination.isEmpty {
+            cursor = selection.location + (insertion as NSString).length - 1
+        } else {
+            cursor = selection.location + (insertion as NSString).length
+        }
+        return result(
+            source,
+            selection: NSRange(location: cursor, length: 0),
+            name: image ? "Image" : "Link",
+            previous: context.source
+        )
+    }
+
+    private func insertCodeFence(
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let (block, _) = lines(ns, covering: selection)
+        let selectedText = ns.substring(with: block)
+        let hasTrailingNewline = selectedText.hasSuffix("\n")
+        let body = hasTrailingNewline ? String(selectedText.dropLast()) : selectedText
+
+        // A fixed three-backtick fence closes early when the body itself
+        // contains a fence line. Use a run longer than any backtick run.
+        let fence = String(
+            repeating: "`",
+            count: max(3, longestRun(of: "`", in: body) + 1)
+        )
+
+        let source = ns.replacingCharacters(
+            in: block,
+            with: fence + "\n" + body + "\n" + fence + (hasTrailingNewline ? "\n" : "")
+        )
+        let contentStart = block.location + (fence as NSString).length + 1
+        return result(
+            source,
+            selection: NSRange(
+                location: contentStart,
+                length: (body as NSString).length
+            ),
+            name: "Code Block",
+            previous: context.source
+        )
+    }
+
+    private func insertRule(_ context: MarkdownCommandContext) -> MarkdownCommandResult {
+        insertStandaloneBlock(
+            "---",
+            name: "Horizontal Rule",
+            context
+        )
+    }
+
+    /// The blank-line padding a standalone block needs at `start..<end` so it
+    /// forms its own paragraph.
+    private func standalonePadding(
+        in ns: NSString,
+        start: Int,
+        end: Int
+    ) -> (prefix: String, suffix: String) {
+        let before = ns.substring(to: start)
+        let after = ns.substring(from: end)
+
+        var prefix = ""
+        if !before.isEmpty, !before.hasSuffix("\n\n") {
+            prefix = before.hasSuffix("\n") ? "\n" : "\n\n"
+        }
+        var suffix = ""
+        if !after.isEmpty, !after.hasPrefix("\n\n") {
+            suffix = after.hasPrefix("\n") ? "\n" : "\n\n"
+        }
+        return (prefix, suffix)
+    }
+
+    /// Inserts a block-level marker on its own paragraph, padding the
+    /// surrounding text with the blank lines the syntax needs.
+    private func insertStandaloneBlock(
+        _ text: String,
+        name: String,
+        _ context: MarkdownCommandContext
+    ) -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let location = min(max(0, context.selection.lowerBound), ns.length)
+        let (prefix, suffix) = standalonePadding(
+            in: ns,
+            start: location,
+            end: location
+        )
+
+        let insertion = prefix + text + suffix
+        let source = ns.replacingCharacters(
+            in: NSRange(location: location, length: 0),
+            with: insertion
+        )
+        let cursor = location + (insertion as NSString).length
+        return result(
+            source,
+            selection: NSRange(location: cursor, length: 0),
+            name: name,
+            previous: context.source
+        )
+    }
+
+    private func insertWikiLink(
+        target: String,
+        alias: String?,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let selected = ns.substring(with: selection)
+
+        let effectiveTarget = target.isEmpty ? selected : target
+        guard MarkdownSecurity.isValidWikiTarget(effectiveTarget) else {
+            throw MarkdownCommandError.invalidDestination(effectiveTarget)
+        }
+        guard !effectiveTarget.contains("]]"),
+              !effectiveTarget.contains("|"),
+              !effectiveTarget.unicodeScalars.contains(where: {
+                  $0 == "\n" || $0 == "\r"
+              }) else {
+            throw MarkdownCommandError.invalidDestination(effectiveTarget)
+        }
+
+        var effectiveAlias = alias
+        if effectiveAlias == nil,
+           !selected.isEmpty,
+           selected != effectiveTarget {
+            effectiveAlias = selected
+        }
+
+        let text: String
+        if let effectiveAlias, !effectiveAlias.isEmpty {
+            guard !effectiveAlias.contains("]]"),
+                  !effectiveAlias.unicodeScalars.contains(where: {
+                      $0 == "\n" || $0 == "\r"
+                  }) else {
+                throw MarkdownCommandError.invalidDestination(effectiveAlias)
+            }
+            text = "[[\(effectiveTarget)|\(effectiveAlias)]]"
+        } else {
+            text = "[[\(effectiveTarget)]]"
+        }
+
+        let source = ns.replacingCharacters(in: selection, with: text)
+        return result(
+            source,
+            selection: NSRange(
+                location: selection.location + (text as NSString).length,
+                length: 0
+            ),
+            name: "Wiki Link",
+            previous: context.source
+        )
+    }
+
+    private func insertDetails(
+        summary: String,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        let body = ns.substring(with: selection)
+        let label = escapedHTMLText(summary.isEmpty ? "Details" : summary)
+
+        let detailsText = "<details open>\n"
+            + "<summary>\(label)</summary>\n\n"
+            + "\(body)\n</details>"
+
+        let (prefix, suffix) = standalonePadding(
+            in: ns,
+            start: selection.location,
+            end: NSMaxRange(selection)
+        )
+
+        let insertion = prefix + detailsText + suffix
+        let source = ns.replacingCharacters(in: selection, with: insertion)
+        let opening = prefix
+            + "<details open>\n<summary>\(label)</summary>\n\n"
+        let bodyOffset = (opening as NSString).length
+        let selectionRange = body.isEmpty
+            ? NSRange(location: selection.location + bodyOffset, length: 0)
+            : NSRange(location: selection.location + bodyOffset, length: (body as NSString).length)
+        return result(
+            source,
+            selection: selectionRange,
+            name: "Details",
+            previous: context.source
+        )
+    }
+
+    private func insertTOC(_ context: MarkdownCommandContext) -> MarkdownCommandResult {
+        insertStandaloneBlock(
+            "[TOC]",
+            name: "Table of Contents",
+            context
+        )
+    }
+
+    // MARK: - Replace all
+
+    private func replaceAll(
+        query: String,
+        replacement: String,
+        caseSensitive: Bool,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        guard !query.isEmpty else {
+            throw MarkdownCommandError.invalidSelection
+        }
+        let ns = context.source as NSString
+        let options: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
+        let source = ns.replacingOccurrences(
+            of: query,
+            with: replacement,
+            options: options,
+            range: NSRange(location: 0, length: ns.length)
+        )
+        let location = min(context.selection.lowerBound, (source as NSString).length)
+        return result(
+            source,
+            selection: NSRange(location: location, length: 0),
+            name: "Replace All",
+            previous: context.source
+        )
+    }
+
+    // MARK: - Details attribute
+
+    private func setDetailsOpen(
+        _ open: Bool,
+        _ context: MarkdownCommandContext
+    ) throws -> MarkdownCommandResult {
+        let ns = context.source as NSString
+        let selection = try validatedSelection(context)
+        guard let tagRange = DetailsParser.enclosingDetailsOpeningTag(
+            in: context.source,
+            before: selection.location
+        ) else {
+            throw MarkdownCommandError.detailsNotFound
+        }
+
+        let oldTag = ns.substring(with: tagRange)
+        var tag = oldTag
+        let openRanges = openAttributeRanges(in: oldTag)
+
+        if open {
+            if openRanges.isEmpty {
+                var insertion = tag.endIndex
+                if tag.hasSuffix("/>") {
+                    insertion = tag.index(tag.endIndex, offsetBy: -2)
+                } else if tag.hasSuffix(">") {
+                    insertion = tag.index(before: tag.endIndex)
+                }
+                tag.insert(contentsOf: " open", at: insertion)
+            }
+        } else {
+            let mutable = NSMutableString(string: tag)
+            for range in openRanges.reversed() {
+                mutable.deleteCharacters(in: range)
+            }
+            tag = mutable as String
+        }
+
+        let source = ns.replacingCharacters(in: tagRange, with: tag)
+        let delta = (tag as NSString).length - tagRange.length
+        return result(
+            source,
+            selection: NSRange(
+                location: min(max(0, selection.location + delta),
+                              (source as NSString).length),
+                length: 0
+            ),
+            name: open ? "Open Details" : "Close Details",
+            previous: context.source
+        )
+    }
+
+    /// Finds exact `open` attributes, ignoring names that merely contain it
+    /// and occurrences inside another attribute's quoted value.
+    private func openAttributeRanges(in tag: String) -> [NSRange] {
+        let ns = tag as NSString
+        var index = 1 // after `<`
+        while index < ns.length {
+            let character = ns.character(at: index)
+            if isTagWhitespace(character) || character == 0x3E || character == 0x2F {
+                break
+            }
+            index += 1
+        }
+
+        var ranges: [NSRange] = []
+        while index < ns.length {
+            while index < ns.length, isTagWhitespace(ns.character(at: index)) {
+                index += 1
+            }
+            guard index < ns.length else { break }
+            let character = ns.character(at: index)
+            if character == 0x3E { break }
+            if character == 0x2F,
+               index + 1 < ns.length,
+               ns.character(at: index + 1) == 0x3E {
+                break
+            }
+
+            let nameStart = index
+            while index < ns.length, isAttributeNameCharacter(ns.character(at: index)) {
+                index += 1
+            }
+            guard index > nameStart else {
+                // Malformed input: make progress rather than loop.
+                index += 1
+                continue
+            }
+            let nameEnd = index
+            var attributeEnd = nameEnd
+            let name = ns.substring(
+                with: NSRange(location: nameStart, length: nameEnd - nameStart)
+            ).lowercased()
+
+            while index < ns.length, isTagWhitespace(ns.character(at: index)) {
+                index += 1
+            }
+            if index < ns.length, ns.character(at: index) == 0x3D { // =
+                index += 1
+                while index < ns.length, isTagWhitespace(ns.character(at: index)) {
+                    index += 1
+                }
+                guard index < ns.length else { break }
+                let quote = ns.character(at: index)
+                if quote == 0x22 || quote == 0x27 {
+                    index += 1
+                    while index < ns.length, ns.character(at: index) != quote {
+                        index += 1
+                    }
+                    if index < ns.length { index += 1 }
+                } else {
+                    while index < ns.length,
+                          !isTagWhitespace(ns.character(at: index)),
+                          ns.character(at: index) != 0x3E {
+                        index += 1
+                    }
+                }
+                attributeEnd = index
+            }
+
+            if name == "open" {
+                var removalStart = nameStart
+                while removalStart > 0,
+                      isTagWhitespace(ns.character(at: removalStart - 1)) {
+                    removalStart -= 1
+                }
+                // Stop at the attribute name unless a value was consumed;
+                // otherwise the whitespace before the next attribute would
+                // be removed too.
+                ranges.append(
+                    NSRange(
+                        location: removalStart,
+                        length: attributeEnd - removalStart
+                    )
+                )
+            }
+        }
+        return ranges
+    }
+
+    private func isTagWhitespace(_ character: unichar) -> Bool {
+        character == 0x20 || character == 0x09
+            || character == 0x0A || character == 0x0D
+    }
+
+    private func isAttributeNameCharacter(_ character: unichar) -> Bool {
+        if character >= 0x41, character <= 0x5A { return true }
+        if character >= 0x61, character <= 0x7A { return true }
+        if character >= 0x30, character <= 0x39 { return true }
+        return character == 0x2D || character == 0x5F || character == 0x3A
+    }
+
+    private func longestRun(of character: Character, in text: String) -> Int {
+        var longest = 0
+        var current = 0
+        for candidate in text {
+            if candidate == character {
+                current += 1
+                longest = max(longest, current)
+            } else {
+                current = 0
+            }
+        }
+        return longest
+    }
+
+    private func escapedHTMLText(_ text: String) -> String {
+        var result = ""
+        for character in text {
+            switch character {
+            case "&": result += "&amp;"
+            case "<": result += "&lt;"
+            case ">": result += "&gt;"
+            default: result.append(character)
+            }
+        }
+        return result
+    }
+
+    private func escapedLabel(_ text: String) -> String {
+        var result = ""
+        for character in text {
+            if character == "\\" || character == "[" || character == "]" {
+                result.append("\\")
+            }
+            result.append(character)
+        }
+        return result
+    }
+
+    private func serializedDestination(_ destination: String) -> String {
+        guard !destination.isEmpty else { return "" }
+        let needsAngleBrackets = destination.rangeOfCharacter(
+            from: .whitespacesAndNewlines
+        ) != nil || destination.contains("(") || destination.contains(")")
+
+        if needsAngleBrackets {
+            let escaped = destination
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "<", with: "\\<")
+                .replacingOccurrences(of: ">", with: "\\>")
+                .replacingOccurrences(of: "&", with: "\\&")
+            return "<\(escaped)>"
+        }
+        return destination
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "(", with: "\\(")
+            .replacingOccurrences(of: ")", with: "\\)")
+            .replacingOccurrences(of: "<", with: "\\<")
+            .replacingOccurrences(of: ">", with: "\\>")
+            .replacingOccurrences(of: "&", with: "\\&")
+    }
+}

@@ -1,6 +1,8 @@
+@testable import SonovoMarkdownFeature
 import XCTest
 @testable import Sonovo
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 
 @MainActor
 final class RenderedFindControllerTests: XCTestCase {

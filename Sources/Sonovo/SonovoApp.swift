@@ -1,3 +1,6 @@
+import SonovoWorkspaceHost
+import SonovoTerminalFeature
+import SonovoDesignSystem
 import AppKit
 import SwiftUI
 
@@ -36,12 +39,12 @@ struct SonovoApp: App {
         .windowToolbarStyle(.unified)
         .commands {
             DocumentCommands(state: state)
-            MarkdownCommands(state: state)
-            SubtitleCommands(state: state)
-            Model3DCommands(state: state)
-            MediaCommands(state: state)
-            TimelineCommands(state: state)
-            TerminalCommands(state: state)
+            RegisteredFeatureCommands(title: "Markdown", featureID: "builtin.markdown", state: state)
+            RegisteredFeatureCommands(title: "Subtitles", featureID: "builtin.subtitle", state: state)
+            RegisteredFeatureCommands(title: "3D", featureID: "builtin.model", state: state)
+            RegisteredFeatureCommands(title: "Media", featureID: "builtin.media", state: state)
+            RegisteredFeatureCommands(title: "Timeline", featureID: "builtin.timeline", state: state)
+            TerminalCommands(state: state.terminalPaneContext)
             ProjectCommands(state: state)
         }
 
@@ -120,6 +123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         NSApp.activate(ignoringOtherApps: true)
+        #if SONOVO_MODULAR_E2E_PROBE
+        ModularArchitectureProbe.run()
+        #endif
 
         // AppKit can rebuild a column's titlebar background when the window
         // becomes key or finishes a live resize, which brings its hairline
@@ -206,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             if state.attachedTmuxSessionCount > 0 {
-                #if SONOVO_E2E_PROBE
+                #if SONOVO_E2E_PROBE || SONOVO_MODULAR_E2E_PROBE
                 // The probe quits itself; a modal would hang automation.
                 #else
                 switch self.askAboutTmuxSessions(

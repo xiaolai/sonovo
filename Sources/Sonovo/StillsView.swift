@@ -1,3 +1,5 @@
+import SonovoWorkspaceHost
+import SonovoDesignSystem
 import SwiftUI
 
 struct StillsView: View {

@@ -1,83 +1,11 @@
-import SonovoCore
+import SonovoDomainTypes
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 import SwiftUI
 
-enum AssetKind: String, Hashable, Sendable {
-    case script
-    case document
-    case audio
-    case video
-    case stills
-    case image
-    case subtitle
-    case model3d
-    case html
-    case archive
-    case delivery
-    case other
-    case code
-    case timeline
-    case mdx
 
-    var icon: String {
-        switch self {
-        case .script: "doc.text"
-        case .document: "doc.richtext"
-        case .audio: "waveform"
-        case .video: "film"
-        case .stills: "photo.on.rectangle.angled"
-        case .image: "photo"
-        case .subtitle: "captions.bubble"
-        case .model3d: "cube.transparent"
-        case .html: "chevron.left.forwardslash.chevron.right"
-        case .archive: "archivebox"
-        case .delivery: "shippingbox"
-        case .other: "questionmark.square.dashed"
-        case .code: "chevron.left.forwardslash.chevron.right"
-        case .timeline: "rectangle.3.group"
-        case .mdx: "curlybraces.square"
-        }
-    }
-
-    var tabIcon: String {
-        switch self {
-        case .stills: "photo"
-        case .model3d: "cube"
-        case .html: "globe"
-        case .code: "chevron.left.forwardslash.chevron.right"
-        case .timeline: "rectangle.3.group"
-        case .mdx: "curlybraces.square"
-        default: icon
-        }
-    }
-
-    var workspaceTitle: String {
-        switch self {
-        case .script: "Script"
-        case .subtitle: "Subtitles"
-        case .model3d: "3D"
-        case .timeline: "Timeline"
-        case .mdx: "MDX"
-        default: "Workspace"
-        }
-    }
-}
-
-struct ProductionAsset: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let detail: String
-    let kind: AssetKind
-
-    var shortDetail: String {
-        detail.components(separatedBy: " · ").first ?? detail
-    }
-}
-
-struct ProductionStage: Identifiable, Hashable, Sendable {
-    let id: String
-    let title: String
-    let assets: [ProductionAsset]
-}
+typealias ProductionAsset = ExternalEditorAsset
+typealias ProductionStage = ExternalEditorGroup
 
 struct Production: Hashable, Sendable {
     let title: String
@@ -192,71 +120,6 @@ struct Production: Hashable, Sendable {
     )
 }
 
-enum EditorTabContent: Hashable, Sendable {
-    case sample(ProductionAsset)
-    case project(ProjectAsset)
-    /// A workspace with no file yet: the empty state is the content.
-    case workspace(AssetKind)
-}
-
-struct EditorTab: Identifiable, Hashable, Sendable {
-    let id: String
-    let assetID: String
-    let title: String
-    let kind: AssetKind
-    let icon: String
-    /// The file this tab owns in a real project. Nil for a sample tab.
-    let url: URL?
-    let content: EditorTabContent
-
-    init(asset: ProductionAsset) {
-        id = asset.id
-        assetID = asset.id
-        title = asset.name
-        kind = asset.kind
-        icon = asset.kind.tabIcon
-        url = nil
-        content = .sample(asset)
-    }
-
-    init(asset: ProjectAsset) {
-        id = asset.id
-        assetID = asset.id
-        title = asset.name
-        kind = asset.kind
-        icon = asset.kind.tabIcon
-        url = asset.url
-        content = .project(asset)
-    }
-
-    init(workspaceKind kind: AssetKind) {
-        id = "workspace-\(kind.rawValue)"
-        assetID = id
-        title = kind.workspaceTitle
-        self.kind = kind
-        icon = kind.tabIcon
-        url = nil
-        content = .workspace(kind)
-    }
-
-    var projectAsset: ProjectAsset? {
-        if case .project(let asset) = content { return asset }
-        return nil
-    }
-
-    var sampleAsset: ProductionAsset? {
-        if case .sample(let asset) = content { return asset }
-        return nil
-    }
-
-    /// The workspace kind when this is a synthetic workspace tab. Such a tab
-    /// has no URL; its identity is the document selected inside it.
-    var workspaceKind: AssetKind? {
-        if case .workspace(let kind) = content { return kind }
-        return nil
-    }
-}
-
 enum EditorMode: String, CaseIterable, Identifiable, Sendable {
     case player
     case compare
@@ -277,27 +140,6 @@ enum EditorMode: String, CaseIterable, Identifiable, Sendable {
         case .player: "play.rectangle"
         case .compare: "rectangle.split.2x1"
         case .transcript: "text.quote"
-        }
-    }
-}
-
-enum NavigatorMode: String, CaseIterable, Identifiable, Sendable {
-    case production
-    case files
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .production: "Production"
-        case .files: "Files"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .production: "square.stack.3d.up"
-        case .files: "folder"
         }
     }
 }
@@ -331,32 +173,6 @@ struct TranscriptSegment: Identifiable, Hashable, Sendable {
             wholeSeconds,
             hundredths
         )
-    }
-}
-
-struct FileNode: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let icon: String
-    let assetID: String?
-    var children: [FileNode]?
-
-    /// Filters a tree while keeping the ancestors of matching descendants.
-    /// A matching folder keeps its whole subtree.
-    static func filtered(_ nodes: [FileNode], query: String) -> [FileNode] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nodes }
-        return nodes.compactMap { node in
-            if node.name.localizedCaseInsensitiveContains(trimmed) {
-                return node
-            }
-            guard let children = node.children else { return nil }
-            let matches = filtered(children, query: trimmed)
-            guard !matches.isEmpty else { return nil }
-            var copy = node
-            copy.children = matches
-            return copy
-        }
     }
 }
 

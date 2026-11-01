@@ -1,3 +1,5 @@
+import SonovoWorkspaceHost
+import SonovoMediaFeature
 import SwiftUI
 
 /// The Sample project's audio tab uses the same real media surface as a
@@ -15,7 +17,7 @@ struct AudioPlayerView: View {
                let asset = project.sampleMediaAsset(for: id) {
                 MediaAssetView(
                     asset: asset,
-                    project: project,
+                    project: project.mediaFeature,
                     appState: state
                 )
                 .id("\(asset.id)-\(mediaRefreshToken)")

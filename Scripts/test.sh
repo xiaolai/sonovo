@@ -11,6 +11,13 @@ if [ "$token_status" -ne 0 ]; then
     exit "$token_status"
 fi
 
+python3 Scripts/check_architecture.py
+architecture_status=$?
+if [ "$architecture_status" -ne 0 ]; then
+    python3 Scripts/clean_build_cache.py --quiet
+    exit "$architecture_status"
+fi
+
 swift test "$@"
 status=$?
 

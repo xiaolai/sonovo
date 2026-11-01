@@ -1,0 +1,7 @@
+import SonovoMarkdownEngine
+public typealias Autosave = SonovoMarkdownEngine.Autosave
+public typealias CloseBlocker = SonovoMarkdownEngine.CloseBlocker
+public typealias CloseOutcome = SonovoMarkdownEngine.CloseOutcome
+public typealias ExternalConflict = SonovoMarkdownEngine.ExternalConflict
+public typealias ExternalChange = SonovoMarkdownEngine.ExternalChange
+public typealias ExternalResolution = SonovoMarkdownEngine.ExternalResolution

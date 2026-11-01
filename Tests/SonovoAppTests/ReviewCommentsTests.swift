@@ -1,8 +1,10 @@
+@testable import SonovoMarkdownFeature
 import AppKit
 import SwiftUI
 import XCTest
 @testable import Sonovo
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 
 @MainActor
 final class ReviewCommentsTests: XCTestCase {

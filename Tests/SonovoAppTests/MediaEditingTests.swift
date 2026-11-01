@@ -1,3 +1,12 @@
+import SonovoTestFixtures
+import SonovoWorkspaceHost
+@testable import SonovoTerminalFeature
+@testable import SonovoMediaUI
+@testable import SonovoMediaEngine
+@testable import SonovoModel3DFeature
+@testable import SonovoSubtitleFeature
+@testable import SonovoMarkdownFeature
+import SonovoDomainTypes
 import AVFoundation
 import CoreVideo
 import Darwin
@@ -1010,7 +1019,7 @@ private enum MediaTestError: Error {
 final class MediaAcceptanceRegressionTests: XCTestCase {
     func testKeptAudioTailDropsTheEmptyVideoTrack() async throws {
         let url = try XCTUnwrap(
-            Bundle.module.url(
+            SonovoTestFixtures.bundle.url(
                 forResource: "video-audio-tail",
                 withExtension: "mov",
                 subdirectory: "Fixtures"
@@ -1144,7 +1153,7 @@ final class MediaAcceptanceRegressionTests: XCTestCase {
 
     func testExportCancellationIsCancellationNotFailure() async throws {
         let source = try XCTUnwrap(
-            Bundle.module.url(
+            SonovoTestFixtures.bundle.url(
                 forResource: "video-audio-tail",
                 withExtension: "mov",
                 subdirectory: "Fixtures"

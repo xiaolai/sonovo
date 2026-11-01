@@ -1,3 +1,7 @@
+import SonovoWorkspaceHost
+import SonovoDomainTypes
+import SonovoTerminalFeature
+import SonovoDesignSystem
 import SwiftUI
 
 struct DetailWorkspace: View {
@@ -21,7 +25,7 @@ struct DetailWorkspace: View {
                     .clipped()
 
                 TerminalPane(
-                    state: state,
+                    state: state.terminalPaneContext,
                     dock: layout.terminalDock,
                     availableHeight: layout.terminalResizeHeight
                 )

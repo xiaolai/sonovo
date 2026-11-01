@@ -1,3 +1,4 @@
+import SonovoTextEngine
 import Foundation
 import XCTest
 @testable import Sonovo

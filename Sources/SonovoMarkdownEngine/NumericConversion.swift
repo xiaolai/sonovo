@@ -1,0 +1,3 @@
+import SonovoDomainTypes
+
+public typealias NumericConversion = SonovoDomainTypes.NumericConversion

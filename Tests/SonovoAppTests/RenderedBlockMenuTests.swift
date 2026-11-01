@@ -1,6 +1,9 @@
+@testable import SonovoMarkdownFeature
+import SonovoTextEngine
 import XCTest
 @testable import Sonovo
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 
 final class RenderedBlockMenuTests: XCTestCase {
     private func sourceRange(_ offsets: Range<Int>) -> SourceRange {

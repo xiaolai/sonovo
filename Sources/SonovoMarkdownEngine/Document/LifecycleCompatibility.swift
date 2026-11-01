@@ -1,0 +1,7 @@
+import SonovoDocumentSupport
+public typealias Autosave = SonovoDocumentSupport.Autosave
+public typealias CloseBlocker = SonovoDocumentSupport.CloseBlocker
+public typealias CloseOutcome = SonovoDocumentSupport.CloseOutcome
+public typealias ExternalConflict = SonovoDocumentSupport.ExternalConflict
+public typealias ExternalChange = SonovoDocumentSupport.ExternalChange
+public typealias ExternalResolution = SonovoDocumentSupport.ExternalResolution

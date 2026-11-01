@@ -1,0 +1,4 @@
+import SonovoTextEngine
+public typealias MarkdownEncodingError = SonovoTextEngine.TextEncodingError
+public typealias MarkdownFileContents = SonovoTextEngine.TextFileContents
+public typealias MarkdownEncoding = SonovoTextEngine.TextEncoding

@@ -1,4 +1,8 @@
-import SonovoCore
+import SonovoWorkspaceHost
+import SonovoFeatureAPI
+import SonovoMediaFeature
+import SonovoDomainTypes
+import SonovoDesignSystem
 import SwiftUI
 
 struct TransportBar: View {
@@ -20,12 +24,21 @@ struct TransportBar: View {
                 terminalBar
             } else if isMediaTab {
                 mediaTransport
+            } else if let transport = featureTransport {
+                transport
             } else {
                 contextBar
             }
         }
         .frame(height: AppTheme.Layout.transportHeight)
         .background(Color.appText)
+    }
+
+    private var featureTransport: AnyView? {
+        guard !state.liveProject.isDemo, let id = state.liveProject.selectedFeatureID,
+              let contribution = state.liveProject.featureSessions.session(for: id)?.transport else { return nil }
+        return contribution.makeView(EditorRequest(project: state.liveProject, asset: state.liveProject.selectedAsset,
+            isVisible: state.terminalPresentation != .full))
     }
 
     private var terminalBar: some View {
@@ -160,8 +173,8 @@ struct TransportBar: View {
             )
         }
         if !state.liveProject.isDemo,
-           let kind = state.selectedTab?.workspaceKind,
-           let identity = state.liveProject.workspaceDocumentIdentity(for: kind) {
+           let tab = state.selectedTab, let kind = tab.workspaceKind,
+           let identity = state.liveProject.workspaceDocumentIdentity(for: tab) {
             return Context(
                 icon: kind.icon,
                 name: identity.name,
@@ -215,62 +228,24 @@ struct TransportBar: View {
         guard let tab = state.selectedTab else {
             return asset.fileExtension.uppercased()
         }
-        switch asset.kind {
-        case .script, .subtitle, .model3d, .code:
-            return contextDetail(for: tab)
-        default:
-            return asset.fileExtension.uppercased()
-        }
+        if let summary = featureSummary(for: tab), summary.summarizesFileTab { return summary.detail }
+        return asset.fileExtension.uppercased()
     }
 
     private func realRight(for asset: ProjectAsset) -> String {
-        if let tab = state.selectedTab {
-            switch asset.kind {
-            case .script, .subtitle, .model3d, .code:
-                return contextRight(for: tab)
-            default:
-                break
-            }
+        if let tab = state.selectedTab, let summary = featureSummary(for: tab), summary.summarizesFileTab {
+            return summary.trailing
         }
-        return ByteCountFormatter.string(
-            fromByteCount: asset.size,
-            countStyle: .file
-        )
+        return ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file)
+    }
+
+    private func featureSummary(for tab: EditorTab) -> FeatureStatusSummary? {
+        guard let adapter = state.liveProject.documentAdapter(for: tab) else { return nil }
+        return state.liveProject.featureSessions.session(for: adapter.featureID)?.statusSummary
     }
 
     private func contextDetail(for tab: EditorTab) -> String {
-        if tab.kind == .script,
-           let document = state.markdown.selectedDocument {
-            return "\(state.markdownWordCount(document.source).formatted()) words"
-        }
-        if tab.kind == .subtitle,
-           let document = state.subtitles.selectedDocument {
-            return "\(document.cueCount) cues"
-        }
-        if tab.kind == .model3d,
-           let document = state.models.selectedDocument {
-            if let stats = document.stats {
-                return "\(stats.triangles.formatted()) triangles"
-            }
-            return switch document.state {
-            case .needsConversion: "Needs conversion"
-            case .converting: "Converting…"
-            case .conversionFailed: "Conversion failed"
-            case .loading: "Loading…"
-            case .ready: "Ready"
-            case .failed: "Could not load"
-            }
-        }
-        if tab.kind == .code,
-           let document = state.code.selectedDocument {
-            let lines = document.source.components(separatedBy: "\n").count
-            return "\(lines.formatted()) lines"
-        }
-        if tab.kind == .mdx,
-           let document = state.mdx.selectedDocument {
-            let lines = document.source.components(separatedBy: "\n").count
-            return "\(lines.formatted()) lines"
-        }
+        if let summary = featureSummary(for: tab) { return summary.detail }
         return switch tab.kind {
         case .script: "0 words"
         case .stills: "8 frames"
@@ -301,39 +276,7 @@ struct TransportBar: View {
     }
 
     private func contextRight(for tab: EditorTab) -> String {
-        if tab.kind == .script,
-           let document = state.markdown.selectedDocument {
-            return document.hasBOM
-                ? "Markdown · UTF-8 BOM"
-                : "Markdown · UTF-8"
-        }
-        if tab.kind == .subtitle,
-           let document = state.subtitles.selectedDocument {
-            return "\(document.format.displayName) · \(document.encoding.displayName)"
-        }
-        if tab.kind == .model3d,
-           let document = state.models.selectedDocument {
-            return "\(document.format.displayName) · three.js"
-        }
-        if tab.kind == .code,
-           let document = state.code.selectedDocument {
-            // A refused or still-loading file has no decoded encoding; do
-            // not report the defaults as if they were measured.
-            guard document.isReady else {
-                if let refusal = document.refusal {
-                    return "\(document.language.displayName) · "
-                        + refusal.explanation
-                }
-                return "\(document.language.displayName) · Not loaded"
-            }
-            return "\(document.language.displayName) · "
-                + (document.hasBOM ? "UTF-8 BOM" : "UTF-8")
-                + " · \(document.lineEnding == .crlf ? "CRLF" : "LF")"
-        }
-        if tab.kind == .mdx,
-           let document = state.mdx.selectedDocument {
-            return "MDX · \(document.isDirty ? "Edited" : "Saved")"
-        }
+        if let summary = featureSummary(for: tab) { return summary.trailing }
         return switch tab.kind {
         case .script: "Markdown"
         case .stills: "2048 px · 8 frames"

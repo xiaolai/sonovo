@@ -12,17 +12,52 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-destination="${1:-/Applications/Sonovo.app}"
+stage_only=0
+skip_build=0
+configuration=release
+destination=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --stage-only) stage_only=1; shift ;;
+        --skip-build) skip_build=1; shift ;;
+        --configuration)
+            [[ "$#" -ge 2 ]] || { echo "missing configuration" >&2; exit 2; }
+            configuration="$2"; shift 2 ;;
+        --*) echo "unknown option: $1" >&2; exit 2 ;;
+        *) [[ -z "$destination" ]] || { echo "only one destination is allowed" >&2; exit 2; }
+            destination="$1"; shift ;;
+    esac
+done
+case "$configuration" in debug) product_configuration=Debug ;; release) product_configuration=Release ;;
+    *) echo "configuration must be debug or release" >&2; exit 2 ;;
+esac
+if [ "$stage_only" = 1 ]; then
+    [[ -n "$destination" ]] || { echo "--stage-only requires an explicit .build destination" >&2; exit 2; }
+    python3 - "$destination" <<'PY'
+from pathlib import Path
+import sys
+destination = Path(sys.argv[1]).resolve()
+boundary = Path('.build').resolve()
+if boundary not in destination.parents or destination.suffix != '.app':
+    raise SystemExit('--stage-only destination must be an .app inside this checkout .build')
+PY
+elif [ "$skip_build" = 1 ] || [ "$configuration" != release ]; then
+    echo "--skip-build and Debug packaging require --stage-only" >&2
+    exit 2
+fi
+destination="${destination:-/Applications/Sonovo.app}"
 version="$(tr -d '[:space:]' < Sources/Sonovo/Resources/version.txt)"
 [[ -n "$version" ]] || { echo "version.txt is empty" >&2; exit 1; }
 
-build_flags=(-c release)
+build_flags=(-c "$configuration")
 if [ "${SONOVO_WARNINGS_AS_ERRORS:-0}" = 1 ]; then
     build_flags+=(-Xswiftc -warnings-as-errors)
 fi
-Scripts/build.sh "${build_flags[@]}"
+if [ "$skip_build" = 0 ]; then
+    Scripts/build.sh "${build_flags[@]}"
+fi
 
-products=".build/out/Products/Release"
+products=".build/out/Products/$product_configuration"
 binary="$products/Sonovo"
 resources="$products/Sonovo_Sonovo.bundle"
 math_resources="$products/SwiftMath_SwiftMath.bundle"
@@ -38,8 +73,8 @@ app="$stage/Sonovo.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 cp "$binary" "$app/Contents/MacOS/Sonovo"
-cp -R "$resources" "$app/Contents/Resources/"
-cp -R "$math_resources" "$app/Contents/Resources/"
+python3 Scripts/stage_resources.py --products "$products" --app "$app" \
+    --package-root .
 printf 'APPL????' > "$app/Contents/PkgInfo"
 
 # SwiftMath's font bundle is resolved through Bundle.module from the app's
@@ -53,7 +88,7 @@ math_fonts="$app/Contents/Resources/SwiftMath_SwiftMath.bundle/Contents/Resource
 
 # A bundle without the xterm-ghostty entry starts every shell with a
 # database that does not exist; fail the build rather than ship it.
-terminfo_entry="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/terminfo/78/xterm-ghostty"
+terminfo_entry="$app/Contents/Resources/Sonovo_SonovoTerminalFeature.bundle/Contents/Resources/terminfo/78/xterm-ghostty"
 [[ -e "$terminfo_entry" ]] || {
     echo "bundle is missing the xterm-ghostty terminfo entry" >&2
     exit 1
@@ -61,7 +96,7 @@ terminfo_entry="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/
 
 # Mermaid is inlined into the diagram renderer; a missing or truncated script
 # silently turns every diagram into a code block. Fail the build instead.
-mermaid_script="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/mermaid-12.2.0.min.js"
+mermaid_script="$app/Contents/Resources/Sonovo_SonovoDiagramUI.bundle/Contents/Resources/mermaid-12.2.0.min.js"
 [[ -f "$mermaid_script" ]] || {
     echo "bundle is missing the Mermaid script" >&2
     exit 1
@@ -77,7 +112,7 @@ mermaid_bytes="$(wc -c < "$mermaid_script" | tr -d '[:space:]')"
 for diagram_engine in "viz-global-3.31.0.min.js:1000000" "markmap-0.18.12.min.js:500000"; do
     file_name="${diagram_engine%%:*}"
     minimum="${diagram_engine##*:}"
-    diagram_script="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/$file_name"
+    diagram_script="$app/Contents/Resources/Sonovo_SonovoDiagramUI.bundle/Contents/Resources/$file_name"
     [[ -f "$diagram_script" ]] || {
         echo "bundle is missing $file_name" >&2
         exit 1
@@ -96,7 +131,7 @@ for mdx_resource in \
     "mdx-runtime-19.3.1.js:150000"; do
     file_name="${mdx_resource%%:*}"
     minimum="${mdx_resource##*:}"
-    mdx_script="$app/Contents/Resources/Sonovo_Sonovo.bundle/Contents/Resources/$file_name"
+    mdx_script="$app/Contents/Resources/Sonovo_SonovoMDXKit.bundle/Contents/Resources/$file_name"
     [[ -f "$mdx_script" ]] || {
         echo "bundle is missing $file_name" >&2
         exit 1

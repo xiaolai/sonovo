@@ -1,7 +1,7 @@
 # MDX toolchain provenance
 
 The MDX compiler and browser runtime are committed under
-`Sources/Sonovo/Resources/` and packaged into the app. They are rebuilt only by
+`Sources/SonovoMDXKit/Resources/` and packaged into the app. They are rebuilt only by
 `Scripts/vendor-mdx.sh`, which needs network access and Node; neither is needed
 to build, test, or run Sonovo.
 
@@ -40,7 +40,7 @@ Scripts/vendor-mdx.sh
 ```
 
 The script installs the pinned versions into a temporary directory, builds
-both bundles with esbuild, copies them into `Sources/Sonovo/Resources/`, and
+both bundles with esbuild, copies them into `Sources/SonovoMDXKit/Resources/`, and
 prints their SHA-256 hashes. Bump the version variables in the script and
 `MDXToolchain.version` together; the version is part of every compile-cache
 key.

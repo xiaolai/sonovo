@@ -1,3 +1,5 @@
+import SonovoWorkspaceHost
+import SonovoMarkdownFeature
 import SwiftUI
 
 /// The script tab hosts the native Markdown workspace. The old static
@@ -7,7 +9,7 @@ struct ScriptView: View {
     let project: Project
 
     var body: some View {
-        MarkdownWorkspaceView(project: project)
+        MarkdownFeature.projectView(workspace: project.markdown, project: project)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

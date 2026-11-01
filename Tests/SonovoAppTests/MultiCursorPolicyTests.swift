@@ -1,7 +1,9 @@
+@testable import SonovoMarkdownFeature
 import AppKit
 import XCTest
 @testable import Sonovo
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 
 @MainActor
 final class MultiCursorPolicyTests: XCTestCase {

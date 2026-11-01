@@ -1,3 +1,5 @@
+import SonovoWorkspaceHost
+import SonovoDomainTypes
 import SwiftUI
 
 /// One editor presentation mode. Three independent toolbar buttons keep the

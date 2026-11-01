@@ -1,3 +1,5 @@
+import SonovoMediaEngine
+import SonovoDomainTypes
 import Foundation
 import Observation
 
@@ -63,9 +65,6 @@ final class SampleMediaRegistry {
         }
         let size = Int64(values.fileSize ?? 0)
         let modified = values.contentModificationDate
-        let identifier = values.fileResourceIdentifier.map {
-            String(describing: $0)
-        }
         let name = url.lastPathComponent
         return ProjectAsset(
             id: "recording-\(name)",
@@ -75,11 +74,7 @@ final class SampleMediaRegistry {
             kind: .audio,
             size: size,
             modified: modified,
-            revision: AssetRevision(
-                fileIdentifier: identifier,
-                size: size,
-                modified: modified,
-            )
+            revision: AssetRevision.read(of: url) ?? AssetRevision(fileIdentifier: nil, size: size, modified: modified)
         )
     }
 

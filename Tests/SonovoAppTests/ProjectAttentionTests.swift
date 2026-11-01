@@ -1,3 +1,4 @@
+import SonovoWorkspaceHost
 import XCTest
 @testable import Sonovo
 

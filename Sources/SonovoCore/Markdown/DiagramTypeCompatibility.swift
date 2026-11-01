@@ -1,0 +1,5 @@
+import SonovoMarkdownEngine
+public typealias DiagramThemeVariant = SonovoMarkdownEngine.DiagramThemeVariant
+public typealias MermaidThemeVariant = SonovoMarkdownEngine.MermaidThemeVariant
+public typealias DiagramEngine = SonovoMarkdownEngine.DiagramEngine
+public typealias DiagramSource = SonovoMarkdownEngine.DiagramSource

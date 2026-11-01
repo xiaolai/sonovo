@@ -1,5 +1,28 @@
 // swift-tools-version: 6.4
 import PackageDescription
+import Foundation
+
+// Swift Build's PIF backend does not currently forward the CLI -Xswiftc
+// warnings flag into target settings. Make the requested gate explicit for
+// our production targets without imposing unsafe flags on library consumers.
+let projectSwiftSettings: [SwiftSetting] =
+    ProcessInfo.processInfo.environment["SONOVO_WARNINGS_AS_ERRORS"] == "1"
+        ? [.unsafeFlags(["-warnings-as-errors"])] : []
+
+// Native link requirements belong to the runtime that consumes Ghostty.
+let terminalLinkerSettings: [LinkerSetting] = [
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreText"),
+                .linkedFramework("Carbon"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("AVFoundation"),
+                .linkedLibrary("z"),
+                .linkedLibrary("c++")
+            ]
 
 let package = Package(
     name: "Sonovo",
@@ -47,25 +70,81 @@ let package = Package(
             name: "GhosttyKit",
             path: "Vendor/GhosttyKit.xcframework"
         ),
+        .target(name: "SonovoTestFixtures", path: "Tests/SonovoTestFixtures", resources: [.copy("Fixtures")], swiftSettings: projectSwiftSettings),
+        .testTarget(name: "SonovoMarkdownFeatureTests", dependencies: ["SonovoMarkdownFeature", "SonovoMarkdownEngine", "SonovoTextEngine", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoFileIO", "SonovoDesignSystem", "SonovoFeatureAPI", "SonovoDiagramUI", "SonovoDiagramEngine", "SonovoWorkflowEngine"]),
+        .testTarget(name: "SonovoSubtitleFeatureTests", dependencies: ["SonovoSubtitleFeature", "SonovoSubtitleEngine", "SonovoDesignSystem", "SonovoTextEngine", "SonovoDomainTypes", "SonovoFileIO", "SonovoFeatureAPI"]),
+        .testTarget(name: "SonovoMDXFeatureTests", dependencies: ["SonovoMDXFeature", "SonovoMDXKit", "SonovoDomainTypes", "SonovoFileIO", "SonovoFeatureAPI"]),
+        .testTarget(name: "SonovoDiagramUITests", dependencies: ["SonovoDiagramUI", "SonovoDiagramEngine", "SonovoFileIO"]),
+        .testTarget(name: "SonovoViewerFeatureTests", dependencies: ["SonovoViewerFeature", "SonovoDomainTypes", "SonovoFileIO", "SonovoDesignSystem", "SonovoWebSupport"]),
+        .testTarget(name: "SonovoImageSupportTests", dependencies: ["SonovoImageSupport", "SonovoFileIO"]),
+        .testTarget(name: "SonovoModel3DFeatureTests", dependencies: ["SonovoModel3DFeature", "SonovoDomainTypes", "SonovoFileIO", "SonovoDesignSystem", "SonovoWebSupport"]),
+        .testTarget(name: "SonovoMediaEngineTests", dependencies: ["SonovoMediaEngine", "SonovoDomainTypes", "SonovoFileIO", "SonovoDocumentSupport", "SonovoSubtitleEngine", "SonovoTestFixtures"]),
+        .testTarget(name: "SonovoMediaUITests", dependencies: ["SonovoMediaUI", "SonovoMediaEngine", "SonovoDomainTypes", "SonovoFileIO", "SonovoDesignSystem", "SonovoTestFixtures"]),
+        .testTarget(name: "SonovoMediaFeatureTests", dependencies: ["SonovoMediaFeature", "SonovoMediaEngine", "SonovoDomainTypes", "SonovoDesignSystem", "SonovoFeatureAPI"]),
+        .testTarget(name: "SonovoTimelineFeatureTests", dependencies: ["SonovoTimelineFeature", "SonovoMediaEngine", "SonovoDomainTypes", "SonovoFileIO", "SonovoDocumentSupport", "SonovoFeatureAPI", "SonovoTestFixtures"]),
+        .testTarget(name: "SonovoCodeFeatureTests", dependencies: ["SonovoCodeFeature", "SonovoTextEngine", "SonovoFileIO", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoFeatureAPI", "SonovoDesignSystem"]),
+              .testTarget(name: "SonovoTerminalFeatureTests", dependencies: ["SonovoTerminalFeature", "SonovoFileIO", "SonovoDomainTypes", "SonovoDesignSystem", "GhosttyKit"]),
+        .target(name: "SonovoTerminalFeature", dependencies: ["SonovoFeatureAPI", "GhosttyKit", "SonovoFileIO", "SonovoDomainTypes", "SonovoDesignSystem"], resources: [.copy("Resources/ghostty"), .copy("Resources/ghostty-themes"), .copy("Resources/terminfo")], swiftSettings: projectSwiftSettings, linkerSettings: terminalLinkerSettings),
+        .target(name: "SonovoMediaEngine", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoSubtitleEngine"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoMediaUI", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoDesignSystem", "SonovoMediaEngine"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoMediaFeature", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoDesignSystem", "SonovoFeatureAPI", "SonovoMediaEngine", "SonovoMediaUI"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoTimelineFeature", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoDesignSystem", "SonovoFeatureAPI", "SonovoMediaEngine", "SonovoMediaUI"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoModel3DFeature", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoDesignSystem", "SonovoFeatureAPI", "SonovoWebSupport"], resources: [.copy("Resources/ModelViewer")], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoSubtitleFeature", dependencies: ["SonovoSubtitleEngine", "SonovoFileIO", "SonovoDocumentSupport", "SonovoDomainTypes", "SonovoTextEngine", "SonovoDesignSystem", "SonovoFeatureAPI"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoMDXFeature", dependencies: ["SonovoMDXKit", "SonovoFileIO", "SonovoDocumentSupport", "SonovoDomainTypes", "SonovoTextEngine", "SonovoDesignSystem", "SonovoFeatureAPI"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoImageSupport", swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoMarkdownFeature", dependencies: ["SonovoMarkdownEngine", "SonovoFileIO", "SonovoDocumentSupport", "SonovoDomainTypes", "SonovoTextEngine", "SonovoDesignSystem", "SonovoFeatureAPI", "SonovoImageSupport", "SonovoWorkflowEngine", "SonovoDiagramEngine", "SonovoDiagramUI", "SwiftMath"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoCodeFeature", dependencies: ["SonovoFileIO", "SonovoTextEngine", "SonovoDomainTypes", "SonovoDesignSystem", "SonovoFeatureAPI", "SonovoDocumentSupport", "SonovoWorkflowEngine", "SonovoDiagramEngine", "SonovoDiagramUI"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoTextEngine", dependencies: ["SonovoFileIO", "SonovoDomainTypes"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoWebSupport", swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoViewerFeature", dependencies: ["SonovoWebSupport", "SonovoDomainTypes", "SonovoDesignSystem", "SonovoFileIO", "SonovoFeatureAPI"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoWorkflowEngine", dependencies: ["SonovoDomainTypes", .product(name: "Yams", package: "Yams")], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoDiagramEngine", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoWorkflowEngine"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoDiagramUI", dependencies: ["SonovoDocumentSupport", "SonovoDomainTypes", "SonovoFileIO", "SonovoDiagramEngine", "SonovoWorkflowEngine"], resources: [.copy("Resources/mermaid-12.2.0.min.js"), .copy("Resources/viz-global-3.31.0.min.js"), .copy("Resources/markmap-0.18.12.min.js")], swiftSettings: projectSwiftSettings),
+        .testTarget(name: "SonovoWorkflowEngineTests", dependencies: ["SonovoWorkflowEngine", "SonovoDiagramEngine", "SonovoDomainTypes"]),
+        .target(name: "SonovoDomainTypes", dependencies: ["SonovoFileIO"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoDocumentSupport", dependencies: ["SonovoFileIO", "SonovoDomainTypes"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoFeatureAPI", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoDocumentSupport"], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoWorkspaceHost", dependencies: ["SonovoFileIO", "SonovoDomainTypes", "SonovoFeatureAPI", "SonovoDocumentSupport", "SonovoDesignSystem"], swiftSettings: projectSwiftSettings),
+        .testTarget(name: "SonovoWorkspaceHostTests", dependencies: ["SonovoWorkspaceHost", "SonovoFeatureAPI", "SonovoDomainTypes", "SonovoDocumentSupport"]),
+        .testTarget(name: "SonovoDocumentSupportTests", dependencies: ["SonovoDocumentSupport"]),
         .target(
-            name: "SonovoCore",
-            dependencies: [
-                .product(name: "Markdown", package: "swift-markdown"),
-                .product(name: "Yams", package: "Yams")
-            ],
-            path: "Sources/SonovoCore"
+            name: "SonovoDesignSystem",
+            dependencies: ["SonovoDomainTypes", "SonovoTextEngine"],
+            resources: [.copy("Resources/ReadingThemes")],
+            swiftSettings: projectSwiftSettings
         ),
+        .testTarget(
+            name: "SonovoDesignSystemTests",
+            dependencies: ["SonovoDesignSystem"]
+        ),
+        .target(
+            name: "SonovoFileIO",
+            swiftSettings: projectSwiftSettings
+        ),
+        .testTarget(
+            name: "SonovoFileIOTests",
+            dependencies: ["SonovoFileIO"]
+        ),
+        .target(name: "SonovoMarkdownEngine", dependencies: ["SonovoWorkflowEngine", "SonovoDiagramEngine", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoTextEngine", "SonovoFileIO", .product(name: "Markdown", package: "swift-markdown")], swiftSettings: projectSwiftSettings),
+        .target(name: "SonovoSubtitleEngine", dependencies: ["SonovoDomainTypes", "SonovoDocumentSupport", "SonovoTextEngine", "SonovoFileIO"], swiftSettings: projectSwiftSettings),
+        .testTarget(name: "SonovoCoreTests", dependencies: ["SonovoCore"]),
+        .target(name: "SonovoCore", dependencies: ["SonovoMarkdownEngine", "SonovoSubtitleEngine", "SonovoFileIO"], swiftSettings: projectSwiftSettings),
         // The MDX compiler runs only in the helper process; the kit is linked
         // by that helper and by tests. The app target links it for the shared
         // request, response, import-graph, and page-building types.
         .target(
             name: "SonovoMDXKit",
-            path: "Sources/SonovoMDXKit"
+            dependencies: ["SonovoFileIO"],
+            path: "Sources/SonovoMDXKit",
+            resources: [.copy("Resources/mdx-compiler-3.1.1.js"), .copy("Resources/mdx-runtime-19.3.1.js")],
+            swiftSettings: projectSwiftSettings
         ),
         .executableTarget(
             name: "SonovoMDXHelper",
             dependencies: ["SonovoMDXKit"],
-            path: "Sources/SonovoMDXHelper"
+            path: "Sources/SonovoMDXHelper",
+            swiftSettings: projectSwiftSettings
         ),
         .target(
             name: "ReferenceAst",
@@ -83,52 +162,36 @@ let package = Package(
         .executableTarget(
             name: "Sonovo",
             dependencies: [
-                "GhosttyKit",
-                "SonovoCore",
+                "SonovoTerminalFeature", "SonovoMediaEngine", "SonovoMediaUI", "SonovoMediaFeature", "SonovoTimelineFeature", "SonovoModel3DFeature", "SonovoSubtitleFeature", "SonovoMDXFeature", "SonovoMarkdownFeature", "SonovoImageSupport", "SonovoCodeFeature", "SonovoWebSupport", "SonovoViewerFeature", "SonovoWorkflowEngine", "SonovoDiagramEngine", "SonovoDiagramUI",
+                "SonovoTextEngine", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoFeatureAPI", "SonovoWorkspaceHost",
+                "SonovoDesignSystem",
+                "SonovoFileIO",
+                "SonovoMarkdownEngine", "SonovoSubtitleEngine",
                 "SonovoMDXKit",
-                "SwiftMath"
             ],
             path: "Sources/Sonovo",
             resources: [
-                .copy("Resources/ghostty"),
-                .copy("Resources/ghostty-themes"),
-                .copy("Resources/terminfo"),
                 .copy("Resources/version.txt"),
                 .copy("Resources/AppIcon.png"),
-                .copy("Resources/ModelViewer"),
-                .copy("Resources/ReadingThemes"),
-                .copy("Resources/SampleProject"),
-                .copy("Resources/mermaid-12.2.0.min.js"),
-                .copy("Resources/viz-global-3.31.0.min.js"),
-                .copy("Resources/markmap-0.18.12.min.js"),
-                .copy("Resources/mdx-compiler-3.1.1.js"),
-                .copy("Resources/mdx-runtime-19.3.1.js")
+                .copy("Resources/SampleProject")
             ],
-            linkerSettings: [
-                .linkedFramework("Metal"),
-                .linkedFramework("MetalKit"),
-                .linkedFramework("QuartzCore"),
-                .linkedFramework("CoreGraphics"),
-                .linkedFramework("IOKit"),
-                .linkedFramework("CoreText"),
-                .linkedFramework("Carbon"),
-                .linkedFramework("CoreAudio"),
-                .linkedFramework("AVFoundation"),
-                .linkedLibrary("z"),
-                .linkedLibrary("c++")
-            ]
+            swiftSettings: projectSwiftSettings
         ),
         .testTarget(
-            name: "SonovoCoreTests",
+            name: "SonovoMarkdownEngineTests",
             dependencies: [
-                "SonovoCore",
+                "SonovoWorkflowEngine", "SonovoDiagramEngine",
+                "SonovoTextEngine", "SonovoDomainTypes", "SonovoDocumentSupport",
+                "SonovoMarkdownEngine",
+                "SonovoFileIO",
                 "ReferenceAst"
             ],
-            path: "Tests/SonovoCoreTests",
+            path: "Tests/SonovoMarkdownEngineTests",
             resources: [
                 .copy("Fixtures")
             ]
         ),
+        .testTarget(name: "SonovoSubtitleEngineTests", dependencies: ["SonovoSubtitleEngine", "SonovoFileIO", "SonovoDocumentSupport", "SonovoTextEngine", "SonovoDomainTypes"]),
         .testTarget(
             name: "SonovoMDXKitTests",
             dependencies: ["SonovoMDXKit"],
@@ -137,13 +200,14 @@ let package = Package(
         .testTarget(
             name: "SonovoAppTests",
             dependencies: [
+                "SonovoTestFixtures",
+                "SonovoTerminalFeature", "SonovoMediaEngine", "SonovoMediaUI", "SonovoMediaFeature", "SonovoTimelineFeature", "SonovoModel3DFeature", "SonovoSubtitleFeature", "SonovoMDXFeature", "SonovoMarkdownFeature", "SonovoImageSupport", "SonovoCodeFeature", "SonovoWebSupport", "SonovoViewerFeature", "SonovoWorkflowEngine", "SonovoDiagramEngine", "SonovoDiagramUI",
+                "SonovoTextEngine", "SonovoDomainTypes", "SonovoDocumentSupport", "SonovoFeatureAPI", "SonovoWorkspaceHost",
+                "SonovoDesignSystem",
                 "Sonovo",
-                "SonovoCore"
+                "SonovoMarkdownEngine", "SonovoSubtitleEngine"
             ],
-            path: "Tests/SonovoAppTests",
-            resources: [
-                .copy("Fixtures")
-            ]
+            path: "Tests/SonovoAppTests"
         )
     ]
 )

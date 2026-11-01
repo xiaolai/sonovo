@@ -5,13 +5,7 @@ import Testing
 @Suite("MDX import graph")
 struct MDXImportGraphTests {
     private static var compilerURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent(
-                "Sources/Sonovo/Resources/mdx-compiler-3.1.1.js"
-            )
+        get throws { try #require(MDXBundledResources.bundle?.url(forResource: "mdx-compiler-3.1.1", withExtension: "js")) }
     }
 
     private func makeProject(

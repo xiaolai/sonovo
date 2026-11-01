@@ -1,0 +1,8 @@
+import SonovoMarkdownEngine
+public typealias WorkflowDetection = SonovoMarkdownEngine.WorkflowDetection
+public typealias WorkflowJob = SonovoMarkdownEngine.WorkflowJob
+public typealias WorkflowDiagnosticCode = SonovoMarkdownEngine.WorkflowDiagnosticCode
+public typealias WorkflowDiagnostic = SonovoMarkdownEngine.WorkflowDiagnostic
+public typealias Workflow = SonovoMarkdownEngine.Workflow
+public typealias WorkflowDOT = SonovoMarkdownEngine.WorkflowDOT
+public typealias WorkflowParser = SonovoMarkdownEngine.WorkflowParser

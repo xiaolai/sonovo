@@ -1,3 +1,5 @@
+@testable import SonovoTerminalFeature
+@testable import SonovoMediaEngine
 import XCTest
 @testable import Sonovo
 

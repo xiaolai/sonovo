@@ -19,9 +19,9 @@ zig build -Demit-xcframework=true -Dxcframework-target=native \
 
 The framework is vendored so local builds do not need Zig. Because of its size,
 store it with Git LFS or fetch it before committing. The Swift bridge in
-`Sources/Sonovo/Terminal` is adapted from Calyx and carries the MIT notices in
+`Sources/SonovoTerminalFeature` is adapted from Calyx and carries the MIT notices in
 its source headers.
 
 The bundled `ghostty` and `terminfo` resources in
-`Sources/Sonovo/Resources` come from the same Calyx distribution and provide
+`Sources/SonovoTerminalFeature/Resources` come from the same Calyx distribution and provide
 the terminfo entries and shell-integration scripts Ghostty expects.

@@ -1,4 +1,12 @@
-import SonovoCore
+import SonovoWorkspaceHost
+import SonovoFeatureAPI
+import SonovoMediaEngine
+import SonovoModel3DFeature
+import SonovoCodeFeature
+import SonovoDomainTypes
+import SonovoDesignSystem
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 import SwiftUI
 
 enum InspectorPlacement: Equatable {
@@ -182,54 +190,13 @@ struct InspectorView: View {
             MetadataRow(label: "Path", value: asset.relativePath)
         }
 
-        if asset.kind == .code,
-           let document = state.code.selectedDocument,
-           MarkdownSecurity.canonical(document.fileURL)
-            == MarkdownSecurity.canonical(asset.url) {
-            InspectorSection("Code") {
-                MetadataRow(
-                    label: "Language",
-                    value: document.language.displayName
-                )
-                if document.isReady {
-                    MetadataRow(
-                        label: "Lines",
-                        value: "\(document.source.components(separatedBy: "\n").count)"
-                    )
-                    MetadataRow(
-                        label: "Encoding",
-                        value: document.hasBOM ? "UTF-8 BOM" : "UTF-8"
-                    )
-                    MetadataRow(
-                        label: "Line endings",
-                        value: document.lineEnding == .crlf ? "CRLF" : "LF"
-                    )
-                }
-                MetadataRow(
-                    label: "State",
-                    value: codeStateLabel(document)
-                )
-            }
+        if let tab = state.selectedTab,
+           let owner = state.liveProject.documentAdapter(for: tab)?.featureID
+                ?? state.liveProject.featureEditors.catalogue.resolve(asset.name)?.featureID,
+           let inspector = state.liveProject.featureSessions.session(for: owner)?.inspector {
+            inspector.makeView(EditorRequest(project: state.liveProject, asset: asset,
+                isVisible: state.terminalPresentation != .full))
         }
-    }
-
-    private func codeStateLabel(_ document: CodeDocument) -> String {
-        if let refusal = document.refusal {
-            return refusal.explanation
-        }
-        if !document.isReady {
-            return "Loading"
-        }
-        if let reason = document.readOnlyReason {
-            return reason.explanation
-        }
-        if document.isDirty {
-            return "Unsaved changes"
-        }
-        if document.pendingReview {
-            return "Changed on disk"
-        }
-        return "Ready"
     }
 
     private var noSelection: some View {

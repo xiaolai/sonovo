@@ -1,3 +1,6 @@
+import SonovoDomainTypes
+import SonovoWorkspaceHost
+import SonovoDesignSystem
 import SwiftUI
 
 struct EditorTabBar: View {

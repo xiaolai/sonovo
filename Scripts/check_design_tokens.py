@@ -17,10 +17,9 @@ import re
 import sys
 from pathlib import Path
 
-from design_token_rule import CONTENT_RENDERERS
+from design_token_rule import CONTENT_RENDERERS, ui_source_files, theme_path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "Sources" / "Sonovo"
 
 CONTENT_RENDERER_PATHS = {
     Path(path).as_posix() for path, _ in CONTENT_RENDERERS
@@ -36,7 +35,7 @@ def is_exempt(path: Path) -> bool:
     Renderers are matched by repository-relative path so a same-named file
     elsewhere cannot inherit the exemption.
     """
-    if path.name == "Theme.swift":
+    if path == theme_path(ROOT):
         return True
     return path.relative_to(ROOT).as_posix() in CONTENT_RENDERER_PATHS
 
@@ -171,7 +170,7 @@ VISUAL_CONSTANT_NAME = re.compile(
 )
 
 CONSTANT_DECLARATION = re.compile(
-    r"(?m)^[ \t]*(?:nonisolated[ \t]+)?(?:private[ \t]+)?"
+    r"(?m)^[ \t]*(?:nonisolated[ \t]+)?(?:(?:package|public|internal|private|fileprivate)[ \t]+)?"
     r"(?:static[ \t]+)?(?:let|var)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
     r"[^=\n]*=[ \t]*(-?[0-9]+(?:\.[0-9]+)?)\b"
 )
@@ -924,7 +923,11 @@ def main() -> int:
             print(failure, file=sys.stderr)
         return 1
 
-    files = sorted(SOURCE.rglob("*.swift"))
+    try:
+        files = ui_source_files(ROOT)
+    except ValueError as error:
+        print(f"design-token target policy failed: {error}", file=sys.stderr)
+        return 1
     findings: list[str] = []
     for path in files:
         if is_exempt(path):
@@ -937,7 +940,7 @@ def main() -> int:
             print(finding, file=sys.stderr)
         print(file=sys.stderr)
         print(
-            "Move the value into Sources/Sonovo/Theme.swift and reference the token.",
+            f"Move the value into {theme_path(ROOT).relative_to(ROOT)} and reference the token.",
             file=sys.stderr,
         )
         return 1

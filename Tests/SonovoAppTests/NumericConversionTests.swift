@@ -1,4 +1,8 @@
-import SonovoCore
+@testable import SonovoCodeFeature
+import SonovoDomainTypes
+import SonovoDesignSystem
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 import XCTest
 @testable import Sonovo
 

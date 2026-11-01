@@ -1,0 +1,2 @@
+import SonovoDocumentSupport
+public typealias DocumentHistoryLimits = SonovoDocumentSupport.DocumentHistoryLimits

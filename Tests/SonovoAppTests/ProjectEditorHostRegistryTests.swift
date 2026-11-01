@@ -1,3 +1,5 @@
+import SonovoWorkspaceHost
+import SonovoDesignSystem
 import AppKit
 import XCTest
 @testable import Sonovo

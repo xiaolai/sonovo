@@ -1,5 +1,7 @@
+import SonovoWorkspaceHost
 import Foundation
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 import XCTest
 @testable import Sonovo
 

@@ -1,3 +1,4 @@
+import SonovoTestFixtures
 import AppKit
 import AVFoundation
 import CoreMedia
@@ -7,7 +8,7 @@ import XCTest
 final class DistinctiveFixtureTests: XCTestCase {
     func testAdjacentFilmstripTimesProduceDifferentPictures() async throws {
         let url = try XCTUnwrap(
-            Bundle.module.url(
+            SonovoTestFixtures.bundle.url(
                 forResource: "distinctive",
                 withExtension: "mov",
                 subdirectory: "Fixtures"

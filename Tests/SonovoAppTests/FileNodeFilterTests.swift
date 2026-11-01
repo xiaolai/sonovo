@@ -1,3 +1,4 @@
+import SonovoDomainTypes
 import XCTest
 @testable import Sonovo
 

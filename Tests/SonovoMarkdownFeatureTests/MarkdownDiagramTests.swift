@@ -1,0 +1,367 @@
+@testable import SonovoMarkdownFeature
+@testable import SonovoDiagramUI
+import SonovoDiagramEngine
+import SonovoDomainTypes
+import SonovoDesignSystem
+import AppKit
+import XCTest
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
+
+@MainActor
+final class MarkdownDiagramTests: XCTestCase {
+    private var graphviz: WebDiagramRenderer { GraphvizRenderer.shared }
+    private var markmap: WebDiagramRenderer { MarkmapRenderer.shared }
+    private var theme: MarkdownTheme {
+        MarkdownThemeStore.shared.defaultTheme()
+    }
+
+    private let graphvizSource = "digraph G { rankdir=LR; A -> B; B -> C; }"
+    private let markmapSource = "# Root\n## Alpha\n## Beta"
+
+    override func setUp() async throws {
+        DiagramRenderer.clearCaches()
+    }
+
+    private func ast(_ source: String) -> SonovoAST {
+        MarkdownSyntaxAugmenter().augment(MarkdownParser.parseCanonical(source))
+    }
+
+    private func exportBody(
+        _ source: String,
+        includeDark: Bool = true,
+        byteBudget: Int = MarkdownLimits.maxDiagramExportBytes
+    ) async -> (assets: [String: MarkdownDiagramAsset], html: String) {
+        let ast = ast(source)
+        let assets = await MarkdownDiagramAssets.build(
+            from: ast,
+            includeDark: includeDark,
+            byteBudget: byteBudget
+        )
+        let html = MarkdownHTMLExporter.body(
+            ast,
+            context: MarkdownExportContext(
+                title: "Test",
+                documentURL: nil,
+                workspaceRoot: nil,
+                theme: theme,
+                diagrams: assets
+            )
+        )
+        return (assets, html)
+    }
+
+    // MARK: - Graphviz
+
+    /// The export's shared budget is armed before the diagram phase. Once it
+    /// is spent, the build stops instead of granting each remaining diagram a
+    /// fresh per-render timeout.
+    func testExhaustedSharedDeadlineSkipsRendering() async throws {
+        let ast = ast("```mermaid\ngraph TD; A-->B\n```\n")
+        XCTAssertFalse(MarkdownDiagramNodes.sources(from: ast).isEmpty)
+        let assets = await MarkdownDiagramAssets.build(
+            from: ast,
+            includeDark: true,
+            deadline: Date().addingTimeInterval(-1)
+        )
+        XCTAssertTrue(assets.isEmpty)
+    }
+
+
+
+
+
+
+
+    func testWorkflowFenceRendersThroughGraphviz() async throws {
+        let source = """
+            on: push
+            jobs:
+              build:
+                runs-on: macos-15
+                steps:
+                  - run: swift test
+              deploy:
+                needs: [build, missing]
+                runs-on: macos-15
+            """
+        let ast = ast("```yaml\n\(source)\n```\n")
+        guard case let .codeBlock(code, _) = ast.blocks.first else {
+            return XCTFail("expected a code block")
+        }
+        let diagram = try XCTUnwrap(DiagramPolicy.source(from: code))
+        XCTAssertEqual(diagram.engine, .workflow)
+        // The fence carries YAML; the dispatcher converts it to DOT.
+        XCTAssertTrue(diagram.source.contains("on: push"))
+
+        let svg = try await DiagramRenderer.render(diagram, variant: .light)
+        XCTAssertTrue(svg.markup.contains("<svg"))
+        XCTAssertTrue(svg.markup.contains("build"))
+        XCTAssertTrue(svg.markup.contains("deploy"))
+        XCTAssertTrue(svg.markup.lowercased().contains("#c0392b"))
+        XCTAssertTrue(svg.markup.lowercased().contains("#fafafb"))
+        XCTAssertTrue(svg.markup.contains("missing"))
+        XCTAssertFalse(svg.markup.lowercased().contains("<script"))
+        let image = try XCTUnwrap(NSImage(data: Data(svg.markup.utf8)))
+        XCTAssertGreaterThan(image.size.width, 0)
+        XCTAssertGreaterThan(image.size.height, 0)
+
+        // The dark restyle recolors text but must leave the error border.
+        let dark = try await DiagramRenderer.render(diagram, variant: .dark)
+        XCTAssertTrue(dark.markup.lowercased().contains("#e06c61"))
+        XCTAssertTrue(dark.markup.lowercased().contains("#1c1d20"))
+    }
+
+
+
+
+
+
+
+    // MARK: - Markmap
+
+
+
+
+
+
+
+
+
+    // MARK: - SVG fences
+
+    func testSVGFenceIsSanitizedWithoutAWebView() async throws {
+        let source = """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">
+        <script>alert(1)</script>
+        <rect width="10" height="10" onload="alert(2)" fill="red"/>
+        <text x="1" y="12">Hi</text>
+        </svg>
+        """
+        let svg = try await DiagramRenderer.renderSVGFence(
+            source,
+            variant: .light
+        )
+        XCTAssertTrue(svg.markup.contains("<rect"))
+        XCTAssertTrue(svg.markup.contains("<text"))
+        XCTAssertFalse(svg.markup.lowercased().contains("<script"))
+        XCTAssertFalse(svg.markup.contains("onload"))
+        XCTAssertFalse(svg.markup.contains("alert"))
+        XCTAssertEqual(svg.width, 40)
+        XCTAssertEqual(svg.height, 20)
+    }
+
+    func testSVGFenceRejectsRemoteAndMalformedContent() async throws {
+        let remote = """
+        <svg xmlns="http://www.w3.org/2000/svg">
+        <image href="https://example.com/x.png"/>
+        <use href="#local"/>
+        </svg>
+        """
+        let sanitized = try await DiagramRenderer.renderSVGFence(
+            remote,
+            variant: .light
+        )
+        XCTAssertFalse(sanitized.markup.contains("example.com"))
+        XCTAssertTrue(sanitized.markup.contains("#local"))
+
+        do {
+            _ = try await DiagramRenderer.renderSVGFence(
+                "<svg><rect></svg>",
+                variant: .light
+            )
+            XCTFail("malformed SVG must be rejected")
+        } catch {
+            XCTAssertEqual(error as? MarkdownDiagramError, .invalidOutput)
+        }
+    }
+
+    func testSVGFenceCacheReturnsTheSameResult() async throws {
+        let source = "<svg viewBox=\"0 0 10 10\"><rect width=\"1\" height=\"1\"/></svg>"
+        let first = try await DiagramRenderer.renderSVGFence(
+            source,
+            variant: .light
+        )
+        let second = try await DiagramRenderer.renderSVGFence(
+            source,
+            variant: .light
+        )
+        XCTAssertEqual(first, second)
+    }
+
+    func testOversizedSVGFenceIsRejectedByTheDispatcher() async throws {
+        let source = String(
+            repeating: "a",
+            count: MarkdownLimits.maxSVGFenceBytes + 1
+        )
+        do {
+            _ = try await DiagramRenderer.render(
+                DiagramSource(engine: .svg, source: source),
+                variant: .light
+            )
+            XCTFail("expected the byte cap to reject the fence")
+        } catch let error as MarkdownDiagramError {
+            XCTAssertEqual(error, .rejectedSource)
+        }
+    }
+
+    func testSVGFenceUsesTheDiagramDispatcher() async throws {
+        let source = "<svg viewBox=\"0 0 12 8\"><circle r=\"3\"/></svg>"
+        let svg = try await DiagramRenderer.render(
+            DiagramSource(engine: .svg, source: source),
+            variant: .light
+        )
+        XCTAssertTrue(svg.markup.contains("<circle"))
+        XCTAssertEqual(svg.width, 12)
+        XCTAssertEqual(svg.height, 8)
+    }
+
+    // MARK: - Isolation
+
+
+
+
+
+
+
+
+
+    // MARK: - Cache
+
+
+
+
+
+    // MARK: - AST collection
+
+    func testDocumentCollectionKeepsOrderAndRemovesDuplicates() {
+        let ast = ast(
+            """
+            ```markmap
+            # One
+            ```
+
+            ```dot
+            digraph { A -> B }
+            ```
+
+            > ```svg
+            > <svg viewBox="0 0 4 4"></svg>
+            > ```
+
+            ```markmap
+            # One
+            ```
+            """
+        )
+        let sources = MarkdownDiagramNodes.sources(from: ast)
+        XCTAssertEqual(sources.map(\.engine), [.markmap, .graphviz, .svg])
+        XCTAssertEqual(sources.first?.source, "# One\n")
+        XCTAssertEqual(
+            MarkdownDiagramNodes.mermaidSources(from: ast).isEmpty,
+            true
+        )
+    }
+
+    // MARK: - Export
+
+    func testExportEmbedsEveryEngine() async throws {
+        let source = """
+        ```mermaid
+        graph TD; A-->B;
+        ```
+
+        ```dot
+        digraph { A -> B }
+        ```
+
+        ```markmap
+        # Root
+        ## Child
+        ```
+
+        ```svg
+        <svg viewBox="0 0 10 10"><rect width="3" height="3"/></svg>
+        ```
+        """
+        let result = await exportBody(source)
+        XCTAssertEqual(result.assets.count, 4)
+        XCTAssertTrue(result.html.contains("<figure class=\"mermaid-block\">"))
+        XCTAssertTrue(
+            result.html.contains("<figure class=\"diagram-block graphviz-block\">")
+        )
+        XCTAssertTrue(
+            result.html.contains("<figure class=\"diagram-block markmap-block\">")
+        )
+        XCTAssertTrue(result.html.contains("<figure class=\"svg-fence\">"))
+        XCTAssertTrue(result.html.contains("<rect"))
+        XCTAssertFalse(result.html.contains("<script"))
+        XCTAssertFalse(result.html.contains("foreignObject"))
+        XCTAssertFalse(result.html.contains("example.com"))
+    }
+
+    func testGraphvizExportCarriesBothPalettes() async throws {
+        let result = await exportBody("```dot\ndigraph { A -> B }\n```\n")
+        XCTAssertEqual(result.assets.count, 1)
+        XCTAssertTrue(result.html.contains("diagram diagram-light"))
+        XCTAssertTrue(result.html.contains("diagram diagram-dark"))
+        XCTAssertTrue(result.html.contains("#E6E6E6"))
+    }
+
+    func testFailedGraphvizFallsBackToItsCodeBlock() async throws {
+        let result = await exportBody("```dot\ndigraph { A -> }\n```\n")
+        XCTAssertTrue(result.assets.isEmpty)
+        XCTAssertTrue(result.html.contains("<div class=\"code-block\">"))
+        XCTAssertTrue(result.html.contains("language-dot"))
+        XCTAssertFalse(result.html.contains("graphviz-block"))
+        XCTAssertFalse(result.html.contains("<svg"))
+    }
+
+    func testDiagramExportByteBudgetFallsBack() async throws {
+        let result = await exportBody(
+            "```dot\ndigraph { A -> B }\n```\n",
+            byteBudget: 1
+        )
+        XCTAssertTrue(result.assets.isEmpty)
+        XCTAssertTrue(result.html.contains("<div class=\"code-block\">"))
+        XCTAssertFalse(result.html.contains("graphviz-block"))
+    }
+
+    func testSVGFenceExportKeepsAuthoredColors() async throws {
+        let result = await exportBody(
+            "```svg\n<svg viewBox=\"0 0 10 10\"><rect width=\"3\" height=\"3\" fill=\"#123456\"/></svg>\n```\n",
+            includeDark: true
+        )
+        XCTAssertEqual(result.assets.count, 1)
+        XCTAssertTrue(result.html.contains("fill=\"#123456\""))
+        // One palette only: the author's colors are reused for both themes.
+        XCTAssertEqual(
+            result.html.components(separatedBy: "<figure class=\"svg-fence\">")
+                .count - 1,
+            1
+        )
+        XCTAssertFalse(result.html.contains("diagram-dark"))
+    }
+
+    func testPrintDocumentShowsOneGraphvizVariant() async throws {
+        let ast = ast("```dot\ndigraph { A -> B }\n```\n")
+        let assets = await MarkdownDiagramAssets.build(
+            from: ast,
+            includeDark: false
+        )
+        let html = MarkdownHTMLExporter.document(
+            ast,
+            context: MarkdownExportContext(
+                title: "Test",
+                documentURL: nil,
+                workspaceRoot: nil,
+                theme: theme,
+                diagrams: assets
+            ),
+            forPrint: true
+        )
+        XCTAssertTrue(html.contains("diagram diagram-light"))
+        XCTAssertFalse(html.contains("diagram diagram-dark"))
+        XCTAssertFalse(html.contains("<script"))
+    }
+}

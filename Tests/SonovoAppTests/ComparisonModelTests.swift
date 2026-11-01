@@ -1,3 +1,5 @@
+@testable import SonovoViewerFeature
+import SonovoDomainTypes
 import AppKit
 import XCTest
 @testable import Sonovo

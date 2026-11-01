@@ -1,3 +1,6 @@
+import SonovoWorkspaceHost
+import SonovoDomainTypes
+import SonovoDesignSystem
 import AppKit
 import SwiftUI
 
@@ -32,6 +35,9 @@ struct SidebarView: View {
                     ProductionListView(state: state)
                 } else {
                     ProjectAssetListView(state: state)
+                        // Standard sections retain the shared expansion state
+                        // across folder-project switches without native outline
+                        // row reuse. Do not key this subtree by active project.
                 }
             case .files:
                 FileTreeView(state: state)
@@ -192,25 +198,27 @@ private struct SidebarGroupedList<
     var body: some View {
         List(selection: selection) {
             ForEach(groups) { group in
-                DisclosureGroup(
-                    isExpanded: Binding(
-                        get: {
-                            expansion.isExpanded(
-                                group.id,
-                                forceExpanded: forceExpanded
-                            )
-                        },
-                        set: { expansion.setExpanded($0, for: group.id) }
-                    )
-                ) {
-                    ForEach(items(group)) { item in
-                        row(item).tag(item.id)
+                Section {
+                    if expansion.isExpanded(group.id, forceExpanded: forceExpanded) {
+                        ForEach(items(group)) { item in
+                            row(item).tag(item.id)
+                        }
                     }
-                } label: {
-                    SidebarSectionHeader(
-                        title: title(group),
-                        count: items(group).count
-                    )
+                } header: {
+                    Button {
+                        let expanded = expansion.isExpanded(group.id, forceExpanded: forceExpanded)
+                        expansion.setExpanded(!expanded, for: group.id)
+                    } label: {
+                        HStack(spacing: AppTheme.Spacing.xs) {
+                            Image(systemName: expansion.isExpanded(group.id, forceExpanded: forceExpanded)
+                                  ? "chevron.down" : "chevron.right")
+                            SidebarSectionHeader(title: title(group), count: items(group).count)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(title(group))
+                    .accessibilityValue(expansion.isExpanded(group.id, forceExpanded: forceExpanded)
+                                        ? "Expanded" : "Collapsed")
                 }
             }
         }

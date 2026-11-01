@@ -1,8 +1,11 @@
+@testable import SonovoMarkdownFeature
+import SonovoDesignSystem
 import AppKit
 import SwiftUI
 import XCTest
 @testable import Sonovo
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 
 @MainActor
 final class DefinitionListViewTests: XCTestCase {

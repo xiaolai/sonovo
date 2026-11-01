@@ -1,3 +1,9 @@
+import SonovoWorkspaceHost
+import SonovoMDXFeature
+import SonovoMarkdownFeature
+import SonovoTextEngine
+import SonovoDiagramUI
+import SonovoDesignSystem
 #if SONOVO_E2E_PROBE
 import AppKit
 import ApplicationServices
@@ -5,7 +11,8 @@ import Carbon
 import Darwin
 import PDFKit
 import SwiftUI
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 import SonovoMDXKit
 
 /// The acceptance probe for the R1 surface.

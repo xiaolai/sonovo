@@ -1,5 +1,7 @@
+import SonovoWorkspaceHost
 import XCTest
-import SonovoCore
+import SonovoMarkdownEngine
+import SonovoSubtitleEngine
 @testable import Sonovo
 
 final class ProjectWatcherFilterTests: XCTestCase {
